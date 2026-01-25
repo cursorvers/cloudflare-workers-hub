@@ -1,0 +1,44 @@
+name = "orchestrator-hub"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Workers AI binding
+[ai]
+binding = "AI"
+
+# D1 Database for Knowledge Base
+[[d1_databases]]
+binding = "DB"
+database_name = "knowledge-base"
+database_id = "4164f0fc-d6bb-4e78-86d1-2601d762d6de"
+
+# KV Namespace for caching
+[[kv_namespaces]]
+binding = "CACHE"
+id = "378a478680ec41d280737181530f58a9"
+
+# Environment variables
+[vars]
+ENVIRONMENT = "development"
+
+# Development settings
+[dev]
+port = 8787
+local_protocol = "http"
+
+# Production environment
+[env.production]
+vars = { ENVIRONMENT = "production" }
+
+[env.production.ai]
+binding = "AI"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "knowledge-base"
+database_id = "4164f0fc-d6bb-4e78-86d1-2601d762d6de"
+
+[[env.production.kv_namespaces]]
+binding = "CACHE"
+id = "378a478680ec41d280737181530f58a9"

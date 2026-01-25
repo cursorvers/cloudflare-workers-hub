@@ -1,0 +1,33 @@
+{
+  "name": "cloudflare-workers-hub",
+  "version": "1.0.0",
+  "description": "Orchestrator Hub - Cloudflare Workers integration for Claude Orchestrator",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:production": "wrangler deploy --env production",
+    "tail": "wrangler tail",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "orchestrator",
+    "webhook"
+  ],
+  "author": "masayuki",
+  "license": "MIT",
+  "type": "module",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241205.0",
+    "typescript": "^5.3.3",
+    "vitest": "^2.1.8",
+    "wrangler": "^3.99.0"
+  },
+  "dependencies": {
+    "@sentry/cloudflare": "^10.36.0"
+  }
+}

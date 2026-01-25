@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.wrangler/
+
+# Local secrets (never commit)
+.dev.vars
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.env.assistant
+
+# Claude Code state
+.claude/
+
+# Backup files
+*.backup
+*.bak
