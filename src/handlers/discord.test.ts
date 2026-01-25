@@ -27,7 +27,7 @@ import {
 } from './discord';
 
 // Store original crypto
-const originalCrypto = global.crypto;
+const originalCrypto = globalThis.crypto;
 
 // Helper to create mock Discord interactions
 function createMockInteraction(
@@ -82,8 +82,8 @@ describe('Ed25519 Signature Verification', () => {
     vi.clearAllMocks();
 
     // Mock crypto.subtle methods using vi.spyOn
-    vi.spyOn(global.crypto.subtle, 'importKey').mockImplementation(mockImportKey);
-    vi.spyOn(global.crypto.subtle, 'verify').mockImplementation(mockVerify);
+    vi.spyOn(globalThis.crypto.subtle, 'importKey').mockImplementation(mockImportKey);
+    vi.spyOn(globalThis.crypto.subtle, 'verify').mockImplementation(mockVerify);
   });
 
   afterEach(() => {
@@ -540,7 +540,6 @@ describe('Error Handling', () => {
       channel_id: 'ch_123',
     });
 
-    // @ts-expect-error Testing edge case with undefined channelMap
     const result = normalizeDiscordEvent(interaction, undefined);
 
     expect(result?.metadata.channelName).toBe('unknown');
@@ -638,7 +637,8 @@ describe('Integration Tests', () => {
     const channelMap = { ch_approvals: 'approvals' };
 
     const event = normalizeDiscordEvent(approvalInteraction, channelMap);
-    expect(event?.metadata.rule?.requiresConsensus).toBe(true);
+    const rule = event?.metadata.rule as { requiresConsensus?: boolean } | undefined;
+    expect(rule?.requiresConsensus).toBe(true);
     expect(requiresConsensus('approvals')).toBe(true);
     expect(isActionAllowed('approvals', 'approve')).toBe(true);
   });

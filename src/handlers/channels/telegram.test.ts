@@ -17,10 +17,14 @@ import {
   normalizeTelegramEvent,
   sendTelegramMessage,
   setTelegramWebhook,
+  isVoiceOrAudioMessage,
+  handleVoiceMessage,
   type TelegramUpdate,
   type TelegramMessage,
   type TelegramUser,
   type TelegramChat,
+  type TelegramVoice,
+  type TelegramAudio,
 } from './telegram';
 
 // Helper to create mock Telegram user
@@ -373,7 +377,7 @@ describe('Telegram Event Normalization', () => {
 describe('Telegram Message Sending', () => {
   beforeEach(() => {
     // Reset fetch mock before each test
-    global.fetch = vi.fn();
+    globalThis.fetch = vi.fn();
   });
 
   afterEach(() => {
@@ -383,7 +387,7 @@ describe('Telegram Message Sending', () => {
   describe('sendTelegramMessage', () => {
     it('should send message successfully', async () => {
       const mockResponse = { ok: true };
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         json: async () => mockResponse,
       });
 
@@ -411,7 +415,7 @@ describe('Telegram Message Sending', () => {
 
     it('should send message with reply', async () => {
       const mockResponse = { ok: true };
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         json: async () => mockResponse,
       });
 
@@ -433,7 +437,7 @@ describe('Telegram Message Sending', () => {
 
     it('should return false when Telegram API returns error', async () => {
       const mockResponse = { ok: false, description: 'Chat not found' };
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         json: async () => mockResponse,
       });
 
@@ -447,7 +451,7 @@ describe('Telegram Message Sending', () => {
     });
 
     it('should return false when network request fails', async () => {
-      global.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+      globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
 
       const result = await sendTelegramMessage(
         987654321,
@@ -460,7 +464,7 @@ describe('Telegram Message Sending', () => {
 
     it('should send message with HTML formatting', async () => {
       const mockResponse = { ok: true };
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         json: async () => mockResponse,
       });
 
@@ -477,7 +481,7 @@ describe('Telegram Message Sending', () => {
 
     it('should handle empty message text', async () => {
       const mockResponse = { ok: true };
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         json: async () => mockResponse,
       });
 
@@ -489,7 +493,7 @@ describe('Telegram Message Sending', () => {
 
     it('should handle very long message text', async () => {
       const mockResponse = { ok: true };
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         json: async () => mockResponse,
       });
 
@@ -505,7 +509,7 @@ describe('Telegram Message Sending', () => {
 
     it('should handle negative chat_id (channels)', async () => {
       const mockResponse = { ok: true };
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         json: async () => mockResponse,
       });
 
@@ -528,7 +532,7 @@ describe('Telegram Message Sending', () => {
 
 describe('Telegram Webhook Setup', () => {
   beforeEach(() => {
-    global.fetch = vi.fn();
+    globalThis.fetch = vi.fn();
   });
 
   afterEach(() => {
@@ -538,7 +542,7 @@ describe('Telegram Webhook Setup', () => {
   describe('setTelegramWebhook', () => {
     it('should set webhook successfully', async () => {
       const mockResponse = { ok: true };
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         json: async () => mockResponse,
       });
 
@@ -563,7 +567,7 @@ describe('Telegram Webhook Setup', () => {
 
     it('should return false when Telegram API returns error', async () => {
       const mockResponse = { ok: false, description: 'Invalid webhook URL' };
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         json: async () => mockResponse,
       });
 
@@ -576,7 +580,7 @@ describe('Telegram Webhook Setup', () => {
     });
 
     it('should return false when network request fails', async () => {
-      global.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+      globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
 
       const result = await setTelegramWebhook(
         'https://example.com/webhook',
@@ -588,7 +592,7 @@ describe('Telegram Webhook Setup', () => {
 
     it('should configure allowed_updates for message and callback_query', async () => {
       const mockResponse = { ok: true };
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         json: async () => mockResponse,
       });
 
@@ -604,7 +608,7 @@ describe('Telegram Webhook Setup', () => {
 
     it('should handle webhook URL with query parameters', async () => {
       const mockResponse = { ok: true };
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         json: async () => mockResponse,
       });
 
@@ -722,6 +726,314 @@ describe('Edge Cases and Error Handling', () => {
         const result = normalizeTelegramEvent(update);
         expect(result).not.toBeNull();
         expect(result!.content).toBe(maliciousText); // Should preserve as-is, sanitization handled elsewhere
+      });
+    });
+  });
+
+  describe('Voice and Audio Messages', () => {
+    // Helper to create mock voice message
+    function createMockVoice(overrides: Partial<TelegramVoice> = {}): TelegramVoice {
+      return {
+        file_id: 'AwACAgIAAxkBAAIC',
+        file_unique_id: 'AgADAgAD',
+        duration: 5,
+        mime_type: 'audio/ogg',
+        file_size: 12345,
+        ...overrides,
+      };
+    }
+
+    // Helper to create mock audio message
+    function createMockAudio(overrides: Partial<TelegramAudio> = {}): TelegramAudio {
+      return {
+        file_id: 'CQACAgIAAxkBAAIC',
+        file_unique_id: 'AgADAgAD',
+        duration: 180,
+        performer: 'Artist',
+        title: 'Song',
+        mime_type: 'audio/mpeg',
+        file_size: 3456789,
+        ...overrides,
+      };
+    }
+
+    describe('isVoiceOrAudioMessage', () => {
+      it('should detect voice message', () => {
+        const message: TelegramMessage = {
+          message_id: 1,
+          chat: createMockChat(),
+          date: 1609459200,
+          voice: createMockVoice(),
+        };
+
+        expect(isVoiceOrAudioMessage(message)).toBe(true);
+      });
+
+      it('should detect audio message', () => {
+        const message: TelegramMessage = {
+          message_id: 1,
+          chat: createMockChat(),
+          date: 1609459200,
+          audio: createMockAudio(),
+        };
+
+        expect(isVoiceOrAudioMessage(message)).toBe(true);
+      });
+
+      it('should return false for text message', () => {
+        const message = createMockMessage({ text: 'Hello' });
+        expect(isVoiceOrAudioMessage(message)).toBe(false);
+      });
+
+      it('should prioritize voice over audio', () => {
+        const message: TelegramMessage = {
+          message_id: 1,
+          chat: createMockChat(),
+          date: 1609459200,
+          voice: createMockVoice(),
+          audio: createMockAudio(),
+        };
+
+        expect(isVoiceOrAudioMessage(message)).toBe(true);
+      });
+    });
+
+    describe('normalizeTelegramEvent with voice', () => {
+      it('should return null for voice message (handled separately)', () => {
+        const update: TelegramUpdate = {
+          update_id: 10000,
+          message: {
+            message_id: 1,
+            chat: createMockChat(),
+            date: 1609459200,
+            voice: createMockVoice(),
+          },
+        };
+
+        const result = normalizeTelegramEvent(update);
+        expect(result).toBeNull();
+      });
+
+      it('should return null for audio message (handled separately)', () => {
+        const update: TelegramUpdate = {
+          update_id: 10000,
+          message: {
+            message_id: 1,
+            chat: createMockChat(),
+            date: 1609459200,
+            audio: createMockAudio(),
+          },
+        };
+
+        const result = normalizeTelegramEvent(update);
+        expect(result).toBeNull();
+      });
+    });
+
+    describe('handleVoiceMessage', () => {
+      let mockEnv: any;
+      let mockFetch: any;
+
+      beforeEach(() => {
+        // Mock environment
+        mockEnv = {
+          TELEGRAM_BOT_TOKEN: 'test-bot-token',
+          AI: {
+            run: vi.fn(),
+          },
+          DB: {
+            prepare: vi.fn(() => ({
+              bind: vi.fn(() => ({
+                run: vi.fn(),
+              })),
+            })),
+          },
+          AUDIO_STAGING: {
+            put: vi.fn(),
+          },
+        };
+
+        // Mock fetch for Telegram API
+        mockFetch = vi.fn();
+        globalThis.fetch = mockFetch;
+      });
+
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      it('should handle voice message successfully', async () => {
+        const update: TelegramUpdate = {
+          update_id: 10000,
+          message: {
+            message_id: 1,
+            from: createMockUser(),
+            chat: createMockChat(),
+            date: 1609459200,
+            voice: createMockVoice(),
+          },
+        };
+
+        // Mock Telegram file API responses
+        mockFetch
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+              ok: true,
+              result: {
+                file_id: 'AwACAgIAAxkBAAIC',
+                file_unique_id: 'AgADAgAD',
+                file_path: 'voice/file_1.ogg',
+              },
+            }),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            arrayBuffer: async () => new ArrayBuffer(1024),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ ok: true }),
+          });
+
+        // Mock AI transcription
+        mockEnv.AI.run.mockResolvedValue({ text: 'Hello, this is a test' });
+
+        const response = await handleVoiceMessage(mockEnv, update);
+        const result = await response.json();
+
+        expect(response.status).toBe(200);
+        expect(result.success).toBe(true);
+        expect(result.transcription).toBe('Hello, this is a test');
+        expect(result.duration).toBe(5);
+
+        // Verify AI was called
+        expect(mockEnv.AI.run).toHaveBeenCalledWith(
+          '@cf/openai/whisper',
+          expect.objectContaining({
+            audio: expect.any(Array),
+          })
+        );
+
+        // Verify R2 storage
+        expect(mockEnv.AUDIO_STAGING.put).toHaveBeenCalled();
+
+        // Verify conversation saved to DB
+        expect(mockEnv.DB.prepare).toHaveBeenCalled();
+      });
+
+      it('should return error when bot token missing', async () => {
+        const update: TelegramUpdate = {
+          update_id: 10000,
+          message: {
+            message_id: 1,
+            chat: createMockChat(),
+            date: 1609459200,
+            voice: createMockVoice(),
+          },
+        };
+
+        mockEnv.TELEGRAM_BOT_TOKEN = undefined;
+
+        const response = await handleVoiceMessage(mockEnv, update);
+        expect(response.status).toBe(500);
+      });
+
+      it('should return error when file download fails', async () => {
+        const update: TelegramUpdate = {
+          update_id: 10000,
+          message: {
+            message_id: 1,
+            chat: createMockChat(),
+            date: 1609459200,
+            voice: createMockVoice(),
+          },
+        };
+
+        // Mock file API failure
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            ok: false,
+            description: 'File not found',
+          }),
+        });
+
+        const response = await handleVoiceMessage(mockEnv, update);
+        expect(response.status).toBe(500);
+      });
+
+      it('should return error when transcription fails', async () => {
+        const update: TelegramUpdate = {
+          update_id: 10000,
+          message: {
+            message_id: 1,
+            chat: createMockChat(),
+            date: 1609459200,
+            voice: createMockVoice(),
+          },
+        };
+
+        // Mock successful download
+        mockFetch
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+              ok: true,
+              result: { file_path: 'voice/file_1.ogg' },
+            }),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            arrayBuffer: async () => new ArrayBuffer(1024),
+          });
+
+        // Mock AI failure
+        mockEnv.AI.run.mockRejectedValue(new Error('AI service unavailable'));
+
+        const response = await handleVoiceMessage(mockEnv, update);
+        expect(response.status).toBe(500);
+      });
+
+      it('should handle audio message (not just voice)', async () => {
+        const update: TelegramUpdate = {
+          update_id: 10000,
+          message: {
+            message_id: 1,
+            from: createMockUser(),
+            chat: createMockChat(),
+            date: 1609459200,
+            audio: createMockAudio(),
+          },
+        };
+
+        // Mock successful flow
+        mockFetch
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+              ok: true,
+              result: { file_path: 'audio/file_1.mp3' },
+            }),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            arrayBuffer: async () => new ArrayBuffer(1024),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ ok: true }),
+          });
+
+        mockEnv.AI.run.mockResolvedValue({ text: 'Transcribed audio' });
+
+        const response = await handleVoiceMessage(mockEnv, update);
+        const result = await response.json();
+
+        expect(response.status).toBe(200);
+        expect(result.success).toBe(true);
+        expect(result.transcription).toBe('Transcribed audio');
+        expect(result.duration).toBe(180);
       });
     });
   });

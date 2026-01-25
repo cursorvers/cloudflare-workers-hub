@@ -22,6 +22,9 @@ export interface Env {
   AI: Ai;
   DB?: D1Database;
   CACHE?: KVNamespace;
+  AUDIO_STAGING?: R2Bucket;
+  OBSIDIAN_VAULT?: R2Bucket;
+  KNOWLEDGE_INDEX?: VectorizeIndex;
   ENVIRONMENT: string;
   // Slack
   SLACK_BOT_TOKEN?: string;

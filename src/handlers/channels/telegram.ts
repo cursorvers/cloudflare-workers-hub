@@ -5,8 +5,9 @@
  * https://core.telegram.org/bots/api
  */
 
-import { NormalizedEvent } from '../../types';
+import { NormalizedEvent, Env } from '../../types';
 import { safeLog } from '../../utils/log-sanitizer';
+import { saveConversation } from '../memory';
 
 /**
  * Verify Telegram webhook signature using X-Telegram-Bot-Api-Secret-Token header
@@ -45,7 +46,27 @@ export interface TelegramMessage {
   chat: TelegramChat;
   date: number;
   text?: string;
+  voice?: TelegramVoice;
+  audio?: TelegramAudio;
   reply_to_message?: TelegramMessage;
+}
+
+export interface TelegramVoice {
+  file_id: string;
+  file_unique_id: string;
+  duration: number;
+  mime_type?: string;  // audio/ogg
+  file_size?: number;
+}
+
+export interface TelegramAudio {
+  file_id: string;
+  file_unique_id: string;
+  duration: number;
+  performer?: string;
+  title?: string;
+  mime_type?: string;
+  file_size?: number;
 }
 
 export interface TelegramUser {
@@ -83,11 +104,205 @@ export function validateTelegramUpdate(payload: unknown): payload is TelegramUpd
 }
 
 /**
+ * Telegram getFile API response
+ */
+interface TelegramFileResponse {
+  ok: boolean;
+  result?: {
+    file_id: string;
+    file_unique_id: string;
+    file_size?: number;
+    file_path?: string;
+  };
+  description?: string;
+}
+
+/**
+ * Download file from Telegram servers
+ */
+async function downloadTelegramFile(
+  botToken: string,
+  fileId: string
+): Promise<ArrayBuffer | null> {
+  try {
+    // Step 1: Get file path
+    const fileInfoResponse = await fetch(
+      `https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`
+    );
+    const fileInfo = await fileInfoResponse.json() as TelegramFileResponse;
+
+    if (!fileInfo.ok || !fileInfo.result?.file_path) {
+      safeLog.error('Failed to get file info from Telegram:', fileInfo.description);
+      return null;
+    }
+
+    // Step 2: Download file
+    const fileUrl = `https://api.telegram.org/file/bot${botToken}/${fileInfo.result.file_path}`;
+    const fileResponse = await fetch(fileUrl);
+
+    if (!fileResponse.ok) {
+      safeLog.error('Failed to download file from Telegram:', fileResponse.statusText);
+      return null;
+    }
+
+    return await fileResponse.arrayBuffer();
+  } catch (error) {
+    safeLog.error('Error downloading Telegram file:', error);
+    return null;
+  }
+}
+
+/**
+ * Transcribe audio using Workers AI
+ */
+async function transcribeAudio(
+  env: Env,
+  audioBuffer: ArrayBuffer
+): Promise<string | null> {
+  try {
+    // Workers AI Automatic Speech Recognition
+    // https://developers.cloudflare.com/workers-ai/models/automatic-speech-recognition/
+    const uint8Array = new Uint8Array(audioBuffer);
+    const audioArray = Array.from(uint8Array);
+
+    const response = await env.AI.run(
+      '@cf/openai/whisper',
+      {
+        audio: audioArray,
+      }
+    );
+
+    // Response format: { text: string }
+    if (response && typeof response === 'object' && 'text' in response) {
+      return (response as { text: string }).text;
+    }
+
+    safeLog.error('Unexpected AI response format:', response);
+    return null;
+  } catch (error) {
+    safeLog.error('Error transcribing audio:', error);
+    return null;
+  }
+}
+
+/**
+ * Handle voice/audio message
+ */
+export async function handleVoiceMessage(
+  env: Env,
+  update: TelegramUpdate
+): Promise<Response> {
+  const message = update.message;
+  if (!message) {
+    return new Response('No message found', { status: 400 });
+  }
+
+  const voiceOrAudio = message.voice || message.audio;
+  if (!voiceOrAudio) {
+    return new Response('No voice or audio found', { status: 400 });
+  }
+
+  const botToken = env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    safeLog.error('TELEGRAM_BOT_TOKEN not configured');
+    return new Response('Bot token not configured', { status: 500 });
+  }
+
+  try {
+    // Step 1: Download audio file
+    const audioBuffer = await downloadTelegramFile(botToken, voiceOrAudio.file_id);
+    if (!audioBuffer) {
+      await sendTelegramMessage(
+        message.chat.id,
+        '❌ 音声ファイルのダウンロードに失敗しました',
+        botToken,
+        message.message_id
+      );
+      return new Response('Failed to download audio', { status: 500 });
+    }
+
+    // Step 2: Optionally save to R2 for staging
+    if (env.AUDIO_STAGING) {
+      const filename = `telegram_${message.chat.id}_${message.message_id}_${Date.now()}.ogg`;
+      await env.AUDIO_STAGING.put(filename, audioBuffer, {
+        customMetadata: {
+          source: 'telegram',
+          chatId: String(message.chat.id),
+          messageId: String(message.message_id),
+          userId: String(message.from?.id || 'unknown'),
+          duration: String(voiceOrAudio.duration),
+        },
+      });
+      safeLog.info(`Audio saved to R2: ${filename}`);
+    }
+
+    // Step 3: Transcribe audio
+    const transcription = await transcribeAudio(env, audioBuffer);
+    if (!transcription) {
+      await sendTelegramMessage(
+        message.chat.id,
+        '❌ 音声の文字起こしに失敗しました',
+        botToken,
+        message.message_id
+      );
+      return new Response('Failed to transcribe audio', { status: 500 });
+    }
+
+    // Step 4: Save transcription to conversation history
+    await saveConversation(env, {
+      id: `telegram_${update.update_id}_${message.message_id}`,
+      user_id: String(message.from?.id || message.chat.id),
+      channel: 'telegram',
+      source: 'voice',
+      role: 'user',
+      content: transcription,
+      metadata: {
+        messageId: message.message_id,
+        chatId: message.chat.id,
+        duration: voiceOrAudio.duration,
+        fileId: voiceOrAudio.file_id,
+      },
+    });
+
+    // Step 5: Reply with transcription confirmation
+    const confirmationMessage = `✅ 音声を文字起こししました:\n\n"${transcription}"`;
+    await sendTelegramMessage(
+      message.chat.id,
+      confirmationMessage,
+      botToken,
+      message.message_id
+    );
+
+    return new Response(JSON.stringify({
+      success: true,
+      transcription,
+      duration: voiceOrAudio.duration
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    safeLog.error('Error handling voice message:', error);
+    return new Response('Internal error', { status: 500 });
+  }
+}
+
+/**
+ * Check if message contains voice or audio
+ */
+export function isVoiceOrAudioMessage(message: TelegramMessage): boolean {
+  return !!(message.voice || message.audio);
+}
+
+/**
  * Normalize Telegram update to ClawdBot format
  */
 export function normalizeTelegramEvent(update: TelegramUpdate): NormalizedEvent | null {
   const message = update.message;
-  if (!message?.text) return null;
+  if (!message) return null;
+
+  // Voice/audio messages will be handled separately by handleVoiceMessage
+  // This function only handles text messages
+  if (!message.text) return null;
 
   return {
     id: `telegram_${update.update_id}_${message.message_id}`,
@@ -150,6 +365,7 @@ export async function sendTelegramMessage(
 
 /**
  * Set webhook URL for Telegram bot
+ * Allows text messages, voice messages, audio messages, and callback queries
  */
 export async function setTelegramWebhook(
   webhookUrl: string,
@@ -164,6 +380,7 @@ export async function setTelegramWebhook(
         body: JSON.stringify({
           url: webhookUrl,
           allowed_updates: ['message', 'callback_query'],
+          // message will include text, voice, and audio
         }),
       }
     );
@@ -179,7 +396,9 @@ export async function setTelegramWebhook(
 export default {
   verifyTelegramSignature,
   validateTelegramUpdate,
+  isVoiceOrAudioMessage,
   normalizeTelegramEvent,
+  handleVoiceMessage,
   sendTelegramMessage,
   setTelegramWebhook,
 };
