@@ -1,4 +1,10 @@
-# Transcription Service
+# Services
+
+This directory contains core services for the Cloudflare Workers Hub.
+
+## Available Services
+
+### Transcription Service
 
 A robust Whisper-based audio transcription service for Cloudflare Workers AI.
 
@@ -685,9 +691,82 @@ const id = await storeKnowledge(env, {
 });
 ```
 
+---
+
+## Limitless Service
+
+Integration with Limitless.ai API for syncing Pendant voice recordings.
+
+### Features
+
+✅ **Lifelog Fetching**
+- Fetch recent lifelogs from Limitless API
+- Support for pagination with cursors
+- Time range filtering
+
+✅ **Audio Download**
+- Download audio as Ogg Opus or MP3
+- Maximum 2 hours per download
+- Automatic validation
+
+✅ **Knowledge Sync**
+- Sync lifelogs to knowledge service
+- Optional audio storage in R2
+- Batch processing with pagination
+
+✅ **Retry Logic**
+- Exponential backoff (1s → 2s → 4s)
+- Up to 3 retry attempts
+- Skip retry for client errors (4xx)
+
+### Basic Usage
+
+```typescript
+import { syncToKnowledge } from './services/limitless';
+
+// Sync last 24 hours of recordings
+const result = await syncToKnowledge(env, apiKey, {
+  userId: 'user-123',
+  maxAgeHours: 24,
+  includeAudio: false,
+});
+
+console.log(`Synced: ${result.synced}`);
+console.log(`Skipped: ${result.skipped}`);
+console.log(`Errors: ${result.errors.length}`);
+```
+
+### API Endpoints
+
+**GET** `/api/limitless/sync?userId=<userId>`
+- Manual sync trigger for a user
+- Requires `MONITORING_API_KEY`
+
+**POST** `/api/limitless/sync`
+- Custom sync with options
+- Requires `MONITORING_API_KEY`
+
+**GET** `/api/limitless/config`
+- Get current configuration
+- Requires `MONITORING_API_KEY`
+
+### Configuration
+
+Set `LIMITLESS_API_KEY` in your environment:
+
+```bash
+wrangler secret put LIMITLESS_API_KEY
+```
+
+### More Information
+
+See [docs/LIMITLESS_INTEGRATION.md](../../docs/LIMITLESS_INTEGRATION.md) for detailed documentation and examples.
+
+---
+
 ## Contributing
 
-When extending the knowledge service:
+When extending these services:
 
 1. **Add tests** - Maintain test coverage
 2. **Update schema** - Create new migrations for D1 changes

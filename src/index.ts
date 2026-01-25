@@ -36,6 +36,7 @@ import { handleMemoryAPI } from './handlers/memory-api';
 import { handleCronAPI } from './handlers/cron-api';
 import { handleAdminAPI } from './handlers/admin-api';
 import { handleDaemonAPI } from './handlers/daemon-api';
+import { handleLimitlessAPI } from './handlers/limitless-api';
 import { isSimpleQuery, handleWithWorkersAI } from './ai';
 import { generateEventId, detectSource } from './router';
 
@@ -649,6 +650,11 @@ export default {
     // Daemon Health API endpoints (for monitoring active daemons)
     if (path.startsWith('/api/daemon')) {
       return handleDaemonAPI(request, env, path);
+    }
+
+    // Limitless API endpoints (for Pendant voice recording sync)
+    if (path.startsWith('/api/limitless')) {
+      return handleLimitlessAPI(request, env, path);
     }
 
     // Webhook endpoints

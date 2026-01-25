@@ -48,4 +48,6 @@ export interface Env {
   MEMORY_API_KEY?: string;         // /api/memory endpoints
   ADMIN_API_KEY?: string;          // /api/admin endpoints (future)
   MONITORING_API_KEY?: string;     // /health, /metrics endpoints
+  // Limitless.ai Integration
+  LIMITLESS_API_KEY?: string;      // Limitless.ai API key for Pendant sync
 }
