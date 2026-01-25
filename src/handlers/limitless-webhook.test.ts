@@ -365,10 +365,12 @@ describe('handleLimitlessWebhook', () => {
       const env = createMockEnv();
       const mockKV = env.CACHE as any;
 
-      // Mock existing stats
-      mockKV.get.mockImplementation((key: string) => {
+      // Mock existing stats - handle 'json' type argument
+      mockKV.get.mockImplementation((key: string, type?: string) => {
         if (key === 'limitless:webhook_stats:test-user') {
-          return Promise.resolve(JSON.stringify({ totalSyncs: 5 }));
+          const stats = { totalSyncs: 5 };
+          // When called with 'json', return parsed object; otherwise return string
+          return Promise.resolve(type === 'json' ? stats : JSON.stringify(stats));
         }
         return Promise.resolve(null);
       });

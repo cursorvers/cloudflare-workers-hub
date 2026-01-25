@@ -24,6 +24,7 @@ vi.mock('./knowledge', () => ({
 describe('Limitless Service', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockFetch.mockReset(); // Reset mock implementation between tests
   });
 
   describe('getRecentLifelogs', () => {
