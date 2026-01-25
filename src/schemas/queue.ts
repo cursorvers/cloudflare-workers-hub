@@ -42,3 +42,26 @@ export const UpdateStatusSchema = z.object({
 });
 
 export type UpdateStatusInput = z.infer<typeof UpdateStatusSchema>;
+
+/**
+ * Schema for lease data validation
+ */
+export const LeaseSchema = z.object({
+  workerId: z.string(),
+  claimNonce: z.string(),
+  claimedAt: z.string(),
+  expiresAt: z.string(),
+});
+
+export type LeaseData = z.infer<typeof LeaseSchema>;
+
+/**
+ * Schema for task result
+ */
+export const ResultSchema = z.object({
+  success: z.boolean(),
+  output: z.unknown().optional(),
+  error: z.string().optional(),
+});
+
+export type ResultInput = z.infer<typeof ResultSchema>;

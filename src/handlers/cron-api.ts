@@ -15,8 +15,9 @@ import cronHandler, { CreateTaskInput, UpdateTaskInput } from './cron';
 import { safeLog, maskUserId } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
 import { verifyAPIKey, authorizeUserAccess } from './queue';
-import { validateRequestBody } from '../schemas/validation-helper';
+import { validateRequestBody, validatePathParameter } from '../schemas/validation-helper';
 import { CreateTaskSchema, UpdateTaskSchema } from '../schemas/cron';
+import { UserIdPathSchema, TaskIdPathSchema } from '../schemas/path-params';
 
 export async function handleCronAPI(request: Request, env: Env, path: string): Promise<Response> {
   // Verify API key with admin scope
@@ -38,6 +39,12 @@ export async function handleCronAPI(request: Request, env: Env, path: string): P
   const userTasksMatch = path.match(/^\/api\/cron\/tasks\/([^/]+)$/);
   if (userTasksMatch && request.method === 'GET') {
     const userId = userTasksMatch[1];
+
+    // SECURITY: Validate userId format
+    const validation = validatePathParameter(userId, UserIdPathSchema, 'userId', '/api/cron/tasks/:userId');
+    if (!validation.success) {
+      return validation.response;
+    }
 
     // SECURITY: Verify that the API key is authorized to access this userId
     if (!await authorizeUserAccess(request, userId, env)) {
@@ -85,7 +92,14 @@ export async function handleCronAPI(request: Request, env: Env, path: string): P
         headers: { 'Content-Type': 'application/json' },
       });
     } catch (error) {
-      return new Response(JSON.stringify({ error: String(error) }), {
+      safeLog.error('[Cron API] Task creation failed', {
+        endpoint: '/tasks (POST)',
+        error: String(error),
+      });
+      return new Response(JSON.stringify({
+        error: 'Failed to create scheduled task',
+        type: 'validation_error',
+      }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -96,6 +110,13 @@ export async function handleCronAPI(request: Request, env: Env, path: string): P
   const taskMatch = path.match(/^\/api\/cron\/task\/([^/]+)$/);
   if (taskMatch && request.method === 'GET') {
     const taskId = taskMatch[1];
+
+    // SECURITY: Validate taskId format
+    const validation = validatePathParameter(taskId, TaskIdPathSchema, 'taskId', '/api/cron/task/:id');
+    if (!validation.success) {
+      return validation.response;
+    }
+
     const task = await cronHandler.getTaskById(env, taskId);
     if (!task) {
       return new Response(JSON.stringify({ error: 'Task not found' }), {
@@ -125,6 +146,12 @@ export async function handleCronAPI(request: Request, env: Env, path: string): P
   // PUT /api/cron/task/:id - Update task
   if (taskMatch && request.method === 'PUT') {
     const taskId = taskMatch[1];
+
+    // SECURITY: Validate taskId format
+    const taskIdValidation = validatePathParameter(taskId, TaskIdPathSchema, 'taskId', '/api/cron/task/:id');
+    if (!taskIdValidation.success) {
+      return taskIdValidation.response;
+    }
 
     // Fetch task first to verify ownership
     const existingTask = await cronHandler.getTaskById(env, taskId);
@@ -164,6 +191,12 @@ export async function handleCronAPI(request: Request, env: Env, path: string): P
   if (taskMatch && request.method === 'DELETE') {
     const taskId = taskMatch[1];
 
+    // SECURITY: Validate taskId format
+    const taskIdValidation = validatePathParameter(taskId, TaskIdPathSchema, 'taskId', '/api/cron/task/:id');
+    if (!taskIdValidation.success) {
+      return taskIdValidation.response;
+    }
+
     // Fetch task first to verify ownership
     const existingTask = await cronHandler.getTaskById(env, taskId);
     if (!existingTask) {
@@ -196,6 +229,12 @@ export async function handleCronAPI(request: Request, env: Env, path: string): P
   const toggleMatch = path.match(/^\/api\/cron\/task\/([^/]+)\/toggle$/);
   if (toggleMatch && request.method === 'POST') {
     const taskId = toggleMatch[1];
+
+    // SECURITY: Validate taskId format
+    const validation = validatePathParameter(taskId, TaskIdPathSchema, 'taskId', '/api/cron/task/:id/toggle');
+    if (!validation.success) {
+      return validation.response;
+    }
 
     // Fetch task first to verify ownership
     const existingTask = await cronHandler.getTaskById(env, taskId);
@@ -237,6 +276,12 @@ export async function handleCronAPI(request: Request, env: Env, path: string): P
   const executedMatch = path.match(/^\/api\/cron\/task\/([^/]+)\/executed$/);
   if (executedMatch && request.method === 'POST') {
     const taskId = executedMatch[1];
+
+    // SECURITY: Validate taskId format
+    const validation = validatePathParameter(taskId, TaskIdPathSchema, 'taskId', '/api/cron/task/:id/executed');
+    if (!validation.success) {
+      return validation.response;
+    }
 
     // Fetch task first to verify ownership
     const existingTask = await cronHandler.getTaskById(env, taskId);

@@ -38,9 +38,16 @@ const SENSITIVE_PATTERNS: Array<{
     description: 'GitHub OAuth Token',
   },
 
-  // Passwords / Secrets
+  // JWT tokens (must come before generic password pattern)
   {
-    pattern: /(password|passwd|pwd|secret|token|api_key|apikey|auth)["']?\s*[:=]\s*["']?([^"'\s,}]{8,})["']?/gi,
+    pattern: /\beyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*\b/g,
+    replacement: '***JWT_TOKEN***',
+    description: 'JWT Token',
+  },
+
+  // Passwords / Secrets (negative lookahead to avoid matching already redacted values or JWT tokens)
+  {
+    pattern: /(password|passwd|pwd|secret|token|api_key|apikey|auth)["']?\s*[:=]\s*["']?(?!\*\*\*|eyJ)([^"'\s,}]{8,})["']?/gi,
     replacement: '$1=***REDACTED***',
     description: 'Password/Secret Assignment',
   },
@@ -64,13 +71,6 @@ const SENSITIVE_PATTERNS: Array<{
     pattern: /\b[0-9]{4}[-\s]?[0-9]{4}[-\s]?[0-9]{4}[-\s]?[0-9]{4}\b/g,
     replacement: '****-****-****-****',
     description: 'Credit Card Number',
-  },
-
-  // JWT tokens
-  {
-    pattern: /\beyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*\b/g,
-    replacement: '***JWT_TOKEN***',
-    description: 'JWT Token',
   },
 
   // Authorization headers
@@ -220,19 +220,22 @@ export function sanitizeObject<T>(obj: T, depth = 0): T {
 
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(obj)) {
-    // センシティブなキー名の場合は値を完全にマスク
+    // センシティブなキー名の場合は値を完全にマスク（スカラー値のみ）
     const lowerKey = key.toLowerCase();
-    if (
+    const isSensitiveKey =
       lowerKey.includes('password') ||
       lowerKey.includes('secret') ||
       lowerKey.includes('token') ||
       lowerKey.includes('apikey') ||
       lowerKey.includes('api_key') ||
       lowerKey.includes('authorization') ||
-      lowerKey.includes('credential')
-    ) {
+      lowerKey.includes('credential');
+
+    if (isSensitiveKey && (typeof value === 'string' || typeof value === 'number')) {
+      // スカラー値の場合のみマスク
       result[key] = '***REDACTED***';
     } else {
+      // オブジェクトや配列の場合は再帰的にサニタイズ
       result[key] = sanitizeObject(value, depth + 1);
     }
   }
@@ -241,27 +244,72 @@ export function sanitizeObject<T>(obj: T, depth = 0): T {
 }
 
 /**
- * 安全なログ出力ラッパー
+ * 安全なログ出力ラッパー（構造化JSONログ対応）
  */
 export const safeLog = {
-  log: (message: string, ...args: unknown[]): void => {
-    console.log(sanitize(message), ...args.map((arg) => sanitizeObject(arg)));
+  log: (message: string, context?: unknown): void => {
+    const contextObj = typeof context === 'object' && context !== null && !Array.isArray(context)
+      ? (context as Record<string, unknown>)
+      : {};
+    const structured = {
+      timestamp: new Date().toISOString(),
+      level: 'info',
+      message: sanitize(message),
+      ...sanitizeObject(contextObj),
+    };
+    console.log(JSON.stringify(structured));
   },
 
-  info: (message: string, ...args: unknown[]): void => {
-    console.info(sanitize(message), ...args.map((arg) => sanitizeObject(arg)));
+  info: (message: string, context?: unknown): void => {
+    const contextObj = typeof context === 'object' && context !== null && !Array.isArray(context)
+      ? (context as Record<string, unknown>)
+      : {};
+    const structured = {
+      timestamp: new Date().toISOString(),
+      level: 'info',
+      message: sanitize(message),
+      ...sanitizeObject(contextObj),
+    };
+    console.info(JSON.stringify(structured));
   },
 
-  warn: (message: string, ...args: unknown[]): void => {
-    console.warn(sanitize(message), ...args.map((arg) => sanitizeObject(arg)));
+  warn: (message: string, context?: unknown): void => {
+    const contextObj = typeof context === 'object' && context !== null && !Array.isArray(context)
+      ? (context as Record<string, unknown>)
+      : {};
+    const structured = {
+      timestamp: new Date().toISOString(),
+      level: 'warn',
+      message: sanitize(message),
+      ...sanitizeObject(contextObj),
+    };
+    console.warn(JSON.stringify(structured));
   },
 
-  error: (message: string, ...args: unknown[]): void => {
-    console.error(sanitize(message), ...args.map((arg) => sanitizeObject(arg)));
+  error: (message: string, context?: unknown): void => {
+    const contextObj = typeof context === 'object' && context !== null && !Array.isArray(context)
+      ? (context as Record<string, unknown>)
+      : {};
+    const structured = {
+      timestamp: new Date().toISOString(),
+      level: 'error',
+      message: sanitize(message),
+      ...sanitizeObject(contextObj),
+    };
+    console.error(JSON.stringify(structured));
   },
 
-  debug: (message: string, ...args: unknown[]): void => {
-    console.debug(sanitize(message), ...args.map((arg) => sanitizeObject(arg)));
+  debug: (message: string, context?: unknown): void => {
+    const contextObj = typeof context === 'object' && context !== null && !Array.isArray(context)
+      ? (context as Record<string, unknown>)
+      : {};
+    const structured = {
+      timestamp: new Date().toISOString(),
+      level: 'debug',
+      message: sanitize(message),
+      ...sanitizeObject(contextObj),
+    };
+    console.debug(JSON.stringify(structured));
   },
 };
 

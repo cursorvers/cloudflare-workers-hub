@@ -41,6 +41,9 @@ import { generateEventId, detectSource } from './router';
 
 export type { Env };
 
+// Cache version for schema changes (update when KV schema changes)
+const CACHE_VERSION = 'v1';
+
 // Initialize CommHub Adapter (KV will be set on first request)
 const commHub = new CommHubAdapter();
 
@@ -234,7 +237,7 @@ async function handleGenericWebhook(event: NormalizedEvent, env: Env): Promise<R
 
   // Cache event metadata (if KV is available)
   if (env.CACHE) {
-    await env.CACHE.put(`event:${event.id}`, JSON.stringify(event), { expirationTtl: 3600 });
+    await env.CACHE.put(`${CACHE_VERSION}:event:${event.id}`, JSON.stringify(event), { expirationTtl: 3600 });
   }
 
   if (!event.requiresOrchestrator) {
@@ -301,8 +304,8 @@ async function handleClawdBotWebhook(request: Request, env: Env): Promise<Respon
         headers: { 'Content-Type': 'application/json' },
       });
     } catch (error) {
-      safeLog.error('[FAQ] Workers AI error', { error: String(error) });
-      // Fall through to Orchestrator
+      safeLog.error('[ClawdBot] Workers AI error', { error: String(error) });
+      // Fall through to Orchestrator instead of returning OK silently
     }
   }
 
@@ -382,7 +385,8 @@ async function handleTelegramWebhook(request: Request, env: Env): Promise<Respon
 
       return new Response('OK', { status: 200 });
     } catch (error) {
-      safeLog.error('[Telegram FAQ] error', { error: String(error) });
+      safeLog.error('[Telegram] Workers AI error', { error: String(error) });
+      // Fall through to Orchestrator instead of returning OK silently
     }
   }
 
@@ -469,13 +473,15 @@ async function handleWhatsAppWebhook(request: Request, env: Env): Promise<Respon
             message.id
           );
         }
+        continue; // Successfully handled, move to next message
       } catch (error) {
-        safeLog.error('[WhatsApp FAQ] error', { error: String(error) });
+        safeLog.error('[WhatsApp] Workers AI error', { error: String(error) });
+        // Fall through to Orchestrator instead of silently failing
       }
-    } else {
-      // Forward to Orchestrator for complex requests
-      await handleGenericWebhook(event, env);
     }
+
+    // Forward to Orchestrator for complex requests or AI failures
+    await handleGenericWebhook(event, env);
   }
 
   return new Response('OK', { status: 200 });

@@ -66,7 +66,10 @@ export async function handleAdminAPI(request: Request, env: Env, path: string): 
       });
     } catch (error) {
       safeLog.error('[Admin API] Error creating mapping', { error: String(error) });
-      return new Response(JSON.stringify({ error: String(error) }), {
+      return new Response(JSON.stringify({
+        error: 'Failed to create API key mapping',
+        type: 'internal_error',
+      }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -109,7 +112,10 @@ export async function handleAdminAPI(request: Request, env: Env, path: string): 
       });
     } catch (error) {
       safeLog.error('[Admin API] Error deleting mapping', { error: String(error) });
-      return new Response(JSON.stringify({ error: String(error) }), {
+      return new Response(JSON.stringify({
+        error: 'Failed to delete API key mapping',
+        type: 'internal_error',
+      }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' },
       });

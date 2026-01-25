@@ -14,8 +14,9 @@ import memoryHandler, { ConversationMessage, UserPreferences } from './memory';
 import { safeLog, maskUserId } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
 import { verifyAPIKey, authorizeUserAccess } from './queue';
-import { validateRequestBody } from '../schemas/validation-helper';
+import { validateRequestBody, validatePathParameter } from '../schemas/validation-helper';
 import { ConversationMessageSchema, UserPreferencesSchema } from '../schemas/memory';
+import { UserIdPathSchema, ChannelPathSchema } from '../schemas/path-params';
 
 export async function handleMemoryAPI(request: Request, env: Env, path: string): Promise<Response> {
   // Verify API Key with 'memory' scope
@@ -40,6 +41,12 @@ export async function handleMemoryAPI(request: Request, env: Env, path: string):
   if (contextMatch && request.method === 'GET') {
     const userId = contextMatch[1];
 
+    // SECURITY: Validate userId format
+    const validation = validatePathParameter(userId, UserIdPathSchema, 'userId', '/api/memory/context/:userId');
+    if (!validation.success) {
+      return validation.response;
+    }
+
     // SECURITY: Verify that the API key is authorized to access this userId
     if (!await authorizeUserAccess(request, userId, env)) {
       safeLog.warn('[Memory API] Unauthorized access attempt', {
@@ -53,8 +60,21 @@ export async function handleMemoryAPI(request: Request, env: Env, path: string):
     }
 
     const url = new URL(request.url);
-    const channel = url.searchParams.get('channel') || undefined;
-    const maxTokens = parseInt(url.searchParams.get('maxTokens') || '2000');
+    const channelParam = url.searchParams.get('channel');
+    let channel: string | undefined = undefined;
+
+    // SECURITY: Validate channel parameter if present
+    if (channelParam) {
+      const channelValidation = validatePathParameter(channelParam, ChannelPathSchema, 'channel', '/api/memory/context/:userId');
+      if (!channelValidation.success) {
+        return channelValidation.response;
+      }
+      channel = channelValidation.data;
+    }
+
+    const maxTokensParam = parseInt(url.searchParams.get('maxTokens') || '2000', 10);
+    // Validate maxTokens is within bounds (100-4000)
+    const maxTokens = Math.min(Math.max(maxTokensParam, 100), 4000);
 
     const context = await memoryHandler.getConversationContext(env, userId, channel, maxTokens);
     return new Response(JSON.stringify({ context, userId }), {
@@ -66,6 +86,12 @@ export async function handleMemoryAPI(request: Request, env: Env, path: string):
   const historyMatch = path.match(/^\/api\/memory\/history\/([^/]+)$/);
   if (historyMatch && request.method === 'GET') {
     const userId = historyMatch[1];
+
+    // SECURITY: Validate userId format
+    const validation = validatePathParameter(userId, UserIdPathSchema, 'userId', '/api/memory/history/:userId');
+    if (!validation.success) {
+      return validation.response;
+    }
 
     // SECURITY: Verify that the API key is authorized to access this userId
     if (!await authorizeUserAccess(request, userId, env)) {
@@ -80,8 +106,21 @@ export async function handleMemoryAPI(request: Request, env: Env, path: string):
     }
 
     const url = new URL(request.url);
-    const channel = url.searchParams.get('channel') || undefined;
-    const limit = parseInt(url.searchParams.get('limit') || '20');
+    const channelParam = url.searchParams.get('channel');
+    let channel: string | undefined = undefined;
+
+    // SECURITY: Validate channel parameter if present
+    if (channelParam) {
+      const channelValidation = validatePathParameter(channelParam, ChannelPathSchema, 'channel', '/api/memory/history/:userId');
+      if (!channelValidation.success) {
+        return channelValidation.response;
+      }
+      channel = channelValidation.data;
+    }
+
+    const limitParam = parseInt(url.searchParams.get('limit') || '20', 10);
+    // Validate limit is within bounds (1-100)
+    const limit = Math.min(Math.max(limitParam, 1), 100);
 
     const history = await memoryHandler.getRecentConversations(env, userId, channel, limit);
     return new Response(JSON.stringify({ history, count: history.length }), {
@@ -120,6 +159,12 @@ export async function handleMemoryAPI(request: Request, env: Env, path: string):
   const prefsMatch = path.match(/^\/api\/memory\/preferences\/([^/]+)$/);
   if (prefsMatch && request.method === 'GET') {
     const userId = prefsMatch[1];
+
+    // SECURITY: Validate userId format
+    const validation = validatePathParameter(userId, UserIdPathSchema, 'userId', '/api/memory/preferences/:userId');
+    if (!validation.success) {
+      return validation.response;
+    }
 
     // SECURITY: Verify that the API key is authorized to access this userId
     if (!await authorizeUserAccess(request, userId, env)) {

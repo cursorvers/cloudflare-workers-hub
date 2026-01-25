@@ -35,14 +35,13 @@ function verifyMonitoringKey(request: Request, env: Env): boolean {
   }
 
   // Constant-time comparison to prevent timing attacks
-  if (apiKey.length !== expectedKey.length) {
-    safeLog.warn('[Monitoring] Invalid API key length');
-    return false;
-  }
-
-  let result = 0;
-  for (let i = 0; i < apiKey.length; i++) {
-    result |= apiKey.charCodeAt(i) ^ expectedKey.charCodeAt(i);
+  // Always execute full comparison regardless of length to prevent timing leaks
+  let result = apiKey.length === expectedKey.length ? 0 : 1;
+  const maxLen = Math.max(apiKey.length, expectedKey.length);
+  for (let i = 0; i < maxLen; i++) {
+    const a = i < apiKey.length ? apiKey.charCodeAt(i) : 0;
+    const b = i < expectedKey.length ? expectedKey.charCodeAt(i) : 0;
+    result |= a ^ b;
   }
 
   if (result !== 0) {

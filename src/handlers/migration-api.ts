@@ -34,7 +34,8 @@ export async function getMigrationStatusHandler(kv: KVNamespace): Promise<Respon
     safeLog.error('[Migration API] Failed to get status', { error: String(error) });
     return new Response(JSON.stringify({
       success: false,
-      error: String(error),
+      error: 'Failed to get migration status',
+      type: 'internal_error',
     }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
@@ -92,7 +93,8 @@ export async function runMigrationHandler(kv: KVNamespace): Promise<Response> {
     safeLog.error('[Migration API] Migration failed', { error: String(error) });
     return new Response(JSON.stringify({
       success: false,
-      error: String(error),
+      error: 'Migration failed',
+      type: 'internal_error',
     }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
@@ -142,7 +144,8 @@ export async function rollbackMigrationHandler(kv: KVNamespace): Promise<Respons
     safeLog.error('[Migration API] Rollback failed', { error: String(error) });
     return new Response(JSON.stringify({
       success: false,
-      error: String(error),
+      error: 'Rollback failed',
+      type: 'internal_error',
     }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },

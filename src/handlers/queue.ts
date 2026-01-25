@@ -11,13 +11,19 @@
 import { Env } from '../types';
 import { safeLog, maskUserId } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
-import { validateRequestBody } from '../schemas/validation-helper';
+import { validateRequestBody, validatePathParameter } from '../schemas/validation-helper';
 import {
   ClaimTaskSchema,
   ReleaseTaskSchema,
   RenewTaskSchema,
-  UpdateStatusSchema
+  UpdateStatusSchema,
+  LeaseSchema,
+  ResultSchema
 } from '../schemas/queue';
+import { TaskIdPathSchema } from '../schemas/path-params';
+
+// Cache version for schema changes (update when KV schema changes)
+const CACHE_VERSION = 'v1';
 
 type APIScope = 'queue' | 'memory' | 'admin';
 
@@ -47,14 +53,13 @@ export function verifyAPIKey(request: Request, env: Env, scope: APIScope = 'queu
   }
 
   // Constant-time comparison to prevent timing attacks
-  if (apiKey.length !== expectedKey.length) {
-    safeLog.warn(`[API] Invalid API key for scope: ${scope}`);
-    return false;
-  }
-
-  let result = 0;
-  for (let i = 0; i < apiKey.length; i++) {
-    result |= apiKey.charCodeAt(i) ^ expectedKey.charCodeAt(i);
+  // Always execute full comparison regardless of length to prevent timing leaks
+  let result = apiKey.length === expectedKey.length ? 0 : 1;
+  const maxLen = Math.max(apiKey.length, expectedKey.length);
+  for (let i = 0; i < maxLen; i++) {
+    const a = i < apiKey.length ? apiKey.charCodeAt(i) : 0;
+    const b = i < expectedKey.length ? expectedKey.charCodeAt(i) : 0;
+    result |= a ^ b;
   }
 
   if (result !== 0) {
@@ -128,17 +133,13 @@ export async function authorizeUserAccess(
   }
 
   // Constant-time comparison to prevent timing attacks
-  if (derivedUserId.length !== requestedUserId.length) {
-    safeLog.warn('[API] Authorization failed: userId mismatch', {
-      requested: maskUserId(requestedUserId),
-      derived: maskUserId(derivedUserId),
-    });
-    return false;
-  }
-
-  let result = 0;
-  for (let i = 0; i < derivedUserId.length; i++) {
-    result |= derivedUserId.charCodeAt(i) ^ requestedUserId.charCodeAt(i);
+  // Always execute full comparison regardless of length to prevent timing leaks
+  let result = derivedUserId.length === requestedUserId.length ? 0 : 1;
+  const maxLen = Math.max(derivedUserId.length, requestedUserId.length);
+  for (let i = 0; i < maxLen; i++) {
+    const a = i < derivedUserId.length ? derivedUserId.charCodeAt(i) : 0;
+    const b = i < requestedUserId.length ? requestedUserId.charCodeAt(i) : 0;
+    result |= a ^ b;
   }
 
   const authorized = result === 0;
@@ -182,7 +183,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
 
   // GET /api/queue - List pending tasks
   if (path === '/api/queue' && request.method === 'GET') {
-    const pending = await kv.get<string[]>('orchestrator:pending', 'json') || [];
+    const pending = await kv.get<string[]>(`${CACHE_VERSION}:orchestrator:pending`, 'json') || [];
     return new Response(JSON.stringify({ pending, count: pending.length }), {
       headers: { 'Content-Type': 'application/json' },
     });
@@ -200,7 +201,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     const workerId = body.workerId || `worker_${Date.now()}`;
     const leaseDuration = Math.min(body.leaseDurationSec || 300, 600); // Max 10 minutes
 
-    const pending = await kv.get<string[]>('orchestrator:pending', 'json') || [];
+    const pending = await kv.get<string[]>(`${CACHE_VERSION}:orchestrator:pending`, 'json') || [];
 
     // OPTIMIZATION: Batch fetch all active leases instead of checking one by one
     // This reduces KV operations from N to 1 when there are many leased tasks
@@ -244,7 +245,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
       }
 
       // Successfully claimed - fetch task details
-      const task = await kv.get(`orchestrator:queue:${taskId}`, 'json');
+      const task = await kv.get(`${CACHE_VERSION}:orchestrator:queue:${taskId}`, 'json');
       if (!task) {
         // Task was deleted, release lease and try next
         await kv.delete(leaseKey);
@@ -278,6 +279,12 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
   if (releaseMatch && request.method === 'POST') {
     const taskId = releaseMatch[1];
 
+    // SECURITY: Validate taskId format
+    const taskIdValidation = validatePathParameter(taskId, TaskIdPathSchema, 'taskId', '/api/queue/:taskId/release');
+    if (!taskIdValidation.success) {
+      return taskIdValidation.response;
+    }
+
     const validation = await validateRequestBody(request, ReleaseTaskSchema, '/api/queue/:taskId/release');
     if (!validation.success) {
       return validation.response;
@@ -286,12 +293,30 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     const body = validation.data;
     const leaseKey = `orchestrator:lease:${taskId}`;
 
-    const lease = await kv.get<{ workerId: string }>(leaseKey, 'json');
-    if (!lease) {
+    const leaseData = await kv.get(leaseKey, 'json');
+    if (!leaseData) {
       return new Response(JSON.stringify({ success: true, message: 'No active lease' }), {
         headers: { 'Content-Type': 'application/json' },
       });
     }
+
+    // Validate lease data structure
+    const leaseValidation = LeaseSchema.safeParse(leaseData);
+    if (!leaseValidation.success) {
+      safeLog.error('[Queue API] Invalid lease data structure', {
+        taskId,
+        errors: leaseValidation.error.errors
+      });
+      return new Response(JSON.stringify({
+        error: 'Invalid lease data',
+        details: leaseValidation.error.errors
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const lease = leaseValidation.data;
 
     // Only the lease holder can release (or if workerId not provided, anyone can release)
     if (body.workerId && lease.workerId !== body.workerId) {
@@ -313,6 +338,12 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
   const renewMatch = path.match(/^\/api\/queue\/([^/]+)\/renew$/);
   if (renewMatch && request.method === 'POST') {
     const taskId = renewMatch[1];
+
+    // SECURITY: Validate taskId format
+    const taskIdValidation = validatePathParameter(taskId, TaskIdPathSchema, 'taskId', '/api/queue/:taskId/renew');
+    if (!taskIdValidation.success) {
+      return taskIdValidation.response;
+    }
 
     const validation = await validateRequestBody(request, RenewTaskSchema, '/api/queue/:taskId/renew');
     if (!validation.success) {
@@ -348,7 +379,14 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
   const taskMatch = path.match(/^\/api\/queue\/([^/]+)$/);
   if (taskMatch && request.method === 'GET') {
     const taskId = taskMatch[1];
-    const task = await kv.get(`orchestrator:queue:${taskId}`, 'json');
+
+    // SECURITY: Validate taskId format
+    const taskIdValidation = validatePathParameter(taskId, TaskIdPathSchema, 'taskId', '/api/queue/:taskId');
+    if (!taskIdValidation.success) {
+      return taskIdValidation.response;
+    }
+
+    const task = await kv.get(`${CACHE_VERSION}:orchestrator:queue:${taskId}`, 'json');
     if (!task) {
       return new Response(JSON.stringify({ error: 'Task not found' }), {
         status: 404,
@@ -365,6 +403,12 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
   if (statusMatch && request.method === 'POST') {
     const taskId = statusMatch[1];
 
+    // SECURITY: Validate taskId format
+    const taskIdValidation = validatePathParameter(taskId, TaskIdPathSchema, 'taskId', '/api/queue/:taskId/status');
+    if (!taskIdValidation.success) {
+      return taskIdValidation.response;
+    }
+
     const validation = await validateRequestBody(request, UpdateStatusSchema, '/api/queue/:taskId/status');
     if (!validation.success) {
       return validation.response;
@@ -372,7 +416,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
 
     const body = validation.data;
 
-    const task = await kv.get(`orchestrator:queue:${taskId}`, 'json') as Record<string, unknown> | null;
+    const task = await kv.get(`${CACHE_VERSION}:orchestrator:queue:${taskId}`, 'json') as Record<string, unknown> | null;
     if (!task) {
       return new Response(JSON.stringify({ error: 'Task not found' }), {
         status: 404,
@@ -383,7 +427,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     // Update task status
     task.status = body.status;
     task.updatedAt = new Date().toISOString();
-    await kv.put(`orchestrator:queue:${taskId}`, JSON.stringify(task), { expirationTtl: 3600 });
+    await kv.put(`${CACHE_VERSION}:orchestrator:queue:${taskId}`, JSON.stringify(task), { expirationTtl: 3600 });
 
     return new Response(JSON.stringify({ success: true, status: body.status }), {
       headers: { 'Content-Type': 'application/json' },
@@ -394,20 +438,32 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
   const resultMatch = path.match(/^\/api\/result\/([^/]+)$/);
   if (resultMatch && request.method === 'POST') {
     const taskId = resultMatch[1];
-    const result = await request.json();
+
+    // SECURITY: Validate taskId format
+    const taskIdValidation = validatePathParameter(taskId, TaskIdPathSchema, 'taskId', '/api/result/:taskId');
+    if (!taskIdValidation.success) {
+      return taskIdValidation.response;
+    }
+
+    const validation = await validateRequestBody(request, ResultSchema, '/api/result/:taskId');
+    if (!validation.success) {
+      return validation.response;
+    }
+
+    const result = validation.data;
 
     // Store result
-    await kv.put(`orchestrator:result:${taskId}`, JSON.stringify(result), {
+    await kv.put(`${CACHE_VERSION}:orchestrator:result:${taskId}`, JSON.stringify(result), {
       expirationTtl: 3600,
     });
 
     // Remove from pending list
-    const pendingList = await kv.get<string[]>('orchestrator:pending', 'json') || [];
+    const pendingList = await kv.get<string[]>(`${CACHE_VERSION}:orchestrator:pending`, 'json') || [];
     const updatedList = pendingList.filter(id => id !== taskId);
-    await kv.put('orchestrator:pending', JSON.stringify(updatedList), { expirationTtl: 3600 });
+    await kv.put(`${CACHE_VERSION}:orchestrator:pending`, JSON.stringify(updatedList), { expirationTtl: 3600 });
 
     // Delete queue entry
-    await kv.delete(`orchestrator:queue:${taskId}`);
+    await kv.delete(`${CACHE_VERSION}:orchestrator:queue:${taskId}`);
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { 'Content-Type': 'application/json' },
@@ -417,7 +473,14 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
   // GET /api/result/:taskId - Get result
   if (resultMatch && request.method === 'GET') {
     const taskId = resultMatch[1];
-    const result = await kv.get(`orchestrator:result:${taskId}`, 'json');
+
+    // SECURITY: Validate taskId format
+    const taskIdValidation = validatePathParameter(taskId, TaskIdPathSchema, 'taskId', '/api/result/:taskId');
+    if (!taskIdValidation.success) {
+      return taskIdValidation.response;
+    }
+
+    const result = await kv.get(`${CACHE_VERSION}:orchestrator:result:${taskId}`, 'json');
     if (!result) {
       return new Response(JSON.stringify({ error: 'Result not found' }), {
         status: 404,

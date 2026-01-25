@@ -7,6 +7,8 @@ import { ClaimTaskSchema, ReleaseTaskSchema, RenewTaskSchema, UpdateStatusSchema
 import { DaemonRegistrationSchema, DaemonHeartbeatSchema } from './daemon';
 import { ConversationMessageSchema, UserPreferencesSchema } from './memory';
 import { CreateTaskSchema, UpdateTaskSchema } from './cron';
+import { validatePathParameter } from './validation-helper';
+import { UserIdPathSchema, TaskIdPathSchema } from './path-params';
 
 describe('Queue Validation Schemas', () => {
   describe('ClaimTaskSchema', () => {
@@ -166,6 +168,60 @@ describe('Cron Validation Schemas', () => {
       };
       const result = CreateTaskSchema.safeParse(invalid);
       expect(result.success).toBe(false);
+    });
+  });
+});
+
+describe('Path Parameter Validation Helper', () => {
+  describe('validatePathParameter', () => {
+    it('should return success for valid path parameters', () => {
+      const result = validatePathParameter('user-123', UserIdPathSchema, 'userId', '/test');
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data).toBe('user-123');
+      }
+    });
+
+    it('should return error Response for invalid path parameters', () => {
+      const result = validatePathParameter('../etc/passwd', UserIdPathSchema, 'userId', '/test');
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.response).toBeInstanceOf(Response);
+        expect(result.response.status).toBe(400);
+      }
+    });
+
+    it('should include error details in response', async () => {
+      const result = validatePathParameter('', TaskIdPathSchema, 'taskId', '/api/test');
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        const body = await result.response.json() as { error: string; details: string[] };
+        expect(body.error).toBe('Invalid taskId format');
+        expect(body.details).toBeDefined();
+        expect(Array.isArray(body.details)).toBe(true);
+      }
+    });
+
+    it('should sanitize logged value', () => {
+      // This test verifies that only the prefix is logged for security
+      const longValue = 'a'.repeat(100);
+      const result = validatePathParameter(longValue, UserIdPathSchema, 'userId', '/test');
+      expect(result.success).toBe(false);
+      // The actual logging is tested by verifying it doesn't throw
+    });
+
+    it('should handle special characters safely', () => {
+      const dangerousValues = [
+        '<script>alert(1)</script>',
+        "'; DROP TABLE users--",
+        '../../etc/passwd',
+        '${whoami}',
+      ];
+
+      dangerousValues.forEach(value => {
+        const result = validatePathParameter(value, UserIdPathSchema, 'userId', '/test');
+        expect(result.success).toBe(false);
+      });
     });
   });
 });

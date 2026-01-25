@@ -59,3 +59,39 @@ function formatZodErrors(error: ZodError): string[] {
     return path ? `${path}: ${err.message}` : err.message;
   });
 }
+
+/**
+ * Validate path parameter against a Zod schema
+ * Returns parsed data on success, or error Response on failure
+ */
+export function validatePathParameter<T>(
+  value: string,
+  schema: ZodSchema<T>,
+  paramName: string,
+  endpoint: string
+): { success: true; data: T } | { success: false; response: Response } {
+  const result = schema.safeParse(value);
+
+  if (!result.success) {
+    const errors = formatZodErrors(result.error);
+    safeLog.warn(`[Validation] Path parameter validation failed`, {
+      endpoint,
+      paramName,
+      value: value.substring(0, 16), // Log prefix only for security
+      errors
+    });
+
+    return {
+      success: false,
+      response: new Response(
+        JSON.stringify({
+          error: `Invalid ${paramName} format`,
+          details: errors
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
+  }
+
+  return { success: true, data: result.data };
+}

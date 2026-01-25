@@ -47,7 +47,10 @@ export async function handleDaemonAPI(request: Request, env: Env, path: string):
       });
     } catch (error) {
       safeLog.error('[Daemon API] Register error', { error: String(error) });
-      return new Response(JSON.stringify({ error: String(error) }), {
+      return new Response(JSON.stringify({
+        error: 'Failed to register daemon',
+        type: 'internal_error',
+      }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -77,7 +80,10 @@ export async function handleDaemonAPI(request: Request, env: Env, path: string):
       });
     } catch (error) {
       safeLog.error('[Daemon API] Heartbeat error', { error: String(error) });
-      return new Response(JSON.stringify({ error: String(error) }), {
+      return new Response(JSON.stringify({
+        error: 'Failed to update heartbeat',
+        type: 'internal_error',
+      }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -93,7 +99,10 @@ export async function handleDaemonAPI(request: Request, env: Env, path: string):
       });
     } catch (error) {
       safeLog.error('[Daemon API] Health check error', { error: String(error) });
-      return new Response(JSON.stringify({ error: String(error) }), {
+      return new Response(JSON.stringify({
+        error: 'Failed to get daemon health status',
+        type: 'internal_error',
+      }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' },
       });
