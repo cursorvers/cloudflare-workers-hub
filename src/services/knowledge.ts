@@ -78,6 +78,17 @@ export async function storeKnowledge(env: Env, item: KnowledgeItem): Promise<str
   });
 
   try {
+    // Step 0: Check for duplicates before storing
+    const existingId = await checkForDuplicate(env, id, validatedItem);
+    if (existingId) {
+      safeLog.info('[Knowledge] Item already exists, returning existing ID', {
+        id: existingId,
+        userId: validatedItem.userId,
+        source: validatedItem.source,
+      });
+      return existingId;
+    }
+
     // Step 1: Store markdown content in R2
     const r2Path = await storeContentInR2(env, id, validatedItem);
 
@@ -160,6 +171,88 @@ export async function searchKnowledge(
     }
 
     return [];
+  }
+}
+
+/**
+ * Check if a knowledge item already exists in D1
+ *
+ * Checks for duplicates using:
+ * 1. Direct ID match (if ID was provided)
+ * 2. Content-based match: userId + source + title + createdAt
+ *
+ * @param env - Cloudflare Workers environment
+ * @param id - Proposed ID for the item
+ * @param item - Knowledge item to check
+ * @returns Existing item ID if found, null otherwise
+ */
+async function checkForDuplicate(
+  env: Env,
+  id: string,
+  item: KnowledgeItem
+): Promise<string | null> {
+  // Skip deduplication if D1 not available
+  if (!env.DB) {
+    safeLog.warn('[Knowledge] D1 not configured, skipping duplicate check');
+    return null;
+  }
+
+  try {
+    // Check 1: Direct ID match (if ID was explicitly provided)
+    if (item.id) {
+      const existingById = await env.DB.prepare(
+        'SELECT id FROM knowledge_items WHERE id = ?'
+      )
+        .bind(item.id)
+        .first<{ id: string }>();
+
+      if (existingById) {
+        safeLog.info('[Knowledge] Found duplicate by ID', {
+          id: existingById.id,
+        });
+        return existingById.id;
+      }
+    }
+
+    // Check 2: Content-based duplicate detection
+    // Match on: userId + source + title + createdAt (within same minute)
+    // This handles cases where same content is synced multiple times
+    if (item.createdAt) {
+      const existingByContent = await env.DB.prepare(
+        `SELECT id FROM knowledge_items
+         WHERE user_id = ?
+         AND source = ?
+         AND title = ?
+         AND datetime(created_at) = datetime(?)`
+      )
+        .bind(
+          item.userId,
+          item.source,
+          item.title,
+          item.createdAt
+        )
+        .first<{ id: string }>();
+
+      if (existingByContent) {
+        safeLog.info('[Knowledge] Found duplicate by content', {
+          id: existingByContent.id,
+          userId: item.userId,
+          source: item.source,
+          title: item.title,
+        });
+        return existingByContent.id;
+      }
+    }
+
+    // No duplicate found
+    return null;
+  } catch (error) {
+    safeLog.error('[Knowledge] Duplicate check failed', {
+      id,
+      error: String(error),
+    });
+    // Don't throw - allow storage to proceed if duplicate check fails
+    return null;
   }
 }
 

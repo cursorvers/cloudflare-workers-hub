@@ -29,13 +29,34 @@ describe('Scheduled Handler', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
+    // Track lock value for compare-and-swap simulation
+    let lockValue: string | null = null;
+
     // Mock environment
     env = {
       AI: {} as Ai,
       ENVIRONMENT: 'test',
       CACHE: {
-        get: vi.fn(),
-        put: vi.fn(),
+        get: vi.fn().mockImplementation((key: string) => {
+          // Return lock value for lock verification
+          if (key.includes('sync_lock')) {
+            return Promise.resolve(lockValue);
+          }
+          return Promise.resolve(null);
+        }),
+        put: vi.fn().mockImplementation((key: string, value: string) => {
+          // Simulate lock acquisition
+          if (key.includes('sync_lock')) {
+            lockValue = value;
+          }
+          return Promise.resolve();
+        }),
+        delete: vi.fn().mockImplementation((key: string) => {
+          if (key.includes('sync_lock')) {
+            lockValue = null;
+          }
+          return Promise.resolve();
+        }),
       } as unknown as KVNamespace,
     } as Env;
 
@@ -82,8 +103,7 @@ describe('Scheduled Handler', () => {
     env.LIMITLESS_API_KEY = 'test-api-key';
     env.LIMITLESS_USER_ID = 'test-user';
 
-    // Mock KV to return null (no previous sync)
-    vi.mocked(env.CACHE!.get).mockResolvedValue(null);
+    // beforeEach mock handles lock and returns null for backup_sync (no previous sync)
 
     // Mock sync result
     vi.mocked(limitlessService.syncToKnowledge).mockResolvedValue({
@@ -103,15 +123,15 @@ describe('Scheduled Handler', () => {
       })
     );
 
-    // Should update last sync time
+    // Should update last backup sync time
     expect(env.CACHE!.put).toHaveBeenCalledWith(
-      'limitless:last_sync:test-user',
+      'limitless:backup_sync:test-user',
       expect.any(String)
     );
 
-    // Should update sync stats
+    // Should update backup sync stats
     expect(env.CACHE!.put).toHaveBeenCalledWith(
-      'limitless:sync_stats:test-user',
+      'limitless:backup_stats:test-user',
       expect.stringContaining('"synced":5')
     );
   });
@@ -122,9 +142,26 @@ describe('Scheduled Handler', () => {
     env.LIMITLESS_USER_ID = 'test-user';
     env.LIMITLESS_SYNC_INTERVAL_HOURS = '2'; // 2 hour interval
 
-    // Mock KV to return recent sync time (30 minutes ago)
+    // Mock KV - track lock and return recent sync time for backup_sync key
+    let lockValue: string | null = null;
     const recentSync = new Date(Date.now() - 30 * 60 * 1000);
-    vi.mocked(env.CACHE!.get).mockResolvedValue(recentSync.toISOString());
+
+    vi.mocked(env.CACHE!.get).mockImplementation((key: string) => {
+      if (key.includes('sync_lock')) {
+        return Promise.resolve(lockValue);
+      }
+      if (key.includes('backup_sync')) {
+        return Promise.resolve(recentSync.toISOString());
+      }
+      return Promise.resolve(null);
+    });
+
+    vi.mocked(env.CACHE!.put).mockImplementation((key: string, value: string) => {
+      if (key.includes('sync_lock')) {
+        lockValue = value;
+      }
+      return Promise.resolve();
+    });
 
     await handleScheduled(controller, env, ctx);
 
@@ -137,9 +174,26 @@ describe('Scheduled Handler', () => {
     env.LIMITLESS_USER_ID = 'test-user';
     env.LIMITLESS_SYNC_INTERVAL_HOURS = '1'; // 1 hour interval
 
-    // Mock KV to return old sync time (2 hours ago)
+    // Mock KV - track lock and return old sync time
+    let lockValue: string | null = null;
     const oldSync = new Date(Date.now() - 2 * 60 * 60 * 1000);
-    vi.mocked(env.CACHE!.get).mockResolvedValue(oldSync.toISOString());
+
+    vi.mocked(env.CACHE!.get).mockImplementation((key: string) => {
+      if (key.includes('sync_lock')) {
+        return Promise.resolve(lockValue);
+      }
+      if (key.includes('backup_sync')) {
+        return Promise.resolve(oldSync.toISOString());
+      }
+      return Promise.resolve(null);
+    });
+
+    vi.mocked(env.CACHE!.put).mockImplementation((key: string, value: string) => {
+      if (key.includes('sync_lock')) {
+        lockValue = value;
+      }
+      return Promise.resolve();
+    });
 
     // Mock sync result
     vi.mocked(limitlessService.syncToKnowledge).mockResolvedValue({
@@ -158,7 +212,7 @@ describe('Scheduled Handler', () => {
     env.LIMITLESS_API_KEY = 'test-api-key';
     env.LIMITLESS_USER_ID = 'test-user';
 
-    vi.mocked(env.CACHE!.get).mockResolvedValue(null);
+    // beforeEach mock handles lock - don't override it
 
     // Mock sync error
     vi.mocked(limitlessService.syncToKnowledge).mockRejectedValue(
@@ -177,8 +231,6 @@ describe('Scheduled Handler', () => {
     env.LIMITLESS_USER_ID = 'test-user';
     env.LIMITLESS_SYNC_INTERVAL_HOURS = '4'; // Custom 4 hour interval
 
-    vi.mocked(env.CACHE!.get).mockResolvedValue(null);
-
     vi.mocked(limitlessService.syncToKnowledge).mockResolvedValue({
       synced: 2,
       skipped: 0,
@@ -191,7 +243,7 @@ describe('Scheduled Handler', () => {
       env,
       'test-api-key',
       expect.objectContaining({
-        maxAgeHours: 5, // syncIntervalHours + 1
+        maxAgeHours: 6, // syncIntervalHours + 2
       })
     );
   });

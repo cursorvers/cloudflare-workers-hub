@@ -274,17 +274,28 @@ describe('Knowledge Service', () => {
         undefined
       );
 
-      // Mock D1 insert
-      const mockPrepare = {
+      // Mock D1 prepare to return different mocks for duplicate check vs insert
+      const mockInsertPrepare = {
         bind: vi.fn().mockReturnThis(),
         run: vi.fn().mockResolvedValue({ success: true }),
       };
-      (mockEnv.DB!.prepare as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockPrepare);
+      const mockCheckPrepare = {
+        bind: vi.fn().mockReturnThis(),
+        first: vi.fn().mockResolvedValue(null),
+      };
+
+      (mockEnv.DB!.prepare as unknown as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        // Duplicate check queries use SELECT, insert uses INSERT
+        if (sql.includes('SELECT')) {
+          return mockCheckPrepare;
+        }
+        return mockInsertPrepare;
+      });
 
       await storeKnowledge(mockEnv, item);
 
       // Verify audioPath was included in D1 bind
-      expect(mockPrepare.bind).toHaveBeenCalledWith(
+      expect(mockInsertPrepare.bind).toHaveBeenCalledWith(
         expect.any(String), // id
         'user123', // user_id
         'whatsapp', // source
@@ -300,6 +311,100 @@ describe('Knowledge Service', () => {
         expect.any(String), // created_at
         expect.any(String) // updated_at
       );
+    });
+
+    it('should return existing ID when duplicate is found by ID', async () => {
+      const item: KnowledgeItem = {
+        id: 'existing-item-123',
+        userId: 'user123',
+        source: 'telegram',
+        type: 'voice_note',
+        title: 'Duplicate Item',
+        content: 'This is a duplicate.',
+      };
+
+      // Mock duplicate check - found by ID
+      const mockPrepare = {
+        bind: vi.fn().mockReturnThis(),
+        first: vi.fn().mockResolvedValue({ id: 'existing-item-123' }),
+      };
+      (mockEnv.DB!.prepare as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockPrepare);
+
+      const id = await storeKnowledge(mockEnv, item);
+
+      expect(id).toBe('existing-item-123');
+
+      // Verify R2, AI, and Vectorize were NOT called
+      expect(mockEnv.OBSIDIAN_VAULT!.put).not.toHaveBeenCalled();
+      expect(mockEnv.AI.run).not.toHaveBeenCalled();
+      expect(mockEnv.KNOWLEDGE_INDEX!.upsert).not.toHaveBeenCalled();
+    });
+
+    it('should return existing ID when duplicate is found by content', async () => {
+      const item: KnowledgeItem = {
+        userId: 'user123',
+        source: 'telegram',
+        type: 'voice_note',
+        title: 'Meeting Notes',
+        content: 'Discussed project timeline.',
+        createdAt: '2024-01-25T10:00:00Z',
+      };
+
+      // Mock duplicate check
+      // First SELECT (by ID - no item.id so will be skipped in actual code)
+      // Second SELECT (by content) returns existing item
+      (mockEnv.DB!.prepare as unknown as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+        const mockPrepare = {
+          bind: vi.fn().mockReturnThis(),
+          first: vi.fn().mockResolvedValue(
+            // Return existing item for content-based check
+            sql.includes('datetime') ? { id: 'existing-content-match' } : null
+          ),
+        };
+        return mockPrepare;
+      });
+
+      const id = await storeKnowledge(mockEnv, item);
+
+      expect(id).toBe('existing-content-match');
+
+      // Verify R2, AI, and Vectorize were NOT called
+      expect(mockEnv.OBSIDIAN_VAULT!.put).not.toHaveBeenCalled();
+      expect(mockEnv.AI.run).not.toHaveBeenCalled();
+      expect(mockEnv.KNOWLEDGE_INDEX!.upsert).not.toHaveBeenCalled();
+    });
+
+    it('should skip duplicate check when D1 is not configured', async () => {
+      const item: KnowledgeItem = {
+        userId: 'user123',
+        source: 'telegram',
+        type: 'voice_note',
+        title: 'Test',
+        content: 'Test content',
+      };
+
+      // Remove D1 binding
+      mockEnv.DB = undefined;
+
+      // Mock R2 put
+      (mockEnv.OBSIDIAN_VAULT!.put as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined
+      );
+
+      // Mock AI embedding
+      (mockEnv.AI.run as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+        data: [new Array(768).fill(0.1)],
+      });
+
+      // Mock Vectorize upsert
+      (mockEnv.KNOWLEDGE_INDEX!.upsert as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined
+      );
+
+      const id = await storeKnowledge(mockEnv, item);
+
+      expect(id).toBeDefined();
+      expect(mockEnv.OBSIDIAN_VAULT!.put).toHaveBeenCalled();
     });
   });
 

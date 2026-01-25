@@ -11,6 +11,46 @@ import { safeLog } from '../utils/log-sanitizer';
 import { syncToKnowledge } from '../services/limitless';
 
 /**
+ * Acquire distributed lock using KV compare-and-swap
+ * @returns true if lock acquired, false if already held
+ */
+async function acquireLock(kv: KVNamespace, lockKey: string, ttlSeconds: number): Promise<boolean> {
+  const lockValue = Date.now().toString();
+
+  // Use KV.put with metadata to implement compare-and-swap pattern
+  // If key doesn't exist, it will be created with our value
+  const metadata = { acquiredAt: Date.now() };
+
+  try {
+    // Try to create lock with expiration
+    await kv.put(lockKey, lockValue, {
+      expirationTtl: ttlSeconds,
+      metadata,
+    });
+
+    // Verify we actually got the lock by reading it back
+    const verifyValue = await kv.get(lockKey);
+    return verifyValue === lockValue;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Release distributed lock
+ */
+async function releaseLock(kv: KVNamespace, lockKey: string): Promise<void> {
+  try {
+    await kv.delete(lockKey);
+  } catch (error) {
+    safeLog.warn('[Lock] Failed to release lock', {
+      lockKey,
+      error: String(error),
+    });
+  }
+}
+
+/**
  * Handle scheduled events from Cloudflare Workers Cron
  */
 export async function handleScheduled(
@@ -24,6 +64,22 @@ export async function handleScheduled(
     scheduledTime: scheduledTime.toISOString(),
     cron: controller.cron,
   });
+
+  // Early return if CACHE KV is not available
+  if (!env.CACHE) {
+    safeLog.warn('[Scheduled] CACHE KV not configured, cannot use distributed locking');
+    return;
+  }
+
+  // Distributed lock to prevent race conditions
+  const lockKey = `limitless:sync_lock:${env.LIMITLESS_USER_ID || 'default'}`;
+  const lockTTL = 300; // 5 minutes
+  const lockAcquired = await acquireLock(env.CACHE, lockKey, lockTTL);
+
+  if (!lockAcquired) {
+    safeLog.info('[Scheduled] Sync already in progress (lock held), skipping');
+    return;
+  }
 
   try {
     // Check if Limitless auto-sync is enabled
@@ -59,21 +115,19 @@ export async function handleScheduled(
     const lastSyncKey = `limitless:backup_sync:${env.LIMITLESS_USER_ID}`;
     let shouldSync = true;
 
-    if (env.CACHE) {
-      const lastSyncData = await env.CACHE.get(lastSyncKey);
+    const lastSyncData = await env.CACHE.get(lastSyncKey);
 
-      if (lastSyncData) {
-        const lastSync = new Date(lastSyncData);
-        const hoursSinceLastSync = (Date.now() - lastSync.getTime()) / (1000 * 60 * 60);
+    if (lastSyncData) {
+      const lastSync = new Date(lastSyncData);
+      const hoursSinceLastSync = (Date.now() - lastSync.getTime()) / (1000 * 60 * 60);
 
-        if (hoursSinceLastSync < syncIntervalHours) {
-          safeLog.info('[Scheduled] Skipping backup sync (too soon)', {
-            lastSync: lastSync.toISOString(),
-            hoursSinceLastSync: hoursSinceLastSync.toFixed(2),
-            minInterval: syncIntervalHours,
-          });
-          shouldSync = false;
-        }
+      if (hoursSinceLastSync < syncIntervalHours) {
+        safeLog.info('[Scheduled] Skipping backup sync (too soon)', {
+          lastSync: lastSync.toISOString(),
+          hoursSinceLastSync: hoursSinceLastSync.toFixed(2),
+          minInterval: syncIntervalHours,
+        });
+        shouldSync = false;
       }
     }
 
@@ -93,21 +147,19 @@ export async function handleScheduled(
     const duration = Date.now() - startTime;
 
     // Update last backup sync time in KV
-    if (env.CACHE) {
-      await env.CACHE.put(lastSyncKey, new Date().toISOString());
+    await env.CACHE.put(lastSyncKey, new Date().toISOString());
 
-      // Update backup sync stats
-      const statsKey = `limitless:backup_stats:${env.LIMITLESS_USER_ID}`;
-      const stats = {
-        lastSync: new Date().toISOString(),
-        synced: result.synced,
-        skipped: result.skipped,
-        errors: result.errors.length,
-        durationMs: duration,
-        purpose: 'backup',
-      };
-      await env.CACHE.put(statsKey, JSON.stringify(stats));
-    }
+    // Update backup sync stats
+    const statsKey = `limitless:backup_stats:${env.LIMITLESS_USER_ID}`;
+    const stats = {
+      lastSync: new Date().toISOString(),
+      synced: result.synced,
+      skipped: result.skipped,
+      errors: result.errors.length,
+      durationMs: duration,
+      purpose: 'backup',
+    };
+    await env.CACHE.put(statsKey, JSON.stringify(stats));
 
     safeLog.info('[Scheduled] Limitless backup sync completed', {
       userId: env.LIMITLESS_USER_ID,
@@ -130,5 +182,8 @@ export async function handleScheduled(
     });
 
     // Don't throw - let the cron continue running
+  } finally {
+    // Always release lock on completion or error
+    await releaseLock(env.CACHE, lockKey);
   }
 }
