@@ -37,6 +37,8 @@ import { handleCronAPI } from './handlers/cron-api';
 import { handleAdminAPI } from './handlers/admin-api';
 import { handleDaemonAPI } from './handlers/daemon-api';
 import { handleLimitlessAPI } from './handlers/limitless-api';
+import { handleLimitlessWebhook } from './handlers/limitless-webhook';
+import { handleScheduled } from './handlers/scheduled';
 import { isSimpleQuery, handleWithWorkersAI } from './ai';
 import { generateEventId, detectSource } from './router';
 
@@ -654,6 +656,11 @@ export default {
 
     // Limitless API endpoints (for Pendant voice recording sync)
     if (path.startsWith('/api/limitless')) {
+      // Webhook endpoint for iOS Shortcuts
+      if (path === '/api/limitless/webhook-sync' && request.method === 'POST') {
+        return handleLimitlessWebhook(request, env);
+      }
+      // Other Limitless API endpoints
       return handleLimitlessAPI(request, env, path);
     }
 
@@ -671,5 +678,9 @@ export default {
 
     // 404 for unknown paths
     return new Response('Not found', { status: 404 });
+  },
+
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    return handleScheduled(controller, env, ctx);
   },
 };

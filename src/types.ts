@@ -50,4 +50,7 @@ export interface Env {
   MONITORING_API_KEY?: string;     // /health, /metrics endpoints
   // Limitless.ai Integration
   LIMITLESS_API_KEY?: string;      // Limitless.ai API key for Pendant sync
+  LIMITLESS_USER_ID?: string;      // User ID for automatic sync
+  LIMITLESS_AUTO_SYNC_ENABLED?: string; // Enable/disable auto-sync (default: false)
+  LIMITLESS_SYNC_INTERVAL_HOURS?: string; // Sync interval in hours (default: 1)
 }

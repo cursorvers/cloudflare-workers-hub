@@ -31,6 +31,9 @@ const RATE_LIMITS: Record<string, RateLimitConfig> = {
   queue: { windowMs: 60000, maxRequests: 60 }, // 60 req/min (1 req/sec avg)
   memory: { windowMs: 60000, maxRequests: 120 }, // 120 req/min (2 req/sec avg)
   admin: { windowMs: 60000, maxRequests: 10 }, // 10 req/min (admin ops are rare)
+  // Limitless webhook (iPhone trigger)
+  limitless_webhook_auth: { windowMs: 60000, maxRequests: 60 }, // 60 req/min with auth
+  limitless_webhook_public: { windowMs: 60000, maxRequests: 10 }, // 10 req/min without auth (prevent abuse)
   // Default fallback
   default: { windowMs: 60000, maxRequests: 30 }, // 30 req/min
 };

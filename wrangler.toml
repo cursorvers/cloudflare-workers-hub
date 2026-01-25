@@ -32,6 +32,10 @@ bucket_name = "obsidian-vault"
 binding = "KNOWLEDGE_INDEX"
 index_name = "obsidian-knowledge"
 
+# Cron Triggers
+[triggers]
+crons = ["0 2 * * *"]  # Daily at 2 AM (backup sync for Limitless)
+
 # Environment variables
 [vars]
 ENVIRONMENT = "development"
