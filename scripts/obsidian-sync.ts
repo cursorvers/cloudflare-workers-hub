@@ -167,117 +167,166 @@ function sentimentEmoji(sentiment: string | null): string {
 }
 
 /**
+ * Safely parse a JSONB field that may arrive as a string or array from Supabase REST API
+ */
+function parseJsonArray(value: unknown): string[] {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+/**
+ * Classifications considered "meaningful" — shown with full detail in the digest
+ */
+const MEANINGFUL_CLASSIFICATIONS = new Set(['insight', 'meeting', 'brainstorm', 'todo', 'reflection']);
+
+/**
  * Build daily digest markdown from lifelogs
+ *
+ * Compact format:
+ * - Day summary with stats
+ * - Aggregated action items & insights (deduplicated)
+ * - Meaningful recordings: summary + insights (no transcript)
+ * - Casual recordings: timeline only
  */
 function buildDailyDigest(date: string, lifelogs: ProcessedLifelog[]): string {
-  // Sort by start_time
   const sorted = [...lifelogs].sort(
     (a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime()
   );
 
-  // Frontmatter
-  const lines: string[] = [
-    '---',
-    `date: ${date}`,
-    'source: Limitless Pendant',
-    `recordings: ${sorted.length}`,
-    `synced_at: ${new Date().toISOString()}`,
-    '---',
-    '',
-    `# Pendant Recordings - ${date}`,
-    '',
-  ];
-
-  // Summary section
+  // Aggregate stats
   const classificationCounts: Record<string, number> = {};
   let totalDuration = 0;
   const allTopics = new Set<string>();
   const allActionItems: string[] = [];
+  const allInsights: string[] = [];
 
   for (const log of sorted) {
     const cls = log.classification;
     classificationCounts[cls] = (classificationCounts[cls] || 0) + 1;
     if (log.duration_seconds) totalDuration += log.duration_seconds;
-    if (log.topics) log.topics.forEach((t) => allTopics.add(t));
-    if (log.action_items) allActionItems.push(...log.action_items);
+    parseJsonArray(log.topics).forEach((t) => allTopics.add(t));
+    allActionItems.push(...parseJsonArray(log.action_items));
+    allInsights.push(...parseJsonArray(log.key_insights));
   }
 
-  lines.push('## 概要');
+  const meaningful = sorted.filter((l) => MEANINGFUL_CLASSIFICATIONS.has(l.classification));
+  const casual = sorted.filter((l) => !MEANINGFUL_CLASSIFICATIONS.has(l.classification));
+
+  // Frontmatter
+  const tags = [...allTopics]
+    .filter((t) => t.length > 1)
+    .slice(0, 10)
+    .map((t) => t.replace(/\s+/g, '-'));
+  const lines: string[] = [
+    '---',
+    `date: ${date}`,
+    'source: Limitless Pendant',
+    `recordings: ${sorted.length}`,
+    totalDuration > 0 ? `total_duration: ${formatDuration(totalDuration)}` : '',
+    tags.length > 0 ? `tags: [pendant, ${tags.join(', ')}]` : 'tags: [pendant]',
+    '---',
+    '',
+    `# ${date} - Pendant Log`,
+    '',
+  ].filter(Boolean);
+
+  // === Day Stats ===
+  const statParts: string[] = [];
+  for (const [cls, count] of Object.entries(classificationCounts)) {
+    statParts.push(`${classificationLabel(cls)} ×${count}`);
+  }
+  lines.push(`> ${sorted.length}件の録音 | ${formatDuration(totalDuration) || '不明'} | ${statParts.join(' / ')}`);
   lines.push('');
-  lines.push(`- **録音数**: ${sorted.length}件`);
-  if (totalDuration > 0) {
-    lines.push(`- **合計時間**: ${formatDuration(totalDuration)}`);
-  }
 
-  // Classification breakdown
-  const clsBreakdown = Object.entries(classificationCounts)
-    .map(([cls, count]) => `${classificationLabel(cls)} (${count})`)
-    .join(', ');
-  lines.push(`- **分類**: ${clsBreakdown}`);
-
-  // Topics
-  if (allTopics.size > 0) {
-    lines.push(`- **トピック**: ${[...allTopics].join(', ')}`);
-  }
-
-  lines.push('');
-
-  // Action items (aggregated)
-  if (allActionItems.length > 0) {
-    lines.push('## アクションアイテム');
+  // === Action Items (aggregated) ===
+  const uniqueActions = [...new Set(allActionItems)].filter((a) => a.length > 3);
+  if (uniqueActions.length > 0) {
+    lines.push('## Action Items');
     lines.push('');
-    for (const item of allActionItems) {
+    for (const item of uniqueActions) {
       lines.push(`- [ ] ${item}`);
     }
     lines.push('');
   }
 
-  // Individual recordings
-  lines.push('## 録音詳細');
-  lines.push('');
-
-  for (const log of sorted) {
-    const timeRange = `${formatTimeJST(log.start_time)} - ${formatTimeJST(log.end_time)}`;
-    const duration = formatDuration(log.duration_seconds);
-    const title = log.title || 'Untitled Recording';
-    const starred = log.is_starred ? ' ⭐' : '';
-
-    lines.push(`### ${classificationLabel(log.classification)} ${title}${starred}`);
+  // === Key Insights (aggregated, deduplicated) ===
+  const uniqueInsights = [...new Set(allInsights)].filter((i) => i.length > 3);
+  if (uniqueInsights.length > 0) {
+    lines.push('## Key Insights');
     lines.push('');
-    lines.push(`> ${timeRange}${duration ? ` (${duration})` : ''} ${sentimentEmoji(log.sentiment)}`);
+    for (const insight of uniqueInsights) {
+      lines.push(`> [!tip] ${insight}`);
+    }
+    lines.push('');
+  }
+
+  // === Meaningful Recordings (detail view) ===
+  if (meaningful.length > 0) {
+    lines.push('## Highlights');
     lines.push('');
 
-    // Summary
-    if (log.summary) {
-      lines.push(log.summary);
-      lines.push('');
-    }
+    for (const log of meaningful) {
+      const time = formatTimeJST(log.start_time);
+      const duration = formatDuration(log.duration_seconds);
+      const title = log.title || 'Untitled';
+      const starred = log.is_starred ? ' ⭐' : '';
 
-    // Key insights
-    if (log.key_insights && log.key_insights.length > 0) {
-      lines.push('**重要な気づき:**');
-      for (const insight of log.key_insights) {
-        lines.push(`- ${insight}`);
+      lines.push(`### ${classificationLabel(log.classification)} ${title}${starred}`);
+      lines.push(`*${time} (${duration || '不明'})*`);
+      lines.push('');
+
+      if (log.summary) {
+        lines.push(log.summary);
+        lines.push('');
       }
-      lines.push('');
-    }
 
-    // Speakers
-    if (log.speakers && log.speakers.length > 0) {
-      lines.push(`**話者**: ${log.speakers.join(', ')}`);
-      lines.push('');
-    }
-
-    // Action items for this recording
-    if (log.action_items && log.action_items.length > 0) {
-      lines.push('**アクション:**');
-      for (const item of log.action_items) {
-        lines.push(`- [ ] ${item}`);
+      const topics = parseJsonArray(log.topics);
+      if (topics.length > 0) {
+        lines.push(`**Topics**: ${topics.join(', ')}`);
+        lines.push('');
       }
+
+      const insights = parseJsonArray(log.key_insights);
+      if (insights.length > 0) {
+        for (const insight of insights) {
+          lines.push(`- 💡 ${insight}`);
+        }
+        lines.push('');
+      }
+
+      const actions = parseJsonArray(log.action_items);
+      if (actions.length > 0) {
+        for (const item of actions) {
+          lines.push(`- [ ] ${item}`);
+        }
+        lines.push('');
+      }
+
+      lines.push('---');
       lines.push('');
     }
+  }
 
-    lines.push('---');
+  // === Casual recordings (compact list) ===
+  if (casual.length > 0) {
+    lines.push('## Other');
+    lines.push('');
+    for (const log of casual) {
+      const time = formatTimeJST(log.start_time);
+      const title = log.title || 'Untitled';
+      const dur = formatDuration(log.duration_seconds);
+      const summary = log.summary ? ` — ${log.summary.substring(0, 60)}` : '';
+      lines.push(`- **${time}** ${title} (${dur || '?'})${summary}`);
+    }
     lines.push('');
   }
 
