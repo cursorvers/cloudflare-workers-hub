@@ -18,14 +18,14 @@ database_id = "4164f0fc-d6bb-4e78-86d1-2601d762d6de"
 binding = "CACHE"
 id = "378a478680ec41d280737181530f58a9"
 
-# R2 bucket for audio staging and Obsidian vault
-[[r2_buckets]]
-binding = "AUDIO_STAGING"
-bucket_name = "voice-messages"
+# R2 bucket for audio staging and Obsidian vault (requires R2 enabled on account)
+# [[r2_buckets]]
+# binding = "AUDIO_STAGING"
+# bucket_name = "voice-messages"
 
-[[r2_buckets]]
-binding = "OBSIDIAN_VAULT"
-bucket_name = "obsidian-vault"
+# [[r2_buckets]]
+# binding = "OBSIDIAN_VAULT"
+# bucket_name = "obsidian-vault"
 
 # Vectorize for semantic search
 [[vectorize]]
@@ -61,13 +61,13 @@ database_id = "4164f0fc-d6bb-4e78-86d1-2601d762d6de"
 binding = "CACHE"
 id = "378a478680ec41d280737181530f58a9"
 
-[[env.production.r2_buckets]]
-binding = "AUDIO_STAGING"
-bucket_name = "voice-messages"
+# [[env.production.r2_buckets]]
+# binding = "AUDIO_STAGING"
+# bucket_name = "voice-messages"
 
-[[env.production.r2_buckets]]
-binding = "OBSIDIAN_VAULT"
-bucket_name = "obsidian-vault"
+# [[env.production.r2_buckets]]
+# binding = "OBSIDIAN_VAULT"
+# bucket_name = "obsidian-vault"
 
 [[env.production.vectorize]]
 binding = "KNOWLEDGE_INDEX"
