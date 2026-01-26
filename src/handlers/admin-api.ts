@@ -30,10 +30,20 @@ export async function handleAdminAPI(request: Request, env: Env, path: string): 
   // POST /api/admin/apikey/mapping - Create API key -> userId mapping
   if (path === '/api/admin/apikey/mapping' && request.method === 'POST') {
     try {
-      const body = await request.json() as { apiKey: string; userId: string };
+      const body = await request.json() as { apiKey: string; userId: string; role?: string };
 
       if (!body.apiKey || !body.userId) {
         return new Response(JSON.stringify({ error: 'Missing required fields: apiKey, userId' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Validate role if provided
+      const validRoles = ['service', 'user'] as const;
+      const role = body.role || 'user';
+      if (!validRoles.includes(role as typeof validRoles[number])) {
+        return new Response(JSON.stringify({ error: 'Invalid role. Must be "service" or "user"' }), {
           status: 400,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -49,17 +59,20 @@ export async function handleAdminAPI(request: Request, env: Env, path: string): 
       const keyHash = await hashAPIKey(body.apiKey);
       const mappingKey = `apikey:mapping:${keyHash}`;
 
-      await env.CACHE.put(mappingKey, JSON.stringify({ userId: body.userId }));
+      const mappingValue = { userId: body.userId, role };
+      await env.CACHE.put(mappingKey, JSON.stringify(mappingValue));
 
       safeLog.log('[Admin API] Created API key mapping', {
         keyHash: keyHash.substring(0, 8),
         userId: maskUserId(body.userId),
+        role,
       });
 
       return new Response(JSON.stringify({
         success: true,
         keyHash: keyHash.substring(0, 8),
         userId: body.userId,
+        role,
       }), {
         status: 201,
         headers: { 'Content-Type': 'application/json' },

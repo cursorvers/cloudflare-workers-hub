@@ -83,14 +83,20 @@ export async function hashAPIKey(apiKey: string): Promise<string> {
   return hashHex.substring(0, 16);
 }
 
+interface APIKeyMapping {
+  userId: string;
+  role?: 'service' | 'user';
+}
+
 /**
- * Extract userId from API key by looking up KV mapping
+ * Extract userId and role from API key by looking up KV mapping
  * Returns null if mapping doesn't exist
  *
  * SECURITY: This prevents IDOR by deriving userId from cryptographic API key
- * instead of trusting URL parameters
+ * instead of trusting URL parameters.
+ * Service role keys (role: 'service') bypass per-user checks for system daemons.
  */
-async function extractUserIdFromKey(apiKey: string, env: Env): Promise<string | null> {
+async function extractUserIdFromKey(apiKey: string, env: Env): Promise<APIKeyMapping | null> {
   if (!env.CACHE) {
     safeLog.error('[API] CACHE KV namespace not available');
     return null;
@@ -99,21 +105,23 @@ async function extractUserIdFromKey(apiKey: string, env: Env): Promise<string | 
   const keyHash = await hashAPIKey(apiKey);
   const mappingKey = `apikey:mapping:${keyHash}`;
 
-  const mapping = await env.CACHE.get(mappingKey, 'json') as { userId: string } | null;
+  const mapping = await env.CACHE.get(mappingKey, 'json') as APIKeyMapping | null;
 
   if (!mapping || !mapping.userId) {
     safeLog.warn('[API] No userId mapping found for API key', { keyHash: keyHash.substring(0, 8) });
     return null;
   }
 
-  return mapping.userId;
+  return mapping;
 }
 
 /**
  * Verify that the requested userId matches the userId derived from API key
  * Returns true if authorized, false otherwise
  *
- * SECURITY: Prevents IDOR by ensuring users can only access their own data
+ * SECURITY: Prevents IDOR by ensuring users can only access their own data.
+ * Service role keys (role: 'service') bypass per-user checks for system daemons
+ * like assistant-daemon.js that process tasks for all users.
  */
 export async function authorizeUserAccess(
   request: Request,
@@ -126,11 +134,23 @@ export async function authorizeUserAccess(
     return false;
   }
 
-  const derivedUserId = await extractUserIdFromKey(apiKey, env);
-  if (!derivedUserId) {
+  const mapping = await extractUserIdFromKey(apiKey, env);
+  if (!mapping) {
     safeLog.warn('[API] Failed to derive userId from API key');
     return false;
   }
+
+  // Service role: bypass per-user check (for system daemons)
+  if (mapping.role === 'service') {
+    safeLog.log('[API:audit] Service role access', {
+      targetUserId: maskUserId(requestedUserId),
+      serviceId: maskUserId(mapping.userId),
+      endpoint: new URL(request.url).pathname,
+    });
+    return true;
+  }
+
+  const derivedUserId = mapping.userId;
 
   // Constant-time comparison to prevent timing attacks
   // Always execute full comparison regardless of length to prevent timing leaks

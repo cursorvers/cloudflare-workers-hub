@@ -250,5 +250,60 @@ describe('Queue API Security', () => {
 
       expect(result).toBe(false);
     });
+
+    it('should authorize service role for any userId', async () => {
+      const apiKey = 'service-api-key';
+      const request = createRequest({ 'X-API-Key': apiKey });
+
+      const mockKV = {
+        get: async (_key: string, format?: string) => {
+          const mapping = { userId: 'system-daemon', role: 'service' };
+          return format === 'json' ? mapping : JSON.stringify(mapping);
+        },
+      } as any;
+
+      const env = createEnv({ CACHE: mockKV });
+
+      // Service role should access ANY user's data
+      expect(await authorizeUserAccess(request, 'user-alice', env)).toBe(true);
+      expect(await authorizeUserAccess(request, 'user-bob', env)).toBe(true);
+      expect(await authorizeUserAccess(request, 'unknown-user', env)).toBe(true);
+    });
+
+    it('should not grant service role when role is user', async () => {
+      const apiKey = 'user-api-key';
+      const request = createRequest({ 'X-API-Key': apiKey });
+
+      const mockKV = {
+        get: async (_key: string, format?: string) => {
+          const mapping = { userId: 'user-alice', role: 'user' };
+          return format === 'json' ? mapping : JSON.stringify(mapping);
+        },
+      } as any;
+
+      const env = createEnv({ CACHE: mockKV });
+
+      // Should only access own data
+      expect(await authorizeUserAccess(request, 'user-alice', env)).toBe(true);
+      expect(await authorizeUserAccess(request, 'user-bob', env)).toBe(false);
+    });
+
+    it('should not grant service role when role is absent', async () => {
+      const apiKey = 'legacy-api-key';
+      const request = createRequest({ 'X-API-Key': apiKey });
+
+      const mockKV = {
+        get: async (_key: string, format?: string) => {
+          const mapping = { userId: 'user-legacy' }; // No role field
+          return format === 'json' ? mapping : JSON.stringify(mapping);
+        },
+      } as any;
+
+      const env = createEnv({ CACHE: mockKV });
+
+      // Legacy mapping without role should work as user
+      expect(await authorizeUserAccess(request, 'user-legacy', env)).toBe(true);
+      expect(await authorizeUserAccess(request, 'other-user', env)).toBe(false);
+    });
   });
 });

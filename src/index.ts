@@ -53,6 +53,32 @@ const commHub = new CommHubAdapter();
 // Startup check flag (Cloudflare Workers are stateless, so check on first request)
 let startupCheckDone = false;
 let commHubInitialized = false;
+let serviceRoleMappingsInitialized = false;
+
+/**
+ * Ensure service role KV mappings exist for system API keys.
+ * Runs once on first request. Idempotent - skips if mapping already exists.
+ */
+async function ensureServiceRoleMappings(env: Env): Promise<void> {
+  if (!env.CACHE) return;
+
+  const keysToMap: Array<{ key: string | undefined; serviceId: string }> = [
+    { key: env.ASSISTANT_API_KEY, serviceId: 'system-daemon' },
+    { key: env.ADMIN_API_KEY, serviceId: 'system-admin' },
+  ];
+
+  for (const { key, serviceId } of keysToMap) {
+    if (!key) continue;
+    const keyHash = await hashAPIKey(key);
+    const mappingKey = `apikey:mapping:${keyHash}`;
+
+    const existing = await env.CACHE.get(mappingKey);
+    if (existing) continue;
+
+    await env.CACHE.put(mappingKey, JSON.stringify({ userId: serviceId, role: 'service' }));
+    safeLog.log('[Init] Created service role mapping', { serviceId, keyHash: keyHash.substring(0, 8) });
+  }
+}
 
 
 async function normalizeEvent(
@@ -614,6 +640,16 @@ export default {
     if (!commHubInitialized && env.CACHE) {
       commHub.setKV(env.CACHE);
       commHubInitialized = true;
+    }
+
+    // Initialize service role KV mappings (idempotent, runs once per isolate)
+    if (!serviceRoleMappingsInitialized) {
+      try {
+        await ensureServiceRoleMappings(env);
+      } catch (e) {
+        safeLog.error('[Init] Service role mapping failed', { error: String(e) });
+      }
+      serviceRoleMappingsInitialized = true;
     }
 
     const url = new URL(request.url);
