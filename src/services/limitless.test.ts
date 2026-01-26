@@ -24,7 +24,7 @@ vi.mock('./knowledge', () => ({
 describe('Limitless Service', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockFetch.mockReset(); // Reset mock implementation between tests
+    mockFetch.mockReset();
   });
 
   describe('getRecentLifelogs', () => {
@@ -32,21 +32,26 @@ describe('Limitless Service', () => {
       const mockLifelogs: Lifelog[] = [
         {
           id: 'lifelog-1',
+          title: 'Test Meeting',
+          markdown: '## Test\n\n- Speaker: Hello world',
+          contents: [
+            { content: 'Test', type: 'heading1' },
+            { content: 'Hello world', type: 'blockquote', speakerName: 'Speaker' },
+          ],
           startTime: '2024-01-25T10:00:00Z',
           endTime: '2024-01-25T10:30:00Z',
-          transcript: 'Test transcript',
-          summary: 'Test summary',
-          tags: ['work', 'meeting'],
-          duration: 1800,
         },
       ];
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ lifelogs: mockLifelogs, cursor: 'next-cursor' }),
+        json: async () => ({
+          data: { lifelogs: mockLifelogs },
+          meta: { lifelogs: { count: 1, nextCursor: 'next-cursor' } },
+        }),
       });
 
-      const result = await getRecentLifelogs('test-api-key', { limit: 20 });
+      const result = await getRecentLifelogs('test-api-key', { limit: 10 });
 
       expect(result.lifelogs).toHaveLength(1);
       expect(result.lifelogs[0].id).toBe('lifelog-1');
@@ -66,19 +71,23 @@ describe('Limitless Service', () => {
       const mockLifelogs: Lifelog[] = [
         {
           id: 'lifelog-2',
+          title: 'Second Page',
+          markdown: '## Second page content',
           startTime: '2024-01-25T11:00:00Z',
           endTime: '2024-01-25T11:30:00Z',
-          transcript: 'Second page transcript',
         },
       ];
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ lifelogs: mockLifelogs }),
+        json: async () => ({
+          data: { lifelogs: mockLifelogs },
+          meta: { lifelogs: { count: 1 } },
+        }),
       });
 
       const result = await getRecentLifelogs('test-api-key', {
-        limit: 20,
+        limit: 10,
         cursor: 'existing-cursor',
       });
 
@@ -95,7 +104,10 @@ describe('Limitless Service', () => {
         .mockRejectedValueOnce(new Error('Network error'))
         .mockResolvedValueOnce({
           ok: true,
-          json: async () => ({ lifelogs: [] }),
+          json: async () => ({
+            data: { lifelogs: [] },
+            meta: { lifelogs: { count: 0 } },
+          }),
         });
 
       const result = await getRecentLifelogs('test-api-key');
@@ -112,12 +124,7 @@ describe('Limitless Service', () => {
     });
 
     it('should validate input options', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ lifelogs: [] }),
-      });
-
-      // Invalid limit (too high)
+      // Invalid limit (too high for beta API: max 10)
       await expect(
         getRecentLifelogs('test-api-key', { limit: 200 } as any)
       ).rejects.toThrow();
@@ -131,7 +138,10 @@ describe('Limitless Service', () => {
     it('should handle time range filters', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ lifelogs: [] }),
+        json: async () => ({
+          data: { lifelogs: [] },
+          meta: { lifelogs: { count: 0 } },
+        }),
       });
 
       const startTime = '2024-01-25T00:00:00Z';
@@ -154,10 +164,10 @@ describe('Limitless Service', () => {
     it('should fetch a specific lifelog', async () => {
       const mockLifelog: Lifelog = {
         id: 'lifelog-123',
+        title: 'Specific Lifelog',
+        markdown: '## Specific lifelog content',
         startTime: '2024-01-25T10:00:00Z',
         endTime: '2024-01-25T10:30:00Z',
-        transcript: 'Specific lifelog transcript',
-        summary: 'Specific lifelog summary',
       };
 
       mockFetch.mockResolvedValueOnce({
@@ -168,7 +178,7 @@ describe('Limitless Service', () => {
       const result = await getLifelog('test-api-key', 'lifelog-123');
 
       expect(result.id).toBe('lifelog-123');
-      expect(result.transcript).toBe('Specific lifelog transcript');
+      expect(result.title).toBe('Specific Lifelog');
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/lifelogs/lifelog-123'),
         expect.any(Object)
@@ -292,23 +302,30 @@ describe('Limitless Service', () => {
       const mockLifelogs: Lifelog[] = [
         {
           id: 'lifelog-1',
+          title: 'Sync test meeting',
+          markdown: '## Summary\n\n- Speaker: Hello',
+          contents: [
+            { content: 'Summary', type: 'heading1' },
+            { content: 'Hello', type: 'blockquote', speakerName: 'Speaker' },
+          ],
           startTime: '2024-01-25T10:00:00Z',
           endTime: '2024-01-25T10:30:00Z',
-          transcript: 'Sync test transcript',
-          summary: 'Sync test summary',
-          tags: ['test'],
         },
         {
           id: 'lifelog-2',
+          title: 'Second meeting',
+          markdown: '## Notes\n\n- Person: world',
           startTime: '2024-01-25T11:00:00Z',
           endTime: '2024-01-25T11:30:00Z',
-          transcript: 'Second sync test',
         },
       ];
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ lifelogs: mockLifelogs }),
+        json: async () => ({
+          data: { lifelogs: mockLifelogs },
+          meta: { lifelogs: { count: 2 } },
+        }),
       });
 
       const result = await syncToKnowledge(mockEnv, 'test-api-key', {
@@ -327,19 +344,23 @@ describe('Limitless Service', () => {
           id: 'lifelog-empty',
           startTime: '2024-01-25T10:00:00Z',
           endTime: '2024-01-25T10:30:00Z',
-          // No transcript or summary
+          // No markdown, no contents
         },
         {
           id: 'lifelog-valid',
+          title: 'Valid lifelog',
+          markdown: '## Valid content',
           startTime: '2024-01-25T11:00:00Z',
           endTime: '2024-01-25T11:30:00Z',
-          transcript: 'Valid transcript',
         },
       ];
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ lifelogs: mockLifelogs }),
+        json: async () => ({
+          data: { lifelogs: mockLifelogs },
+          meta: { lifelogs: { count: 2 } },
+        }),
       });
 
       const result = await syncToKnowledge(mockEnv, 'test-api-key', {
@@ -355,15 +376,18 @@ describe('Limitless Service', () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          lifelogs: [
-            {
-              id: 'lifelog-page1',
-              startTime: '2024-01-25T10:00:00Z',
-              endTime: '2024-01-25T10:30:00Z',
-              transcript: 'First page',
-            },
-          ],
-          cursor: 'page-2-cursor',
+          data: {
+            lifelogs: [
+              {
+                id: 'lifelog-page1',
+                title: 'Page 1',
+                markdown: '## First page',
+                startTime: '2024-01-25T10:00:00Z',
+                endTime: '2024-01-25T10:30:00Z',
+              },
+            ],
+          },
+          meta: { lifelogs: { count: 1, nextCursor: 'page-2-cursor' } },
         }),
       });
 
@@ -371,14 +395,18 @@ describe('Limitless Service', () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          lifelogs: [
-            {
-              id: 'lifelog-page2',
-              startTime: '2024-01-25T11:00:00Z',
-              endTime: '2024-01-25T11:30:00Z',
-              transcript: 'Second page',
-            },
-          ],
+          data: {
+            lifelogs: [
+              {
+                id: 'lifelog-page2',
+                title: 'Page 2',
+                markdown: '## Second page',
+                startTime: '2024-01-25T11:00:00Z',
+                endTime: '2024-01-25T11:30:00Z',
+              },
+            ],
+          },
+          meta: { lifelogs: { count: 1 } },
         }),
       });
 
@@ -393,17 +421,19 @@ describe('Limitless Service', () => {
     it('should download audio if includeAudio is true', async () => {
       const mockLifelog: Lifelog = {
         id: 'lifelog-audio',
+        title: 'Audio test',
+        markdown: '## Audio recording',
         startTime: '2024-01-25T10:00:00Z',
         endTime: '2024-01-25T10:30:00Z',
-        transcript: 'Audio test',
-        audioUrl: 'https://example.com/audio.ogg',
-        duration: 1800,
       };
 
       // First call: getRecentLifelogs
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ lifelogs: [mockLifelog] }),
+        json: async () => ({
+          data: { lifelogs: [mockLifelog] },
+          meta: { lifelogs: { count: 1 } },
+        }),
       });
 
       // Second call: downloadAudio
@@ -424,16 +454,19 @@ describe('Limitless Service', () => {
     it('should continue sync even if audio download fails', async () => {
       const mockLifelog: Lifelog = {
         id: 'lifelog-audio-fail',
+        title: 'Audio fail test',
+        markdown: '## Audio download will fail',
         startTime: '2024-01-25T10:00:00Z',
         endTime: '2024-01-25T10:30:00Z',
-        transcript: 'Audio download will fail',
-        audioUrl: 'https://example.com/audio.ogg',
       };
 
       // First call: getRecentLifelogs
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ lifelogs: [mockLifelog] }),
+        json: async () => ({
+          data: { lifelogs: [mockLifelog] },
+          meta: { lifelogs: { count: 1 } },
+        }),
       });
 
       // Second call: downloadAudio fails
@@ -444,7 +477,7 @@ describe('Limitless Service', () => {
         includeAudio: true,
       });
 
-      // Should still sync the transcript/summary
+      // Should still sync the markdown content
       expect(result.synced).toBe(1);
     });
 
@@ -456,14 +489,18 @@ describe('Limitless Service', () => {
 
       const mockLifelog: Lifelog = {
         id: 'lifelog-fail-storage',
+        title: 'Storage fail test',
+        markdown: '## This will fail',
         startTime: '2024-01-25T10:00:00Z',
         endTime: '2024-01-25T10:30:00Z',
-        transcript: 'This will fail',
       };
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ lifelogs: [mockLifelog] }),
+        json: async () => ({
+          data: { lifelogs: [mockLifelog] },
+          meta: { lifelogs: { count: 1 } },
+        }),
       });
 
       const result = await syncToKnowledge(mockEnv, 'test-api-key', {
@@ -472,7 +509,6 @@ describe('Limitless Service', () => {
 
       expect(result.synced).toBe(0);
       expect(result.errors).toHaveLength(1);
-      // Check that error contains storage failure message (not specific ID due to test contamination)
       expect(result.errors[0]).toContain('Storage failed');
     });
 

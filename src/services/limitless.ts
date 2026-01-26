@@ -31,17 +31,30 @@ const LimitlessConfigSchema = z.object({
 export type LimitlessConfig = z.infer<typeof LimitlessConfigSchema>;
 
 /**
- * Lifelog schema (from Limitless API)
+ * Lifelog content block (from Limitless API)
+ */
+const LifelogContentSchema = z.object({
+  content: z.string(),
+  type: z.enum(['heading1', 'heading2', 'blockquote']),
+  speakerName: z.string().optional(),
+  startTime: z.string().optional(),
+  endTime: z.string().optional(),
+  startOffsetMs: z.number().optional(),
+  endOffsetMs: z.number().optional(),
+});
+
+/**
+ * Lifelog schema (from Limitless API - actual response format)
  */
 const LifelogSchema = z.object({
   id: z.string(),
-  startTime: z.string().datetime(),
-  endTime: z.string().datetime(),
-  transcript: z.string().optional(),
-  summary: z.string().optional(),
-  tags: z.array(z.string()).optional(),
-  duration: z.number().optional(), // seconds
-  audioUrl: z.string().url().optional(),
+  title: z.string().optional(),
+  markdown: z.string().optional(),
+  contents: z.array(LifelogContentSchema).optional(),
+  startTime: z.string(),
+  endTime: z.string(),
+  isStarred: z.boolean().optional(),
+  updatedAt: z.string().optional(),
 });
 
 export type Lifelog = z.infer<typeof LifelogSchema>;
@@ -50,10 +63,10 @@ export type Lifelog = z.infer<typeof LifelogSchema>;
  * Options for fetching lifelogs
  */
 const GetLifelogsOptionsSchema = z.object({
-  limit: z.number().min(1).max(100).optional().default(20),
+  limit: z.number().min(1).max(10).optional().default(10), // API beta: max 10
   cursor: z.string().optional(),
-  startTime: z.string().datetime().optional(),
-  endTime: z.string().datetime().optional(),
+  startTime: z.string().optional(),
+  endTime: z.string().optional(),
 });
 
 export type GetLifelogsOptions = z.infer<typeof GetLifelogsOptionsSchema>;
@@ -143,19 +156,21 @@ export async function getRecentLifelogs(
       }
     );
 
-    const data = await response.json();
+    const rawData = await response.json();
 
-    // Parse and validate response
-    const lifelogs = z.array(LifelogSchema).parse(data.lifelogs || []);
+    // Parse actual API response: { data: { lifelogs: [...] }, meta: { lifelogs: { nextCursor } } }
+    const lifelogsArray = rawData?.data?.lifelogs || rawData?.lifelogs || [];
+    const lifelogs = z.array(LifelogSchema).parse(lifelogsArray);
+    const cursor = rawData?.meta?.lifelogs?.nextCursor || rawData?.cursor;
 
     safeLog.info('[Limitless] Successfully fetched lifelogs', {
       count: lifelogs.length,
-      hasMore: !!data.cursor,
+      hasMore: !!cursor,
     });
 
     return {
       lifelogs,
-      cursor: data.cursor,
+      cursor,
     };
   } catch (error) {
     safeLog.error('[Limitless] Failed to fetch lifelogs', {
@@ -312,7 +327,7 @@ export async function syncToKnowledge(
 
     while (hasMore) {
       const result = await getRecentLifelogs(apiKey, {
-        limit: 20,
+        limit: 10, // API beta max
         cursor,
         startTime: startTime.toISOString(),
         endTime: endTime.toISOString(),
@@ -321,8 +336,8 @@ export async function syncToKnowledge(
       // Process each lifelog
       for (const lifelog of result.lifelogs) {
         try {
-          // Skip if no transcript or summary
-          if (!lifelog.transcript && !lifelog.summary) {
+          // Skip if no meaningful content (no markdown and no contents)
+          if (!lifelog.markdown && (!lifelog.contents || lifelog.contents.length === 0)) {
             safeLog.info('[Limitless] Skipping lifelog without content', {
               lifelogId: lifelog.id,
             });
@@ -330,19 +345,24 @@ export async function syncToKnowledge(
             continue;
           }
 
+          // Extract transcript from blockquote contents
+          const transcript = lifelog.contents
+            ?.filter((c) => c.type === 'blockquote')
+            .map((c) => `${c.speakerName || 'Unknown'}: ${c.content}`)
+            .join('\n') || '';
+
           // Prepare knowledge item
           const knowledgeItem: KnowledgeItem = {
             userId: validatedOptions.userId,
-            source: 'manual', // Could add 'limitless' to source enum
+            source: 'manual',
             type: 'voice_note',
-            title: lifelog.summary || `Pendant Recording - ${new Date(lifelog.startTime).toLocaleString()}`,
-            content: lifelog.transcript || lifelog.summary || '',
-            tags: lifelog.tags,
+            title: lifelog.title || `Pendant Recording - ${new Date(lifelog.startTime).toLocaleString()}`,
+            content: lifelog.markdown || transcript,
             createdAt: lifelog.startTime,
           };
 
           // Download and store audio if requested
-          if (validatedOptions.includeAudio && lifelog.audioUrl) {
+          if (validatedOptions.includeAudio) {
             try {
               const audioBuffer = await downloadAudio(apiKey, {
                 startTime: lifelog.startTime,
@@ -360,7 +380,6 @@ export async function syncToKnowledge(
                   customMetadata: {
                     userId: validatedOptions.userId,
                     lifelogId: lifelog.id,
-                    duration: lifelog.duration?.toString() || '',
                   },
                 });
 
