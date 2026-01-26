@@ -56,4 +56,6 @@ export interface Env {
   // Supabase (Limitless pipeline storage)
   SUPABASE_URL?: string;           // Supabase project URL
   SUPABASE_SERVICE_ROLE_KEY?: string; // Supabase service role key (server-side only)
+  // OpenAI (optional, for higher-quality lifelog processing)
+  OPENAI_API_KEY?: string;         // GPT-4o-mini for classification/summarization
 }

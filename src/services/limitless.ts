@@ -533,7 +533,7 @@ export async function syncToSupabase(
             isStarred: lifelog.isStarred,
           };
 
-          const processed = await processLifelog(env.AI, rawInput);
+          const processed = await processLifelog(env.AI, rawInput, env.OPENAI_API_KEY);
 
           // Calculate duration
           const startMs = new Date(lifelog.startTime).getTime();

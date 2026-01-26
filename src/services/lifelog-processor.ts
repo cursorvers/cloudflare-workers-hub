@@ -81,9 +81,13 @@ const AIResponseSchema = z.object({
 // Constants
 // ============================================================================
 
-const AI_MODEL = '@cf/meta/llama-3.1-8b-instruct';
-const MAX_CONTENT_LENGTH = 4000; // Limit input to avoid token overflow
+const WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct';
+const OPENAI_MODEL = 'gpt-4o-mini';
+const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
+const MAX_CONTENT_LENGTH_WORKERS = 4000; // Workers AI: small model limit
+const MAX_CONTENT_LENGTH_OPENAI = 16000; // OpenAI: much larger context
 const AI_TIMEOUT_MS = 15000; // 15 seconds
+const OPENAI_TIMEOUT_MS = 30000; // 30 seconds (external API)
 
 // ============================================================================
 // Main Processing Function
@@ -101,7 +105,8 @@ const AI_TIMEOUT_MS = 15000; // 15 seconds
  */
 export async function processLifelog(
   ai: Ai,
-  lifelog: RawLifelogInput
+  lifelog: RawLifelogInput,
+  openaiApiKey?: string
 ): Promise<ProcessedLifelog> {
   // Extract speakers from content blocks
   const speakers = extractSpeakers(lifelog);
@@ -128,7 +133,10 @@ export async function processLifelog(
   }
 
   try {
-    const result = await classifyAndSummarize(ai, textContent, lifelog.title);
+    // Use OpenAI (GPT-4o-mini) if API key is available, else fall back to Workers AI
+    const result = openaiApiKey
+      ? await classifyAndSummarizeOpenAI(openaiApiKey, textContent, lifelog.title)
+      : await classifyAndSummarize(ai, textContent, lifelog.title);
 
     return {
       ...result,
@@ -167,8 +175,8 @@ async function classifyAndSummarize(
   title?: string
 ): Promise<Omit<ProcessedLifelog, 'speakers'>> {
   // Truncate content if too long
-  const truncatedContent = content.length > MAX_CONTENT_LENGTH
-    ? content.substring(0, MAX_CONTENT_LENGTH) + '\n...(truncated)'
+  const truncatedContent = content.length > MAX_CONTENT_LENGTH_WORKERS
+    ? content.substring(0, MAX_CONTENT_LENGTH_WORKERS) + '\n...(truncated)'
     : content;
 
   const systemPrompt = `あなたは音声録音のテキストを分析するアシスタントです。
@@ -203,7 +211,7 @@ async function classifyAndSummarize(
 
   try {
     const response = await (ai.run as (model: string, input: unknown, options?: unknown) => Promise<unknown>)(
-      AI_MODEL,
+      WORKERS_AI_MODEL,
       {
         messages: [
           { role: 'system', content: systemPrompt },
@@ -233,6 +241,124 @@ async function classifyAndSummarize(
     return parsed;
   } catch (error) {
     clearTimeout(timeoutId);
+    throw error;
+  }
+}
+
+/**
+ * Call OpenAI API (GPT-4o-mini) for higher-quality classification and summarization
+ */
+async function classifyAndSummarizeOpenAI(
+  apiKey: string,
+  content: string,
+  title?: string
+): Promise<Omit<ProcessedLifelog, 'speakers'>> {
+  const truncatedContent = content.length > MAX_CONTENT_LENGTH_OPENAI
+    ? content.substring(0, MAX_CONTENT_LENGTH_OPENAI) + '\n...(truncated)'
+    : content;
+
+  const systemPrompt = `あなたは音声書き起こしの専門分析者です。Limitless Pendantで録音された音声テキストを分析します。
+
+## 分析ルール
+
+### 分類（classification）
+以下から最も適切なカテゴリを1つ選択:
+- insight: 重要な学び、アイデア、知見が含まれる（講演、教育的内容、技術解説）
+- meeting: 会議、打ち合わせ、商談、イベント運営
+- casual: 日常会話、移動中の環境音、アナウンス
+- brainstorm: アイデア出し、企画検討
+- todo: タスク・予定の確認、計画
+- reflection: 振り返り、反省、感想
+
+重要: 電車アナウンスや環境音は "casual"。内容が薄い短い録音も "casual"。
+
+### 要約（summary）
+- 3〜5文で**具体的に**記述（固有名詞、数字、キーワードを含める）
+- 「〜についての会話が記録されています」のような空虚な要約は禁止
+- 誰が何を話したか、核心的な内容を書く
+
+### 重要な気づき（keyInsights）
+- その録音から得られる**再利用可能な知見**のみ
+- 「会話の進行と確認が重要」のような当たり前のことは書かない
+- 具体的な数字・事実・判断基準を含める
+- なければ空配列
+
+### アクションアイテム（actionItems）
+- 実際に誰かが「やる」と言及した具体的タスクのみ
+- 「確認する」「考える」のような曖昧なものは除外
+- 環境音やアナウンスからアクションを捏造しない
+- なければ空配列
+
+### トピック（topics）
+- 議論された具体的なテーマ（固有名詞優先）
+- 最大5個
+
+必ず以下のJSON形式のみで回答（他のテキスト不要）:
+{
+  "classification": "カテゴリ名",
+  "summary": "具体的な要約",
+  "keyInsights": ["具体的な気づき"],
+  "actionItems": ["具体的なアクション"],
+  "topics": ["トピック"],
+  "sentiment": "positive|neutral|negative|mixed",
+  "confidenceScore": 0.0-1.0
+}`;
+
+  const userPrompt = title
+    ? `タイトル: ${title}\n\n書き起こし:\n${truncatedContent}`
+    : `書き起こし:\n${truncatedContent}`;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(OPENAI_API_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        max_tokens: 1024,
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenAI API error (${response.status}): ${errorText}`);
+    }
+
+    const data = await response.json() as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const aiText = data.choices?.[0]?.message?.content;
+
+    if (!aiText) {
+      throw new Error('Empty response from OpenAI API');
+    }
+
+    const parsed = parseAIResponse(aiText);
+
+    safeLog.info('[Processor] OpenAI processing successful', {
+      model: OPENAI_MODEL,
+      classification: parsed.classification,
+      confidenceScore: parsed.confidenceScore,
+    });
+
+    return parsed;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    // If OpenAI fails, don't silently fall through — let the caller handle it
     throw error;
   }
 }
