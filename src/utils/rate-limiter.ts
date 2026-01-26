@@ -155,7 +155,12 @@ export async function checkRateLimit(
   const key = `ratelimit:${channel}:${identifier}`;
 
   if (env.CACHE) {
-    return checkRateLimitWithKV(env.CACHE, key, config);
+    try {
+      return await checkRateLimitWithKV(env.CACHE, key, config);
+    } catch {
+      // KV failure (e.g., daily put limit exceeded) — fall back to in-memory
+      return checkRateLimitInMemory(key, config);
+    }
   }
 
   return checkRateLimitInMemory(key, config);
