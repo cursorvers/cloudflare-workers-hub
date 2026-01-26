@@ -38,7 +38,7 @@ export type LimitlessConfig = z.infer<typeof LimitlessConfigSchema>;
  */
 const LifelogContentSchema = z.object({
   content: z.string(),
-  type: z.enum(['heading1', 'heading2', 'blockquote']),
+  type: z.string(), // API returns heading1, heading2, heading3, blockquote, etc.
   speakerName: z.string().optional(),
   startTime: z.string().optional(),
   endTime: z.string().optional(),
@@ -92,6 +92,7 @@ const SyncOptionsSchema = z.object({
   userId: z.string().min(1, 'User ID is required'),
   maxAgeHours: z.number().min(1).max(168).optional().default(24),
   includeAudio: z.boolean().optional().default(false),
+  maxItems: z.number().min(1).max(100).optional(), // Limit total items processed (for subrequest budget)
 });
 
 export type SyncOptions = z.infer<typeof SyncOptionsSchema>;
@@ -478,6 +479,7 @@ export async function syncToSupabase(
   const errors: string[] = [];
   let synced = 0;
   let skipped = 0;
+  const maxItems = validatedOptions.maxItems;
 
   try {
     // Calculate time range
@@ -487,8 +489,15 @@ export async function syncToSupabase(
     // Fetch lifelogs in batches
     let cursor: string | undefined = undefined;
     let hasMore = true;
+    let totalProcessed = 0;
 
     while (hasMore) {
+      // Respect maxItems limit (Workers have 50 subrequest budget)
+      if (maxItems && totalProcessed >= maxItems) {
+        safeLog.info('[Limitless] Reached maxItems limit', { maxItems, totalProcessed });
+        break;
+      }
+
       const result = await getRecentLifelogs(apiKey, {
         limit: 10,
         cursor,
@@ -498,6 +507,11 @@ export async function syncToSupabase(
 
       // Process each lifelog
       for (const lifelog of result.lifelogs) {
+        if (maxItems && totalProcessed >= maxItems) {
+          break;
+        }
+        totalProcessed++;
+
         try {
           // Skip if no meaningful content
           if (!lifelog.markdown && (!lifelog.contents || lifelog.contents.length === 0)) {

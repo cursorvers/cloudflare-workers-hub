@@ -297,6 +297,7 @@ describe('handleLimitlessWebhook', () => {
           userId: 'test-user',
           maxAgeHours: 2,
           includeAudio: true,
+          maxItems: 5,
         }
       );
     });

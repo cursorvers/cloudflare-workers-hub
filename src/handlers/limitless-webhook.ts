@@ -160,6 +160,7 @@ export async function handleLimitlessWebhook(
       userId: syncRequest.userId,
       maxAgeHours: syncRequest.maxAgeHours,
       includeAudio: syncRequest.includeAudio,
+      maxItems: 5, // Workers Free Tier: 50 subrequest limit (5 items × ~8 calls + overhead)
     });
 
     const duration = Date.now() - startTime;
@@ -278,37 +279,41 @@ async function checkShouldSync(
   nextAllowedSync?: string;
 }> {
   if (!env.CACHE) {
-    // If no KV, always allow
     return { allowed: true };
   }
 
-  // Determine minimum interval based on maxAgeHours
-  // For 1-hour syncs (typical iPhone trigger), require 10 min gap
-  // For longer syncs, require proportional gap
-  const minIntervalMinutes = Math.max(10, maxAgeHours * 5);
-  const minIntervalMs = minIntervalMinutes * 60 * 1000;
+  try {
+    // Determine minimum interval based on maxAgeHours
+    // For 1-hour syncs (typical iPhone trigger), require 10 min gap
+    // For longer syncs, require proportional gap
+    const minIntervalMinutes = Math.max(10, maxAgeHours * 5);
+    const minIntervalMs = minIntervalMinutes * 60 * 1000;
 
-  const lastSyncKey = `limitless:webhook_last_sync:${userId}`;
-  const lastSyncData = await env.CACHE.get(lastSyncKey);
+    const lastSyncKey = `limitless:webhook_last_sync:${userId}`;
+    const lastSyncData = await env.CACHE.get(lastSyncKey);
 
-  if (!lastSyncData) {
+    if (!lastSyncData) {
+      return { allowed: true };
+    }
+
+    const lastSync = new Date(lastSyncData);
+    const timeSinceLastSync = Date.now() - lastSync.getTime();
+
+    if (timeSinceLastSync < minIntervalMs) {
+      const nextAllowedSync = new Date(lastSync.getTime() + minIntervalMs);
+      return {
+        allowed: false,
+        lastSync: lastSync.toISOString(),
+        minInterval: minIntervalMinutes,
+        nextAllowedSync: nextAllowedSync.toISOString(),
+      };
+    }
+
+    return { allowed: true };
+  } catch {
+    // KV failure — allow sync to proceed
     return { allowed: true };
   }
-
-  const lastSync = new Date(lastSyncData);
-  const timeSinceLastSync = Date.now() - lastSync.getTime();
-
-  if (timeSinceLastSync < minIntervalMs) {
-    const nextAllowedSync = new Date(lastSync.getTime() + minIntervalMs);
-    return {
-      allowed: false,
-      lastSync: lastSync.toISOString(),
-      minInterval: minIntervalMinutes,
-      nextAllowedSync: nextAllowedSync.toISOString(),
-    };
-  }
-
-  return { allowed: true };
 }
 
 /**
@@ -323,25 +328,30 @@ async function updateLastSync(
     return;
   }
 
-  const now = new Date().toISOString();
-  const lastSyncKey = `limitless:webhook_last_sync:${userId}`;
+  try {
+    const now = new Date().toISOString();
+    const lastSyncKey = `limitless:webhook_last_sync:${userId}`;
 
-  // Store last sync timestamp (expires after 24 hours)
-  await env.CACHE.put(lastSyncKey, now, {
-    expirationTtl: 86400, // 24 hours
-  });
+    // Store last sync timestamp (expires after 24 hours)
+    await env.CACHE.put(lastSyncKey, now, {
+      expirationTtl: 86400, // 24 hours
+    });
 
-  // Update webhook stats
-  const statsKey = `limitless:webhook_stats:${userId}`;
-  const existingStats = await env.CACHE.get(statsKey, 'json');
+    // Update webhook stats
+    const statsKey = `limitless:webhook_stats:${userId}`;
+    const existingStats = await env.CACHE.get(statsKey, 'json');
 
-  const stats = {
-    lastSync: now,
-    triggerSource,
-    totalSyncs: ((existingStats as any)?.totalSyncs || 0) + 1,
-  };
+    const stats = {
+      lastSync: now,
+      triggerSource,
+      totalSyncs: ((existingStats as any)?.totalSyncs || 0) + 1,
+    };
 
-  await env.CACHE.put(statsKey, JSON.stringify(stats), {
-    expirationTtl: 604800, // 7 days
-  });
+    await env.CACHE.put(statsKey, JSON.stringify(stats), {
+      expirationTtl: 604800, // 7 days
+    });
+  } catch {
+    // KV failure is non-fatal — sync already completed
+    safeLog.warn('[Limitless Webhook] Failed to update last sync timestamp (KV limit?)');
+  }
 }
