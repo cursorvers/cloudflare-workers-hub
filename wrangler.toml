@@ -34,11 +34,14 @@ index_name = "obsidian-knowledge"
 
 # Cron Triggers
 [triggers]
-crons = ["0 2 * * *"]  # Daily at 2 AM (backup sync for Limitless)
+crons = ["0 * * * *"]  # Every hour (automatic Limitless sync)
 
 # Environment variables
 [vars]
 ENVIRONMENT = "development"
+LIMITLESS_AUTO_SYNC_ENABLED = "true"
+LIMITLESS_USER_ID = "masayuki"
+LIMITLESS_SYNC_INTERVAL_HOURS = "1"
 
 # Development settings
 [dev]

@@ -142,6 +142,7 @@ export async function handleScheduled(
       userId: env.LIMITLESS_USER_ID,
       maxAgeHours: syncIntervalHours + 2, // Fetch slightly more to ensure no gaps
       includeAudio: false, // Don't download audio for backup sync (save bandwidth)
+      maxItems: 5, // Workers Free Tier: 50 subrequest limit per invocation
     });
 
     const duration = Date.now() - startTime;
