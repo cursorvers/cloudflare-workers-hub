@@ -53,4 +53,7 @@ export interface Env {
   LIMITLESS_USER_ID?: string;      // User ID for automatic sync
   LIMITLESS_AUTO_SYNC_ENABLED?: string; // Enable/disable auto-sync (default: false)
   LIMITLESS_SYNC_INTERVAL_HOURS?: string; // Sync interval in hours (default: 1)
+  // Supabase (Limitless pipeline storage)
+  SUPABASE_URL?: string;           // Supabase project URL
+  SUPABASE_SERVICE_ROLE_KEY?: string; // Supabase service role key (server-side only)
 }

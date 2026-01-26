@@ -11,7 +11,7 @@
 import { Env } from '../types';
 import { safeLog, maskUserId } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
-import { syncToKnowledge, LimitlessConfig } from '../services/limitless';
+import { syncToSupabase, LimitlessConfig } from '../services/limitless';
 import { z } from 'zod';
 
 // Validation schemas
@@ -108,7 +108,7 @@ async function handleManualSync(request: Request, env: Env): Promise<Response> {
 
   try {
     // Perform sync
-    const result = await syncToKnowledge(env, limitlessApiKey, {
+    const result = await syncToSupabase(env, limitlessApiKey, {
       userId,
       maxAgeHours: 24, // Default: last 24 hours
       includeAudio: false, // Default: don't download audio
@@ -211,7 +211,7 @@ async function handleCustomSync(request: Request, env: Env): Promise<Response> {
 
   try {
     // Perform sync
-    const result = await syncToKnowledge(env, limitlessApiKey, syncOptions);
+    const result = await syncToSupabase(env, limitlessApiKey, syncOptions);
 
     safeLog.info('[Limitless API] Custom sync completed', {
       userId: maskUserId(syncOptions.userId),

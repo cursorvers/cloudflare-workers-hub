@@ -12,7 +12,7 @@
 import { Env } from '../types';
 import { safeLog, maskUserId } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse, addRateLimitHeaders } from '../utils/rate-limiter';
-import { syncToKnowledge } from '../services/limitless';
+import { syncToSupabase } from '../services/limitless';
 import { z } from 'zod';
 
 // Validation schema for webhook trigger
@@ -156,7 +156,7 @@ export async function handleLimitlessWebhook(
 
     // Perform sync
     const startTime = Date.now();
-    const result = await syncToKnowledge(env, env.LIMITLESS_API_KEY, {
+    const result = await syncToSupabase(env, env.LIMITLESS_API_KEY, {
       userId: syncRequest.userId,
       maxAgeHours: syncRequest.maxAgeHours,
       includeAudio: syncRequest.includeAudio,

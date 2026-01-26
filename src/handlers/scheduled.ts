@@ -8,7 +8,7 @@
 
 import { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
-import { syncToKnowledge } from '../services/limitless';
+import { syncToSupabase } from '../services/limitless';
 
 /**
  * Acquire distributed lock using KV compare-and-swap
@@ -138,7 +138,7 @@ export async function handleScheduled(
     // Perform backup sync (longer time range to catch any missed items)
     // This acts as a safety net for items not caught by iPhone triggers
     const startTime = Date.now();
-    const result = await syncToKnowledge(env, env.LIMITLESS_API_KEY, {
+    const result = await syncToSupabase(env, env.LIMITLESS_API_KEY, {
       userId: env.LIMITLESS_USER_ID,
       maxAgeHours: syncIntervalHours + 2, // Fetch slightly more to ensure no gaps
       includeAudio: false, // Don't download audio for backup sync (save bandwidth)

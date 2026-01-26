@@ -27,7 +27,7 @@ vi.mock('../utils/rate-limiter', () => ({
 }));
 
 vi.mock('../services/limitless', () => ({
-  syncToKnowledge: vi.fn().mockResolvedValue({
+  syncToSupabase: vi.fn().mockResolvedValue({
     synced: 3,
     skipped: 1,
     errors: [],
@@ -279,8 +279,8 @@ describe('handleLimitlessWebhook', () => {
   });
 
   describe('Sync Execution', () => {
-    it('should call syncToKnowledge with correct parameters', async () => {
-      const { syncToKnowledge } = await import('../services/limitless');
+    it('should call syncToSupabase with correct parameters', async () => {
+      const { syncToSupabase } = await import('../services/limitless');
       const env = createMockEnv();
       const request = createMockRequest({
         userId: 'test-user',
@@ -290,7 +290,7 @@ describe('handleLimitlessWebhook', () => {
 
       await handleLimitlessWebhook(request, env);
 
-      expect(syncToKnowledge).toHaveBeenCalledWith(
+      expect(syncToSupabase).toHaveBeenCalledWith(
         env,
         'test-api-key',
         {
@@ -319,8 +319,8 @@ describe('handleLimitlessWebhook', () => {
     });
 
     it('should handle sync errors gracefully', async () => {
-      const { syncToKnowledge } = await import('../services/limitless');
-      (syncToKnowledge as any).mockRejectedValueOnce(new Error('Sync failed'));
+      const { syncToSupabase } = await import('../services/limitless');
+      (syncToSupabase as any).mockRejectedValueOnce(new Error('Sync failed'));
 
       const env = createMockEnv();
       const request = createMockRequest({

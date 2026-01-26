@@ -5,7 +5,8 @@
  * Features:
  * - Fetch recent lifelogs from Limitless.ai
  * - Download audio recordings as Ogg Opus
- * - Sync lifelogs to knowledge service
+ * - Sync lifelogs to Supabase with Workers AI processing
+ * - Legacy sync to knowledge service (D1/R2/Vectorize)
  * - Automatic retry logic with exponential backoff
  * - Pagination support
  */
@@ -14,6 +15,8 @@ import { z } from 'zod';
 import { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { storeKnowledge, KnowledgeItem } from './knowledge';
+import { processLifelog, RawLifelogInput } from './lifelog-processor';
+import { supabaseUpsert, SupabaseConfig } from './supabase-client';
 
 // ============================================================================
 // Zod Schemas
@@ -436,6 +439,166 @@ export async function syncToKnowledge(
       error: String(error),
     });
     throw new Error(`Sync to knowledge failed: ${String(error)}`);
+  }
+}
+
+/**
+ * Sync lifelogs to Supabase with Workers AI processing
+ *
+ * New pipeline: Limitless API → Workers AI (classify+summarize) → Supabase PostgreSQL
+ *
+ * @param env - Cloudflare Workers environment (needs AI, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+ * @param apiKey - Limitless API key
+ * @param options - Sync options (userId, maxAgeHours, includeAudio)
+ * @returns Number of lifelogs synced, skipped, and errors
+ */
+export async function syncToSupabase(
+  env: Env,
+  apiKey: string,
+  options: SyncOptions
+): Promise<{ synced: number; skipped: number; errors: string[] }> {
+  // Validate inputs
+  const validatedOptions = SyncOptionsSchema.parse(options);
+
+  // Verify Supabase configuration
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('Supabase not configured: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY required');
+  }
+
+  const supabaseConfig: SupabaseConfig = {
+    url: env.SUPABASE_URL,
+    serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+  };
+
+  safeLog.info('[Limitless] Starting Supabase sync', {
+    userId: validatedOptions.userId,
+    maxAgeHours: validatedOptions.maxAgeHours,
+  });
+
+  const errors: string[] = [];
+  let synced = 0;
+  let skipped = 0;
+
+  try {
+    // Calculate time range
+    const endTime = new Date();
+    const startTime = new Date(endTime.getTime() - validatedOptions.maxAgeHours * 60 * 60 * 1000);
+
+    // Fetch lifelogs in batches
+    let cursor: string | undefined = undefined;
+    let hasMore = true;
+
+    while (hasMore) {
+      const result = await getRecentLifelogs(apiKey, {
+        limit: 10,
+        cursor,
+        startTime: startTime.toISOString(),
+        endTime: endTime.toISOString(),
+      });
+
+      // Process each lifelog
+      for (const lifelog of result.lifelogs) {
+        try {
+          // Skip if no meaningful content
+          if (!lifelog.markdown && (!lifelog.contents || lifelog.contents.length === 0)) {
+            safeLog.info('[Limitless] Skipping lifelog without content', {
+              lifelogId: lifelog.id,
+            });
+            skipped++;
+            continue;
+          }
+
+          // Process with Workers AI (classification + summarization)
+          const rawInput: RawLifelogInput = {
+            id: lifelog.id,
+            title: lifelog.title,
+            markdown: lifelog.markdown,
+            contents: lifelog.contents,
+            startTime: lifelog.startTime,
+            endTime: lifelog.endTime,
+            isStarred: lifelog.isStarred,
+          };
+
+          const processed = await processLifelog(env.AI, rawInput);
+
+          // Calculate duration
+          const startMs = new Date(lifelog.startTime).getTime();
+          const endMs = new Date(lifelog.endTime).getTime();
+          const durationSeconds = Math.round((endMs - startMs) / 1000);
+
+          // Extract transcript for original_length calculation
+          const transcript = lifelog.markdown || lifelog.contents
+            ?.filter((c) => c.type === 'blockquote')
+            .map((c) => `${c.speakerName || 'Unknown'}: ${c.content}`)
+            .join('\n') || '';
+
+          // Upsert into Supabase (conflict on limitless_id)
+          const row = {
+            limitless_id: lifelog.id,
+            classification: processed.classification,
+            summary: processed.summary,
+            key_insights: JSON.stringify(processed.keyInsights),
+            action_items: JSON.stringify(processed.actionItems),
+            topics: JSON.stringify(processed.topics),
+            speakers: JSON.stringify(processed.speakers),
+            sentiment: processed.sentiment,
+            confidence_score: processed.confidenceScore,
+            title: lifelog.title || null,
+            start_time: lifelog.startTime,
+            end_time: lifelog.endTime,
+            original_length: transcript.length,
+            duration_seconds: durationSeconds > 0 ? durationSeconds : null,
+            is_starred: lifelog.isStarred || false,
+            raw_markdown: lifelog.markdown || null,
+            raw_contents: lifelog.contents ? JSON.stringify(lifelog.contents) : null,
+            processed_at: processed.classification !== 'unprocessed' ? new Date().toISOString() : null,
+            sync_source: 'webhook',
+          };
+
+          const upsertResult = await supabaseUpsert(
+            supabaseConfig,
+            'processed_lifelogs',
+            row,
+            'limitless_id'
+          );
+
+          if (upsertResult.error) {
+            throw new Error(`Supabase upsert failed: ${upsertResult.error.message}`);
+          }
+
+          synced++;
+
+          safeLog.info('[Limitless] Synced lifelog to Supabase', {
+            lifelogId: lifelog.id,
+            classification: processed.classification,
+          });
+        } catch (itemError) {
+          const errorMsg = `Failed to sync lifelog ${lifelog.id}: ${String(itemError)}`;
+          safeLog.error('[Limitless] Failed to sync individual lifelog', {
+            lifelogId: lifelog.id,
+            error: String(itemError),
+          });
+          errors.push(errorMsg);
+        }
+      }
+
+      // Check if there are more pages
+      cursor = result.cursor;
+      hasMore = !!cursor;
+    }
+
+    safeLog.info('[Limitless] Supabase sync completed', {
+      synced,
+      skipped,
+      errors: errors.length,
+    });
+
+    return { synced, skipped, errors };
+  } catch (error) {
+    safeLog.error('[Limitless] Supabase sync failed', {
+      error: String(error),
+    });
+    throw new Error(`Sync to Supabase failed: ${String(error)}`);
   }
 }
 

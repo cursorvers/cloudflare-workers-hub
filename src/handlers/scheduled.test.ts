@@ -9,7 +9,7 @@ import * as limitlessService from '../services/limitless';
 
 // Mock limitless service
 vi.mock('../services/limitless', () => ({
-  syncToKnowledge: vi.fn(),
+  syncToSupabase: vi.fn(),
 }));
 
 // Mock safeLog
@@ -78,7 +78,7 @@ describe('Scheduled Handler', () => {
 
     await handleScheduled(controller, env, ctx);
 
-    expect(limitlessService.syncToKnowledge).not.toHaveBeenCalled();
+    expect(limitlessService.syncToSupabase).not.toHaveBeenCalled();
   });
 
   it('should skip sync when LIMITLESS_API_KEY is not configured', async () => {
@@ -86,7 +86,7 @@ describe('Scheduled Handler', () => {
 
     await handleScheduled(controller, env, ctx);
 
-    expect(limitlessService.syncToKnowledge).not.toHaveBeenCalled();
+    expect(limitlessService.syncToSupabase).not.toHaveBeenCalled();
   });
 
   it('should skip sync when LIMITLESS_USER_ID is not configured', async () => {
@@ -95,7 +95,7 @@ describe('Scheduled Handler', () => {
 
     await handleScheduled(controller, env, ctx);
 
-    expect(limitlessService.syncToKnowledge).not.toHaveBeenCalled();
+    expect(limitlessService.syncToSupabase).not.toHaveBeenCalled();
   });
 
   it('should perform sync when enabled and configured', async () => {
@@ -106,7 +106,7 @@ describe('Scheduled Handler', () => {
     // beforeEach mock handles lock and returns null for backup_sync (no previous sync)
 
     // Mock sync result
-    vi.mocked(limitlessService.syncToKnowledge).mockResolvedValue({
+    vi.mocked(limitlessService.syncToSupabase).mockResolvedValue({
       synced: 5,
       skipped: 2,
       errors: [],
@@ -114,7 +114,7 @@ describe('Scheduled Handler', () => {
 
     await handleScheduled(controller, env, ctx);
 
-    expect(limitlessService.syncToKnowledge).toHaveBeenCalledWith(
+    expect(limitlessService.syncToSupabase).toHaveBeenCalledWith(
       env,
       'test-api-key',
       expect.objectContaining({
@@ -165,7 +165,7 @@ describe('Scheduled Handler', () => {
 
     await handleScheduled(controller, env, ctx);
 
-    expect(limitlessService.syncToKnowledge).not.toHaveBeenCalled();
+    expect(limitlessService.syncToSupabase).not.toHaveBeenCalled();
   });
 
   it('should sync if last sync exceeded interval', async () => {
@@ -196,7 +196,7 @@ describe('Scheduled Handler', () => {
     });
 
     // Mock sync result
-    vi.mocked(limitlessService.syncToKnowledge).mockResolvedValue({
+    vi.mocked(limitlessService.syncToSupabase).mockResolvedValue({
       synced: 3,
       skipped: 1,
       errors: [],
@@ -204,7 +204,7 @@ describe('Scheduled Handler', () => {
 
     await handleScheduled(controller, env, ctx);
 
-    expect(limitlessService.syncToKnowledge).toHaveBeenCalled();
+    expect(limitlessService.syncToSupabase).toHaveBeenCalled();
   });
 
   it('should handle sync errors gracefully', async () => {
@@ -215,14 +215,14 @@ describe('Scheduled Handler', () => {
     // beforeEach mock handles lock - don't override it
 
     // Mock sync error
-    vi.mocked(limitlessService.syncToKnowledge).mockRejectedValue(
+    vi.mocked(limitlessService.syncToSupabase).mockRejectedValue(
       new Error('API error')
     );
 
     // Should not throw
     await expect(handleScheduled(controller, env, ctx)).resolves.toBeUndefined();
 
-    expect(limitlessService.syncToKnowledge).toHaveBeenCalled();
+    expect(limitlessService.syncToSupabase).toHaveBeenCalled();
   });
 
   it('should use custom sync interval from env', async () => {
@@ -231,7 +231,7 @@ describe('Scheduled Handler', () => {
     env.LIMITLESS_USER_ID = 'test-user';
     env.LIMITLESS_SYNC_INTERVAL_HOURS = '4'; // Custom 4 hour interval
 
-    vi.mocked(limitlessService.syncToKnowledge).mockResolvedValue({
+    vi.mocked(limitlessService.syncToSupabase).mockResolvedValue({
       synced: 2,
       skipped: 0,
       errors: [],
@@ -239,7 +239,7 @@ describe('Scheduled Handler', () => {
 
     await handleScheduled(controller, env, ctx);
 
-    expect(limitlessService.syncToKnowledge).toHaveBeenCalledWith(
+    expect(limitlessService.syncToSupabase).toHaveBeenCalledWith(
       env,
       'test-api-key',
       expect.objectContaining({
