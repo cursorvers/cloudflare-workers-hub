@@ -5,8 +5,10 @@
  * https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks
  */
 
-import { NormalizedEvent } from '../../types';
+import { NormalizedEvent, Env } from '../../types';
 import { safeLog } from '../../utils/log-sanitizer';
+import { handleGenericWebhook } from '../generic-webhook';
+import clawdbotHandler from '../clawdbot';
 
 /**
  * Verify WhatsApp webhook signature using HMAC-SHA256
@@ -253,6 +255,103 @@ export function verifyWebhook(
   return null;
 }
 
+/**
+ * Handle incoming WhatsApp webhook request end-to-end:
+ * verification (GET), signature check, FAQ offload via Workers AI, Orchestrator forwarding.
+ */
+export async function handleWhatsAppWebhook(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+
+  // Handle webhook verification (GET request)
+  if (request.method === 'GET') {
+    const mode = url.searchParams.get('hub.mode');
+    const token = url.searchParams.get('hub.verify_token');
+    const challenge = url.searchParams.get('hub.challenge');
+
+    if (env.WHATSAPP_VERIFY_TOKEN) {
+      const verifyResponse = verifyWebhook(mode, token, challenge, env.WHATSAPP_VERIFY_TOKEN);
+      if (verifyResponse) return verifyResponse;
+    }
+    return new Response('Forbidden', { status: 403 });
+  }
+
+  // Handle webhook events (POST request)
+  // Read body as text first for signature verification
+  const body = await request.text();
+
+  // Verify WhatsApp HMAC signature if app secret is configured
+  if (env.WHATSAPP_APP_SECRET) {
+    const signatureHeader = request.headers.get('X-Hub-Signature-256');
+    const isValid = await verifyWhatsAppSignature(signatureHeader, body, env.WHATSAPP_APP_SECRET);
+    if (!isValid) {
+      safeLog.warn('[WhatsApp] Invalid HMAC signature');
+      return new Response('Unauthorized', { status: 401 });
+    }
+  }
+
+  let payload: WhatsAppWebhook;
+
+  try {
+    payload = JSON.parse(body) as WhatsAppWebhook;
+  } catch {
+    return new Response('Invalid JSON', { status: 400 });
+  }
+
+  if (!validateWhatsAppWebhook(payload)) {
+    return new Response('Invalid WhatsApp webhook', { status: 400 });
+  }
+
+  // Extract and process messages
+  const messages = extractMessages(payload);
+
+  for (const { message, contact, phoneNumberId } of messages) {
+    const event = normalizeWhatsAppEvent(message, contact, phoneNumberId);
+    if (!event) continue;
+
+    // Process through ClawdBot handler logic
+    const faqCategory = clawdbotHandler.detectFAQCategory(event.content);
+    const needsEscalation = clawdbotHandler.requiresEscalation(event.content);
+
+    if (faqCategory && !needsEscalation) {
+      // Handle FAQ with Workers AI
+      const prompt = clawdbotHandler.generateFAQPrompt(faqCategory, event.content);
+      try {
+        const response = await (env.AI.run as (model: string, input: unknown) => Promise<unknown>)(
+          '@cf/meta/llama-3.1-8b-instruct',
+          {
+            messages: [
+              { role: 'system', content: 'あなたは丁寧なカスタマーサポート担当です。日本語で簡潔に回答してください。' },
+              { role: 'user', content: prompt },
+            ],
+            max_tokens: 256,
+          }
+        );
+
+        const aiResponse = (response as { response: string }).response;
+
+        if (env.WHATSAPP_ACCESS_TOKEN && phoneNumberId) {
+          await sendWhatsAppMessage(
+            message.from,
+            aiResponse,
+            phoneNumberId,
+            env.WHATSAPP_ACCESS_TOKEN,
+            message.id
+          );
+        }
+        continue; // Successfully handled, move to next message
+      } catch (error) {
+        safeLog.error('[WhatsApp] Workers AI error', { error: String(error) });
+        // Fall through to Orchestrator instead of silently failing
+      }
+    }
+
+    // Forward to Orchestrator for complex requests or AI failures
+    await handleGenericWebhook(event, env);
+  }
+
+  return new Response('OK', { status: 200 });
+}
+
 export default {
   verifyWhatsAppSignature,
   validateWhatsAppWebhook,
@@ -260,4 +359,5 @@ export default {
   normalizeWhatsAppEvent,
   sendWhatsAppMessage,
   verifyWebhook,
+  handleWhatsAppWebhook,
 };

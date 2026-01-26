@@ -8,6 +8,8 @@
 import { NormalizedEvent, Env } from '../../types';
 import { safeLog } from '../../utils/log-sanitizer';
 import { saveConversation } from '../memory';
+import { handleGenericWebhook } from '../generic-webhook';
+import clawdbotHandler from '../clawdbot';
 
 /**
  * Verify Telegram webhook signature using X-Telegram-Bot-Api-Secret-Token header
@@ -393,6 +395,80 @@ export async function setTelegramWebhook(
   }
 }
 
+/**
+ * Handle incoming Telegram webhook request end-to-end:
+ * signature verification, validation, FAQ offload via Workers AI, Orchestrator forwarding.
+ */
+export async function handleTelegramWebhook(request: Request, env: Env): Promise<Response> {
+  // Verify Telegram signature if secret token is configured
+  if (env.TELEGRAM_SECRET_TOKEN) {
+    const secretTokenHeader = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
+    if (!verifyTelegramSignature(secretTokenHeader, env.TELEGRAM_SECRET_TOKEN)) {
+      safeLog.warn('[Telegram] Invalid or missing secret token');
+      return new Response('Unauthorized', { status: 401 });
+    }
+  }
+
+  let payload: TelegramUpdate;
+
+  try {
+    payload = await request.json() as TelegramUpdate;
+  } catch {
+    return new Response('Invalid JSON', { status: 400 });
+  }
+
+  if (!validateTelegramUpdate(payload)) {
+    return new Response('Invalid Telegram update', { status: 400 });
+  }
+
+  // Normalize to ClawdBot format
+  const event = normalizeTelegramEvent(payload);
+  if (!event) {
+    return new Response('OK', { status: 200 });
+  }
+
+  // Process through ClawdBot handler logic
+  const faqCategory = clawdbotHandler.detectFAQCategory(event.content);
+  const needsEscalation = clawdbotHandler.requiresEscalation(event.content);
+
+  if (faqCategory && !needsEscalation) {
+    // Handle FAQ with Workers AI
+    const prompt = clawdbotHandler.generateFAQPrompt(faqCategory, event.content);
+    try {
+      const response = await (env.AI.run as (model: string, input: unknown) => Promise<unknown>)(
+        '@cf/meta/llama-3.1-8b-instruct',
+        {
+          messages: [
+            { role: 'system', content: 'あなたは丁寧なカスタマーサポート担当です。日本語で簡潔に回答してください。' },
+            { role: 'user', content: prompt },
+          ],
+          max_tokens: 256,
+        }
+      );
+
+      const aiResponse = (response as { response: string }).response;
+      const chatId = event.metadata.chatId as number;
+
+      if (env.TELEGRAM_BOT_TOKEN && chatId) {
+        await sendTelegramMessage(
+          chatId,
+          aiResponse,
+          env.TELEGRAM_BOT_TOKEN,
+          event.metadata.messageId as number | undefined
+        );
+      }
+
+      return new Response('OK', { status: 200 });
+    } catch (error) {
+      safeLog.error('[Telegram] Workers AI error', { error: String(error) });
+      // Fall through to Orchestrator instead of returning OK silently
+    }
+  }
+
+  // Forward to Orchestrator for complex requests
+  return handleGenericWebhook(event, env);
+}
+
 export default {
   verifyTelegramSignature,
   validateTelegramUpdate,
@@ -401,4 +477,5 @@ export default {
   handleVoiceMessage,
   sendTelegramMessage,
   setTelegramWebhook,
+  handleTelegramWebhook,
 };

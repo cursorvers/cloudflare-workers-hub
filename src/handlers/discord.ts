@@ -5,8 +5,9 @@
  * チャネルに応じて適切なアクションを実行する。
  */
 
-import { NormalizedEvent } from '../types';
+import { NormalizedEvent, Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
+import { handleGenericWebhook } from './generic-webhook';
 
 export interface DiscordInteraction {
   type: number; // 1=PING, 2=APPLICATION_COMMAND, 3=MESSAGE_COMPONENT
@@ -243,6 +244,56 @@ export function requiresConsensus(channelName: string): boolean {
   return rule?.requiresConsensus ?? false;
 }
 
+/**
+ * Handle incoming Discord webhook request end-to-end:
+ * signature verification, PING handling, normalization, deferred response.
+ */
+export async function handleDiscordWebhook(request: Request, env: Env): Promise<Response> {
+  const body = await request.text();
+
+  // Verify Discord signature FIRST (required by Discord)
+  if (env.DISCORD_PUBLIC_KEY) {
+    const signature = request.headers.get('x-signature-ed25519');
+    const timestamp = request.headers.get('x-signature-timestamp');
+    const isValid = await verifyDiscordSignature(signature, timestamp, body, env.DISCORD_PUBLIC_KEY);
+    if (!isValid) {
+      return new Response('Invalid signature', { status: 401 });
+    }
+  }
+
+  let payload: DiscordInteraction;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return new Response('Invalid JSON', { status: 400 });
+  }
+
+  // Handle Discord PING for verification
+  if (isPing(payload)) {
+    return new Response(JSON.stringify(handlePing()), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  // Normalize and process event
+  const event = normalizeDiscordEvent(payload);
+  if (!event) {
+    return new Response(JSON.stringify({ type: 1 }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  // For Discord, return deferred response and process async
+  const deferredResponse = createDeferredResponse();
+
+  // Process in background (don't await)
+  handleGenericWebhook(event, env).catch((err) => safeLog.error('[Discord] Background processing error', { error: String(err) }));
+
+  return new Response(JSON.stringify(deferredResponse), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
 export default {
   verifyDiscordSignature,
   handlePing,
@@ -252,4 +303,5 @@ export default {
   createMessageResponse,
   isActionAllowed,
   requiresConsensus,
+  handleDiscordWebhook,
 };

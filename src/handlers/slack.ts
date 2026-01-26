@@ -5,8 +5,11 @@
  * チャネルに応じて適切なアクションを実行する。
  */
 
-import { NormalizedEvent } from '../types';
+import { NormalizedEvent, Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
+import { handleGenericWebhook } from './generic-webhook';
+import { broadcastNotification, notifications } from './notifications';
+import { isSimpleQuery, handleWithWorkersAI } from '../ai';
 
 export interface SlackEvent {
   token?: string;
@@ -235,6 +238,83 @@ export async function postMessage(
   }
 }
 
+/**
+ * Handle incoming Slack webhook request end-to-end:
+ * signature verification, normalization, FAQ offload, Orchestrator forwarding.
+ */
+export async function handleSlackWebhook(request: Request, env: Env): Promise<Response> {
+  const body = await request.text();
+  let payload: SlackEvent;
+
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return new Response('Invalid JSON', { status: 400 });
+  }
+
+  // Handle Slack URL verification challenge
+  if (payload.type === 'url_verification') {
+    const response = handleChallenge(payload);
+    return new Response(JSON.stringify(response), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  // Verify Slack signature (if signing secret is configured)
+  if (env.SLACK_SIGNING_SECRET) {
+    const signature = request.headers.get('x-slack-signature');
+    const timestamp = request.headers.get('x-slack-request-timestamp');
+    const isValid = await verifySlackSignature(signature, timestamp, body, env.SLACK_SIGNING_SECRET);
+    if (!isValid) {
+      safeLog.warn('[Slack] Invalid signature');
+      return new Response('Invalid signature', { status: 401 });
+    }
+  }
+
+  // Normalize and process event
+  const event = normalizeSlackEvent(payload);
+  if (!event) {
+    return new Response('OK', { status: 200 });
+  }
+
+  // Ignore bot messages to prevent loops
+  if (payload.event?.user === undefined || payload.event?.bot_id) {
+    return new Response('OK', { status: 200 });
+  }
+
+  const channel = payload.event?.channel;
+  const threadTs = payload.event?.thread_ts || payload.event?.ts;
+
+  // Check channel rules
+  const channelName = event.metadata.channelName as string;
+  if (requiresConsensus(channelName)) {
+    await broadcastNotification(
+      notifications.approvalRequired(event.content, `Slack #${channelName}`),
+      { slackWebhookUrl: undefined }
+    );
+  }
+
+  // Handle simple queries with Workers AI and reply
+  const isSimple = isSimpleQuery(event.content);
+  if (isSimple && env.SLACK_BOT_TOKEN && channel) {
+    const aiResponse = await handleWithWorkersAI(env, event);
+    await postMessage(channel, aiResponse, env.SLACK_BOT_TOKEN, threadTs);
+    return new Response('OK', { status: 200 });
+  }
+
+  // Complex queries: acknowledge and forward to Orchestrator
+  if (env.SLACK_BOT_TOKEN && channel) {
+    await postMessage(
+      channel,
+      '処理中です... Orchestrator に転送しました。',
+      env.SLACK_BOT_TOKEN,
+      threadTs
+    );
+  }
+
+  return handleGenericWebhook(event, env);
+}
+
 export default {
   verifySlackSignature,
   handleChallenge,
@@ -243,4 +323,5 @@ export default {
   requiresConsensus,
   shouldAutoExecute,
   postMessage,
+  handleSlackWebhook,
 };

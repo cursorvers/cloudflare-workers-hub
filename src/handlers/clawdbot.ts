@@ -5,7 +5,10 @@
  * FAQ は Workers AI でオフロード、複雑なリクエストは Orchestrator へ
  */
 
-import { NormalizedEvent } from '../types';
+import { NormalizedEvent, Env } from '../types';
+import { safeLog } from '../utils/log-sanitizer';
+import { handleGenericWebhook } from './generic-webhook';
+import { broadcastNotification, notifications } from './notifications';
 
 export interface ClawdBotMessage {
   id: string;
@@ -148,6 +151,78 @@ export function validatePayload(payload: unknown): payload is ClawdBotMessage {
   );
 }
 
+/**
+ * Handle incoming ClawdBot webhook request end-to-end:
+ * payload validation, FAQ offload via Workers AI, escalation, Orchestrator forwarding.
+ */
+export async function handleClawdBotWebhook(request: Request, env: Env): Promise<Response> {
+  let payload: unknown;
+
+  try {
+    payload = await request.json();
+  } catch {
+    return new Response('Invalid JSON', { status: 400 });
+  }
+
+  // Validate payload
+  if (!validatePayload(payload)) {
+    return new Response('Invalid ClawdBot payload', { status: 400 });
+  }
+
+  const clawdPayload = payload as ClawdBotMessage;
+  const event = normalizeClawdBotEvent(clawdPayload);
+
+  // Check if FAQ can be handled by Workers AI
+  const faqCategory = event.metadata.faqCategory as string | null;
+  if (faqCategory && !event.metadata.needsEscalation) {
+    // Generate FAQ response with Workers AI
+    const prompt = generateFAQPrompt(faqCategory, event.content);
+
+    try {
+      const response = await (env.AI.run as (model: string, input: unknown) => Promise<unknown>)(
+        '@cf/meta/llama-3.1-8b-instruct',
+        {
+          messages: [
+            { role: 'system', content: 'あなたは丁寧なカスタマーサポート担当です。日本語で簡潔に回答してください。' },
+            { role: 'user', content: prompt },
+          ],
+          max_tokens: 256,
+        }
+      );
+
+      const aiResponse = (response as { response: string }).response;
+      const formattedResponse = formatResponse(clawdPayload.channel, aiResponse);
+
+      return new Response(JSON.stringify({
+        success: true,
+        messageId: event.id,
+        response: formattedResponse,
+        handledBy: 'workers-ai',
+        followUpRequired: false,
+      }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (error) {
+      safeLog.error('[ClawdBot] Workers AI error', { error: String(error) });
+      // Fall through to Orchestrator instead of returning OK silently
+    }
+  }
+
+  // Escalations or complex requests go to Orchestrator
+  if (event.metadata.needsEscalation) {
+    // Notify about escalation
+    await broadcastNotification(
+      notifications.approvalRequired(
+        `Customer escalation from ${clawdPayload.channel}`,
+        event.content.substring(0, 100)
+      ),
+      { slackWebhookUrl: undefined }
+    );
+  }
+
+  return handleGenericWebhook(event, env);
+}
+
 export default {
   detectFAQCategory,
   requiresEscalation,
@@ -155,4 +230,5 @@ export default {
   generateFAQPrompt,
   formatResponse,
   validatePayload,
+  handleClawdBotWebhook,
 };
