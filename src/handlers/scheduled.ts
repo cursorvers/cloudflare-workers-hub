@@ -25,7 +25,7 @@ import {
 
 const CRON_HOURLY_SYNC = '0 * * * *';
 const CRON_DAILY_ACTIONS = '0 21 * * *';   // 21:00 UTC = 06:00 JST
-const CRON_WEEKLY_DIGEST = '0 0 * * 0';    // Sun 00:00 UTC = Sun 09:00 JST
+const CRON_WEEKLY_DIGEST = '0 0 * * SUN';  // Sun 00:00 UTC = Sun 09:00 JST
 
 // ============================================================================
 // Distributed Lock Helpers
