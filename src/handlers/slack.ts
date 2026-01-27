@@ -252,15 +252,8 @@ export async function handleSlackWebhook(request: Request, env: Env): Promise<Re
     return new Response('Invalid JSON', { status: 400 });
   }
 
-  // Handle Slack URL verification challenge
-  if (payload.type === 'url_verification') {
-    const response = handleChallenge(payload);
-    return new Response(JSON.stringify(response), {
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
-  // Verify Slack signature (if signing secret is configured)
+  // Verify Slack signature FIRST (if signing secret is configured)
+  // All Slack requests including url_verification are signed
   if (env.SLACK_SIGNING_SECRET) {
     const signature = request.headers.get('x-slack-signature');
     const timestamp = request.headers.get('x-slack-request-timestamp');
@@ -269,6 +262,14 @@ export async function handleSlackWebhook(request: Request, env: Env): Promise<Re
       safeLog.warn('[Slack] Invalid signature');
       return new Response('Invalid signature', { status: 401 });
     }
+  }
+
+  // Handle Slack URL verification challenge (after signature is verified)
+  if (payload.type === 'url_verification') {
+    const response = handleChallenge(payload);
+    return new Response(JSON.stringify(response), {
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   // Normalize and process event

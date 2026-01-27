@@ -22,7 +22,7 @@ import { handleClawdBotWebhook } from './clawdbot';
 import { handleTelegramWebhook } from './channels/telegram';
 import { handleWhatsAppWebhook } from './channels/whatsapp';
 
-export async function handleWebhook(request: Request, env: Env): Promise<Response> {
+export async function handleWebhook(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const source = detectSource(request);
   const url = new URL(request.url);
   const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
@@ -85,7 +85,7 @@ export async function handleWebhook(request: Request, env: Env): Promise<Respons
     if (source === 'slack') {
       response = await handleSlackWebhook(request, env);
     } else if (source === 'discord') {
-      response = await handleDiscordWebhook(request, env);
+      response = await handleDiscordWebhook(request, env, ctx);
     } else if (source === 'telegram') {
       response = await handleTelegramWebhook(request, env);
     } else if (source === 'whatsapp') {

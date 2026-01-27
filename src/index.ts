@@ -124,7 +124,7 @@ export default {
       if (request.method !== 'POST') {
         return new Response('Method not allowed', { status: 405 });
       }
-      return handleWebhook(request, env);
+      return handleWebhook(request, env, ctx);
     }
 
     // 404 for unknown paths

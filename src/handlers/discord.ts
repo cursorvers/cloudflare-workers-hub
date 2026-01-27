@@ -248,7 +248,7 @@ export function requiresConsensus(channelName: string): boolean {
  * Handle incoming Discord webhook request end-to-end:
  * signature verification, PING handling, normalization, deferred response.
  */
-export async function handleDiscordWebhook(request: Request, env: Env): Promise<Response> {
+export async function handleDiscordWebhook(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const body = await request.text();
 
   // Verify Discord signature FIRST (required by Discord)
@@ -286,8 +286,11 @@ export async function handleDiscordWebhook(request: Request, env: Env): Promise<
   // For Discord, return deferred response and process async
   const deferredResponse = createDeferredResponse();
 
-  // Process in background (don't await)
-  handleGenericWebhook(event, env).catch((err) => safeLog.error('[Discord] Background processing error', { error: String(err) }));
+  // Process in background using ctx.waitUntil to prevent premature termination
+  const backgroundWork = handleGenericWebhook(event, env).catch((err) => safeLog.error('[Discord] Background processing error', { error: String(err) }));
+  if (ctx) {
+    ctx.waitUntil(backgroundWork);
+  }
 
   return new Response(JSON.stringify(deferredResponse), {
     headers: { 'Content-Type': 'application/json' },
