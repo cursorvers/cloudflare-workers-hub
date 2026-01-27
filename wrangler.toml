@@ -18,6 +18,17 @@ database_id = "4164f0fc-d6bb-4e78-86d1-2601d762d6de"
 binding = "CACHE"
 id = "378a478680ec41d280737181530f58a9"
 
+# Durable Objects for atomic task queue coordination
+[durable_objects]
+bindings = [
+  { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" }
+]
+
+# DO migration (required for first deployment, free plan requires new_sqlite_classes)
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TaskCoordinator"]
+
 # R2 bucket for audio staging and Obsidian vault (requires R2 enabled on account)
 # [[r2_buckets]]
 # binding = "AUDIO_STAGING"
@@ -34,7 +45,7 @@ index_name = "obsidian-knowledge"
 
 # Cron Triggers
 [triggers]
-crons = ["0 * * * *", "0 21 * * *", "0 0 * * SUN", "0 0 1 * *"]  # Hourly sync, Daily actions (6AM JST), Weekly digest (Sun 9AM JST), Monthly digest (1st 9AM JST)
+crons = ["0 * * * *", "0 21 * * *", "0 0 * * SUN", "0 0 1 * *", "0 0 2 1 *"]  # Hourly sync, Daily actions (6AM JST), Weekly digest (Sun 9AM JST), Monthly digest (1st 9AM JST), Annual digest (Jan 2nd 9AM JST)
 
 # Environment variables
 [vars]
@@ -63,6 +74,11 @@ database_id = "4164f0fc-d6bb-4e78-86d1-2601d762d6de"
 [[env.production.kv_namespaces]]
 binding = "CACHE"
 id = "378a478680ec41d280737181530f58a9"
+
+[env.production.durable_objects]
+bindings = [
+  { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" }
+]
 
 # [[env.production.r2_buckets]]
 # binding = "AUDIO_STAGING"

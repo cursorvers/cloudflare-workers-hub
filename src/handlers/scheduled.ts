@@ -6,6 +6,7 @@
  * - "0 21 * * *"   → Daily action item check (6AM JST)
  * - "0 0 * * SUN"  → Weekly digest generation (Sunday 9AM JST)
  * - "0 0 1 * *"    → Monthly digest generation (1st of month, 9AM JST)
+ * - "0 0 2 1 *"    → Annual digest generation (Jan 2nd, 9AM JST)
  */
 
 import { Env } from '../types';
@@ -17,9 +18,11 @@ import {
   aggregateActionItems,
   generateWeeklyMarkdown,
   generateMonthlyMarkdown,
+  generateAnnualMarkdown,
   generateActionItemsMarkdown,
   type LifelogRecord,
 } from '../services/digest-generator';
+import { sendDiscordNotification, type Notification } from './notifications';
 
 // ============================================================================
 // Cron Expression Constants
@@ -29,6 +32,7 @@ const CRON_HOURLY_SYNC = '0 * * * *';
 const CRON_DAILY_ACTIONS = '0 21 * * *';   // 21:00 UTC = 06:00 JST
 const CRON_WEEKLY_DIGEST = '0 0 * * SUN';  // Sun 00:00 UTC = Sun 09:00 JST
 const CRON_MONTHLY_DIGEST = '0 0 1 * *';  // 1st 00:00 UTC = 1st 09:00 JST
+const CRON_ANNUAL_DIGEST = '0 0 2 1 *';   // Jan 2nd 00:00 UTC = Jan 2nd 09:00 JST
 
 // ============================================================================
 // Distributed Lock Helpers
@@ -129,6 +133,9 @@ export async function handleScheduled(
 
     case CRON_MONTHLY_DIGEST:
       return handleMonthlyDigest(env);
+
+    case CRON_ANNUAL_DIGEST:
+      return handleAnnualDigest(env);
 
     default:
       safeLog.warn('[Scheduled] Unknown cron expression', { cron: controller.cron });
@@ -310,6 +317,14 @@ async function handleWeeklyDigest(env: Env): Promise<void> {
       actionItems: digest.allActionItems.length,
       period: `${periodStartDate} ~ ${periodEndDate}`,
     });
+
+    // Send notification
+    await sendDigestNotification(env, 'Weekly', {
+      recordings: digest.totalRecordings,
+      topics: digest.topTopics.length,
+      actionItems: digest.allActionItems.length,
+      period: `${periodStartDate} ~ ${periodEndDate}`,
+    });
   });
 }
 
@@ -358,6 +373,8 @@ async function handleDailyActionCheck(env: Env): Promise<void> {
 
     if (!lifelogs || lifelogs.length === 0) {
       safeLog.info('[DailyActions] No lifelogs found, skipping');
+      // Heartbeat: check for inactivity (no recordings in 48h)
+      await sendInactivityAlert(env);
       return;
     }
 
@@ -486,6 +503,168 @@ async function handleMonthlyDigest(env: Env): Promise<void> {
     }
 
     safeLog.info('[MonthlyDigest] Monthly digest generated', {
+      recordings: digest.totalRecordings,
+      topics: digest.topTopics.length,
+      actionItems: digest.allActionItems.length,
+      period: `${periodStartDate} ~ ${periodEndDate}`,
+    });
+
+    // Send notification
+    await sendDigestNotification(env, 'Monthly', {
+      recordings: digest.totalRecordings,
+      topics: digest.topTopics.length,
+      actionItems: digest.allActionItems.length,
+      period: `${periodStartDate} ~ ${periodEndDate}`,
+    });
+  });
+}
+
+// ============================================================================
+// Notification Helper (Heartbeat Pattern)
+// ============================================================================
+
+/**
+ * Send a digest notification to Discord.
+ * Non-blocking: failures are logged but never throw.
+ */
+async function sendDigestNotification(
+  env: Env,
+  digestType: string,
+  stats: { recordings: number; topics: number; actionItems: number; period: string }
+): Promise<void> {
+  if (!env.DISCORD_WEBHOOK_URL) return;
+
+  const notification: Notification = {
+    type: 'success',
+    title: `${digestType} Digest Generated`,
+    message: `${stats.recordings}件の録音を集計しました (${stats.period})`,
+    source: 'cron-digest',
+    fields: [
+      { name: 'Recordings', value: String(stats.recordings), inline: true },
+      { name: 'Topics', value: String(stats.topics), inline: true },
+      { name: 'Action Items', value: String(stats.actionItems), inline: true },
+    ],
+  };
+
+  try {
+    await sendDiscordNotification(env.DISCORD_WEBHOOK_URL, notification);
+  } catch (error) {
+    safeLog.warn('[Notification] Failed to send digest notification', { error: String(error) });
+  }
+}
+
+/**
+ * Send an inactivity alert when no recordings are found for 48+ hours.
+ */
+async function sendInactivityAlert(env: Env): Promise<void> {
+  if (!env.DISCORD_WEBHOOK_URL) return;
+
+  const notification: Notification = {
+    type: 'warning',
+    title: 'Pendant Inactivity Alert',
+    message: '過去48時間に録音が検出されませんでした。Pendantの接続状態を確認してください。',
+    source: 'cron-heartbeat',
+  };
+
+  try {
+    await sendDiscordNotification(env.DISCORD_WEBHOOK_URL, notification);
+  } catch (error) {
+    safeLog.warn('[Notification] Failed to send inactivity alert', { error: String(error) });
+  }
+}
+
+// ============================================================================
+// Handler: Annual Digest
+// ============================================================================
+
+async function handleAnnualDigest(env: Env): Promise<void> {
+  const lockKey = 'digest:annual_lock';
+
+  await withLock(env.CACHE!, lockKey, 900, async () => {
+    if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+      safeLog.warn('[AnnualDigest] Supabase not configured, skipping');
+      return;
+    }
+
+    const config: SupabaseConfig = {
+      url: env.SUPABASE_URL,
+      serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+    };
+
+    // Calculate previous calendar year range (JST)
+    const now = new Date();
+    const jstOffset = 9 * 60 * 60 * 1000;
+    const jstNow = new Date(now.getTime() + jstOffset);
+
+    // Jan 1st of current year in JST → that's the end boundary
+    const jstJan1 = new Date(jstNow.getFullYear(), 0, 1);
+    const periodEnd = new Date(jstJan1.getTime() - jstOffset); // Convert back to UTC
+
+    // Jan 1st of previous year in JST
+    const prevYearJan1 = new Date(jstNow.getFullYear() - 1, 0, 1);
+    const periodStart = new Date(prevYearJan1.getTime() - jstOffset); // Convert back to UTC
+
+    const periodStartISO = periodStart.toISOString();
+    const periodEndISO = periodEnd.toISOString();
+    const periodStartDate = periodStartISO.slice(0, 10);
+    const periodEndDate = new Date(periodEnd.getTime() - 1).toISOString().slice(0, 10);
+
+    safeLog.info('[AnnualDigest] Generating annual digest', {
+      periodStart: periodStartISO,
+      periodEnd: periodEndISO,
+    });
+
+    // Fetch all lifelogs for the year (higher limit for annual)
+    const selectFields = 'id,classification,summary,key_insights,action_items,topics,speakers,sentiment,title,start_time,end_time,duration_seconds,is_starred';
+    const query = `select=${selectFields}&start_time=gte.${periodStartISO}&start_time=lt.${periodEndISO}&classification=neq.pending&order=start_time.asc&limit=5000`;
+
+    const { data: lifelogs, error } = await supabaseSelect<LifelogRecord>(config, 'processed_lifelogs', query);
+
+    if (error) {
+      safeLog.error('[AnnualDigest] Failed to fetch lifelogs', { error: error.message });
+      return;
+    }
+
+    if (!lifelogs || lifelogs.length === 0) {
+      safeLog.info('[AnnualDigest] No lifelogs found for period, skipping');
+      return;
+    }
+
+    safeLog.info('[AnnualDigest] Aggregating data', { count: lifelogs.length });
+
+    // Aggregate and generate markdown
+    const digest = aggregateWeeklyDigest(lifelogs, periodStartDate, periodEndDate);
+    const markdown = generateAnnualMarkdown(digest);
+
+    // Upsert into digest_reports
+    const { error: upsertError } = await supabaseUpsert(
+      config,
+      'digest_reports',
+      {
+        type: 'annual',
+        period_start: periodStartISO,
+        period_end: periodEndISO,
+        content: digest,
+        markdown,
+        obsidian_synced: false,
+      },
+      'type,period_start'
+    );
+
+    if (upsertError) {
+      safeLog.error('[AnnualDigest] Failed to store digest', { error: upsertError.message });
+      return;
+    }
+
+    safeLog.info('[AnnualDigest] Annual digest generated', {
+      recordings: digest.totalRecordings,
+      topics: digest.topTopics.length,
+      actionItems: digest.allActionItems.length,
+      period: `${periodStartDate} ~ ${periodEndDate}`,
+    });
+
+    // Send notification
+    await sendDigestNotification(env, 'Annual', {
       recordings: digest.totalRecordings,
       topics: digest.topTopics.length,
       actionItems: digest.allActionItems.length,

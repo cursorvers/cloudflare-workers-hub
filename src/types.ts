@@ -22,6 +22,7 @@ export interface Env {
   AI: Ai;
   DB?: D1Database;
   CACHE?: KVNamespace;
+  TASK_COORDINATOR?: DurableObjectNamespace;
   AUDIO_STAGING?: R2Bucket;
   OBSIDIAN_VAULT?: R2Bucket;
   KNOWLEDGE_INDEX?: VectorizeIndex;
@@ -53,6 +54,8 @@ export interface Env {
   LIMITLESS_USER_ID?: string;      // User ID for automatic sync
   LIMITLESS_AUTO_SYNC_ENABLED?: string; // Enable/disable auto-sync (default: false)
   LIMITLESS_SYNC_INTERVAL_HOURS?: string; // Sync interval in hours (default: 1)
+  // Notifications (Heartbeat pattern)
+  DISCORD_WEBHOOK_URL?: string;    // Discord webhook URL for digest/alert notifications
   // Supabase (Limitless pipeline storage)
   SUPABASE_URL?: string;           // Supabase project URL
   SUPABASE_SERVICE_ROLE_KEY?: string; // Supabase service role key (server-side only)

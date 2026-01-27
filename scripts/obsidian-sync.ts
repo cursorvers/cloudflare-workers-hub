@@ -10,6 +10,7 @@
  *   Supabase (digest_reports)     → 04_Journals/Pendant/Weekly/YYYY-Wxx.md
  *                                 → 04_Journals/Pendant/Monthly/YYYY-MM.md
  *                                 → 04_Journals/Pendant/Actions/YYYY-MM-DD.md
+ *                                 → 04_Journals/Pendant/Annual/YYYY.md
  *
  * Usage:
  *   npx tsx scripts/obsidian-sync.ts
@@ -44,7 +45,7 @@ const specificDate = dateArgIdx >= 0 ? args[dateArgIdx + 1] : null;
 
 interface DigestReport {
   id: string;
-  type: 'weekly' | 'monthly' | 'daily_actions';
+  type: 'weekly' | 'monthly' | 'daily_actions' | 'annual';
   period_start: string;
   period_end: string;
   content: unknown;
@@ -377,6 +378,11 @@ function getDigestOutputPath(pendantDir: string, report: DigestReport): string {
     const monthLabel = report.period_start.slice(0, 7); // YYYY-MM
     return path.join(pendantDir, 'Monthly', `${monthLabel}.md`);
   }
+  if (report.type === 'annual') {
+    // Annual → Annual/YYYY.md (using period_start year)
+    const yearLabel = report.period_start.slice(0, 4); // YYYY
+    return path.join(pendantDir, 'Annual', `${yearLabel}.md`);
+  }
   // daily_actions → Actions/YYYY-MM-DD.md (using period_end date in JST)
   const dateStr = getJSTDate(report.period_end);
   return path.join(pendantDir, 'Actions', `${dateStr}.md`);
@@ -411,7 +417,7 @@ async function syncDigestReports(
   for (const report of reports) {
     const filePath = getDigestOutputPath(pendantDir, report);
     const dirPath = path.dirname(filePath);
-    const typeLabels: Record<string, string> = { weekly: 'Weekly Digest', monthly: 'Monthly Digest', daily_actions: 'Daily Actions' };
+    const typeLabels: Record<string, string> = { weekly: 'Weekly Digest', monthly: 'Monthly Digest', daily_actions: 'Daily Actions', annual: 'Annual Digest' };
     const typeLabel = typeLabels[report.type] || report.type;
 
     console.log(`  📝 ${typeLabel} (${report.period_start.slice(0, 10)}) → ${filePath}`);
@@ -458,6 +464,198 @@ async function syncDigestReports(
   }
 
   return syncedIds.length;
+}
+
+// ============================================================================
+// Dataview Query Guide Generation
+// ============================================================================
+
+/**
+ * Generate a Dataview Query Guide markdown file for Obsidian.
+ * Contains DQL examples for querying weekly/monthly/annual/action-items digests.
+ */
+function generateDataviewGuide(pendantDir: string): void {
+  const guidePath = path.join(pendantDir, 'Dataview-Query-Guide.md');
+
+  const content = `---
+type: guide
+source: Limitless Pendant
+tags: [pendant, dataview, guide]
+---
+
+# Pendant Dataview Query Guide
+
+このガイドは Obsidian Dataview プラグインで Pendant データを活用するための DQL サンプル集です。
+
+## 基本クエリ
+
+### 全ダイジェスト一覧
+
+\`\`\`dataview
+TABLE period_start AS "開始", period_end AS "終了", recordings AS "録音数", total_duration AS "時間"
+FROM "04_Journals/Pendant"
+WHERE type
+SORT period_start DESC
+\`\`\`
+
+### 週次ダイジェスト一覧
+
+\`\`\`dataview
+TABLE period_start AS "開始", recordings AS "録音数", total_duration AS "時間", sentiment_score AS "感情"
+FROM "04_Journals/Pendant/Weekly"
+WHERE type = "weekly-digest"
+SORT period_start DESC
+\`\`\`
+
+### 月次ダイジェスト一覧
+
+\`\`\`dataview
+TABLE period_start AS "開始", recordings AS "録音数", total_duration AS "時間", sentiment_score AS "感情"
+FROM "04_Journals/Pendant/Monthly"
+WHERE type = "monthly-digest"
+SORT period_start DESC
+\`\`\`
+
+### 年次ダイジェスト一覧
+
+\`\`\`dataview
+TABLE period_start AS "開始", recordings AS "録音数", total_duration AS "時間", sentiment_score AS "感情"
+FROM "04_Journals/Pendant/Annual"
+WHERE type = "annual-digest"
+SORT period_start DESC
+\`\`\`
+
+## アクションアイテム
+
+### 未完了アクションアイテム
+
+\`\`\`dataview
+TABLE total_items AS "件数", topic_count AS "トピック数"
+FROM "04_Journals/Pendant/Actions"
+WHERE type = "action-items"
+SORT period_end DESC
+LIMIT 10
+\`\`\`
+
+### アクションアイテムが多い週
+
+\`\`\`dataview
+TABLE action_items_count AS "AI件数", recordings AS "録音数", total_duration AS "時間"
+FROM "04_Journals/Pendant/Weekly"
+WHERE type = "weekly-digest" AND action_items_count > 5
+SORT action_items_count DESC
+\`\`\`
+
+## 感情分析
+
+### 感情スコアが高い週（ポジティブ）
+
+\`\`\`dataview
+TABLE sentiment_score AS "感情", recordings AS "録音数", top_topics AS "トピック"
+FROM "04_Journals/Pendant/Weekly"
+WHERE type = "weekly-digest" AND sentiment_score > 0.3
+SORT sentiment_score DESC
+\`\`\`
+
+### 感情スコアが低い週（ネガティブ）
+
+\`\`\`dataview
+TABLE sentiment_score AS "感情", recordings AS "録音数", top_topics AS "トピック"
+FROM "04_Journals/Pendant/Weekly"
+WHERE type = "weekly-digest" AND sentiment_score < -0.1
+SORT sentiment_score ASC
+\`\`\`
+
+### 月次感情トレンド
+
+\`\`\`dataview
+TABLE sentiment_score AS "感情", recordings AS "録音数", total_duration_minutes AS "分"
+FROM "04_Journals/Pendant/Monthly"
+WHERE type = "monthly-digest"
+SORT period_start ASC
+\`\`\`
+
+## 活動量分析
+
+### 録音数が多い週 (Top 10)
+
+\`\`\`dataview
+TABLE recordings AS "録音数", total_duration AS "時間", starred_count AS "スター"
+FROM "04_Journals/Pendant/Weekly"
+WHERE type = "weekly-digest"
+SORT recordings DESC
+LIMIT 10
+\`\`\`
+
+### スター付き録音が多い期間
+
+\`\`\`dataview
+TABLE starred_count AS "スター", recordings AS "録音数", top_topics AS "トピック"
+FROM "04_Journals/Pendant"
+WHERE starred_count > 0
+SORT starred_count DESC
+\`\`\`
+
+### 月別録音時間（分）
+
+\`\`\`dataview
+TABLE total_duration_minutes AS "分", recordings AS "録音数", sentiment_score AS "感情"
+FROM "04_Journals/Pendant/Monthly"
+WHERE type = "monthly-digest"
+SORT period_start ASC
+\`\`\`
+
+## 複合クエリ
+
+### 特定トピックを含むダイジェスト
+
+\`\`\`dataview
+TABLE type AS "種別", period_start AS "開始", recordings AS "録音数"
+FROM "04_Journals/Pendant"
+WHERE contains(top_topics, "Cloudflare Workers")
+SORT period_start DESC
+\`\`\`
+
+### 今月のサマリー
+
+\`\`\`dataview
+TABLE type AS "種別", recordings AS "録音数", action_items_count AS "AI件数"
+FROM "04_Journals/Pendant"
+WHERE period_start >= date(today).year + "-" + padleft(date(today).month, 2, "0") + "-01"
+SORT period_start DESC
+\`\`\`
+
+## Inline クエリ例
+
+日々のノートに埋め込む例:
+
+- 今週の録音数: \`= this.recordings\`
+- 感情スコア: \`= this.sentiment_score\`
+- トップトピック: \`= this.top_topics\`
+- アクションアイテム数: \`= this.action_items_count\`
+
+## フロントマッターフィールド一覧
+
+| フィールド | 型 | 説明 | 対象 |
+|-----------|-----|------|------|
+| \`type\` | string | ダイジェスト種別 | 全て |
+| \`period_start\` | date | 期間開始日 | 全て |
+| \`period_end\` | date | 期間終了日 | 全て |
+| \`recordings\` | number | 録音件数 | weekly/monthly/annual |
+| \`total_duration\` | string | 合計時間（表示用） | weekly/monthly/annual |
+| \`total_duration_minutes\` | number | 合計時間（分） | weekly/monthly/annual |
+| \`action_items_count\` | number | AI件数 | weekly/monthly/annual |
+| \`starred_count\` | number | スター付き件数 | weekly/monthly/annual |
+| \`sentiment_score\` | number | 感情スコア (-1〜+1) | weekly/monthly/annual |
+| \`top_topics\` | list | 上位トピック | weekly/monthly/annual |
+| \`total_items\` | number | アクションアイテム総数 | actions |
+| \`topic_count\` | number | トピック数 | actions |
+`;
+
+  const dirPath = path.dirname(guidePath);
+  fs.mkdirSync(dirPath, { recursive: true });
+  fs.writeFileSync(guidePath, content, 'utf-8');
+  console.log(`  📖 Dataview Query Guide → ${guidePath}`);
 }
 
 // ============================================================================
@@ -596,6 +794,11 @@ async function main(): Promise<void> {
   const digestCount = await syncDigestReports(supabaseUrl, serviceRoleKey, pendantDir);
 
   console.log(`\n🎉 All done! ${syncedIds.length} lifelogs + ${digestCount} digest report(s) synced.`);
+
+  // === Generate Dataview Query Guide ===
+  if (!isDryRun) {
+    generateDataviewGuide(pendantDir);
+  }
 }
 
 // Run

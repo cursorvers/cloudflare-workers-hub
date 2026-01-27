@@ -5,6 +5,7 @@ import {
   aggregateActionItems,
   generateWeeklyMarkdown,
   generateMonthlyMarkdown,
+  generateAnnualMarkdown,
   generateActionItemsMarkdown,
   type LifelogRecord,
 } from './digest-generator';
@@ -506,6 +507,110 @@ describe('generateMonthlyMarkdown', () => {
     expect(md).toContain('0件');
     expect(md).not.toContain('## Action Items');
     expect(md).not.toContain('## トピックトレンド');
+  });
+});
+
+// ============================================================================
+// generateAnnualMarkdown
+// ============================================================================
+
+describe('generateAnnualMarkdown', () => {
+  it('should generate valid frontmatter with annual type', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2025-01-01', '2025-12-31');
+    const md = generateAnnualMarkdown(digest);
+
+    expect(md).toContain('---');
+    expect(md).toContain('type: annual-digest');
+    expect(md).toContain('source: Limitless Pendant');
+    expect(md).toContain('tags: [pendant, annual');
+  });
+
+  it('should use YYYY as label', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2025-01-01', '2025-12-31');
+    const md = generateAnnualMarkdown(digest);
+
+    expect(md).toContain('date: 2025');
+    expect(md).toContain('# 2025 年次レポート');
+  });
+
+  it('should include summary stats', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2025-01-01', '2025-12-31');
+    const md = generateAnnualMarkdown(digest);
+
+    expect(md).toContain('7件');
+  });
+
+  it('should include monthly breakdown table', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2025-01-01', '2025-12-31');
+    const md = generateAnnualMarkdown(digest);
+
+    expect(md).toContain('## 月別アクティビティ');
+    expect(md).toContain('| 月 | 録音数 | 時間 | 主な活動 |');
+  });
+
+  it('should include action items', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2025-01-01', '2025-12-31');
+    const md = generateAnnualMarkdown(digest);
+
+    expect(md).toContain('## Action Items');
+    expect(md).toContain('- [ ] ');
+  });
+
+  it('should include topic trends (up to 30)', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2025-01-01', '2025-12-31');
+    const md = generateAnnualMarkdown(digest);
+
+    expect(md).toContain('## トピックトレンド');
+    expect(md).toContain('| # | トピック | 回数 | 分類 |');
+  });
+
+  it('should include sentiment trends', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2025-01-01', '2025-12-31');
+    const md = generateAnnualMarkdown(digest);
+
+    expect(md).toContain('## 感情トレンド');
+    expect(md).toContain('positive');
+  });
+
+  it('should include busyness section', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2025-01-01', '2025-12-31');
+    const md = generateAnnualMarkdown(digest);
+
+    expect(md).toContain('## 多忙度');
+    expect(md).toContain('活動量:');
+  });
+
+  it('should handle empty data gracefully', () => {
+    const digest = aggregateWeeklyDigest([], '2025-01-01', '2025-12-31');
+    const md = generateAnnualMarkdown(digest);
+
+    expect(md).toContain('---');
+    expect(md).toContain('# 2025 年次レポート');
+    expect(md).toContain('0件');
+    expect(md).not.toContain('## Action Items');
+    expect(md).not.toContain('## トピックトレンド');
+  });
+
+  it('should include Dataview frontmatter fields', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2025-01-01', '2025-12-31');
+    const md = generateAnnualMarkdown(digest);
+
+    expect(md).toContain('period_start: 2025-01-01');
+    expect(md).toContain('period_end: 2025-12-31');
+    expect(md).toContain('total_duration_minutes:');
+    expect(md).toContain('action_items_count:');
+    expect(md).toContain('starred_count:');
+    expect(md).toContain('sentiment_score:');
+    expect(md).toContain('top_topics:');
   });
 });
 
