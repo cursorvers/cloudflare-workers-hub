@@ -34,7 +34,7 @@ index_name = "obsidian-knowledge"
 
 # Cron Triggers
 [triggers]
-crons = ["0 * * * *"]  # Every hour (automatic Limitless sync)
+crons = ["0 * * * *", "0 21 * * *", "0 0 * * 0"]  # Hourly sync, Daily actions (6AM JST), Weekly digest (Sun 9AM JST)
 
 # Environment variables
 [vars]

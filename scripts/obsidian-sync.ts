@@ -2,11 +2,13 @@
 /**
  * Obsidian Sync Script
  *
- * Syncs processed lifelogs from Supabase to Obsidian vault as daily digest files.
+ * Phase 1: Syncs processed lifelogs from Supabase → daily digest .md files
+ * Phase 2: Syncs digest reports (weekly/daily actions) from Supabase → Obsidian
  *
- * Pipeline: Supabase (processed_lifelogs) → Daily Digest .md → Obsidian Vault
- *
- * Output: /Users/masayuki/Obsidian Project Kit for Market/04_Journals/Pendant/YYYY/MM/YYYY-MM-DD.md
+ * Pipeline:
+ *   Supabase (processed_lifelogs) → 04_Journals/Pendant/YYYY/MM/YYYY-MM-DD.md
+ *   Supabase (digest_reports)     → 04_Journals/Pendant/Weekly/YYYY-Wxx.md
+ *                                 → 04_Journals/Pendant/Actions/YYYY-MM-DD.md
  *
  * Usage:
  *   npx tsx scripts/obsidian-sync.ts
@@ -38,6 +40,17 @@ const specificDate = dateArgIdx >= 0 ? args[dateArgIdx + 1] : null;
 // ============================================================================
 // Types
 // ============================================================================
+
+interface DigestReport {
+  id: string;
+  type: 'weekly' | 'daily_actions';
+  period_start: string;
+  period_end: string;
+  content: unknown;
+  markdown: string;
+  obsidian_synced: boolean;
+  created_at: string;
+}
 
 interface ProcessedLifelog {
   id: string;
@@ -334,6 +347,113 @@ function buildDailyDigest(date: string, lifelogs: ProcessedLifelog[]): string {
 }
 
 // ============================================================================
+// Digest Reports Sync
+// ============================================================================
+
+/**
+ * Get ISO week number from a date string
+ */
+function getISOWeekNumber(dateStr: string): string {
+  const date = new Date(dateStr);
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
+
+/**
+ * Determine the output file path for a digest report
+ */
+function getDigestOutputPath(pendantDir: string, report: DigestReport): string {
+  if (report.type === 'weekly') {
+    const weekLabel = getISOWeekNumber(report.period_start);
+    return path.join(pendantDir, 'Weekly', `${weekLabel}.md`);
+  }
+  // daily_actions → Actions/YYYY-MM-DD.md (using period_end date in JST)
+  const dateStr = getJSTDate(report.period_end);
+  return path.join(pendantDir, 'Actions', `${dateStr}.md`);
+}
+
+/**
+ * Sync unsynced digest reports from Supabase to Obsidian
+ */
+async function syncDigestReports(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  pendantDir: string
+): Promise<number> {
+  console.log('\n📊 Fetching unsynced digest reports from Supabase...');
+
+  const reports = await supabaseFetch<DigestReport[]>(
+    supabaseUrl,
+    serviceRoleKey,
+    'digest_reports',
+    'select=id,type,period_start,period_end,markdown,obsidian_synced,created_at&obsidian_synced=eq.false&order=period_start.asc'
+  );
+
+  if (reports.length === 0) {
+    console.log('✅ No unsynced digest reports found.');
+    return 0;
+  }
+
+  console.log(`📊 Found ${reports.length} unsynced digest report(s)`);
+
+  const syncedIds: string[] = [];
+
+  for (const report of reports) {
+    const filePath = getDigestOutputPath(pendantDir, report);
+    const dirPath = path.dirname(filePath);
+    const typeLabel = report.type === 'weekly' ? 'Weekly Digest' : 'Daily Actions';
+
+    console.log(`  📝 ${typeLabel} (${report.period_start.slice(0, 10)}) → ${filePath}`);
+
+    if (!report.markdown || report.markdown.trim().length === 0) {
+      console.log(`    ⚠️ Empty markdown, skipping`);
+      continue;
+    }
+
+    if (!isDryRun) {
+      fs.mkdirSync(dirPath, { recursive: true });
+      const existed = fs.existsSync(filePath);
+      fs.writeFileSync(filePath, report.markdown, 'utf-8');
+      console.log(existed ? `    ↻ Updated existing file` : `    ✨ Created new file`);
+      syncedIds.push(report.id);
+    } else {
+      console.log(`    (dry run - skipped)`);
+      console.log(`    Preview (first 200 chars): ${report.markdown.substring(0, 200)}...`);
+    }
+  }
+
+  // Mark as synced in Supabase
+  if (!isDryRun && syncedIds.length > 0) {
+    console.log(`\n🔄 Marking ${syncedIds.length} digest report(s) as synced...`);
+
+    for (let i = 0; i < syncedIds.length; i += 50) {
+      const batch = syncedIds.slice(i, i + 50);
+      const idFilter = batch.map((id) => `"${id}"`).join(',');
+
+      await supabaseFetch(
+        supabaseUrl,
+        serviceRoleKey,
+        'digest_reports',
+        `id=in.(${idFilter})`,
+        'PATCH',
+        {
+          obsidian_synced: true,
+          obsidian_synced_at: new Date().toISOString(),
+        }
+      );
+
+      console.log(`  ✅ Batch ${Math.floor(i / 50) + 1}: ${batch.length} report(s) marked`);
+    }
+  }
+
+  return syncedIds.length;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -463,7 +583,12 @@ async function main(): Promise<void> {
     }
   }
 
-  console.log(`\n✅ Sync complete! ${syncedIds.length} lifelogs synced to Obsidian.`);
+  console.log(`\n✅ Lifelogs sync complete! ${syncedIds.length} lifelogs synced to Obsidian.`);
+
+  // === Phase 2: Sync Digest Reports ===
+  const digestCount = await syncDigestReports(supabaseUrl, serviceRoleKey, pendantDir);
+
+  console.log(`\n🎉 All done! ${syncedIds.length} lifelogs + ${digestCount} digest report(s) synced.`);
 }
 
 // Run

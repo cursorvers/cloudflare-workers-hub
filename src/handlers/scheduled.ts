@@ -1,14 +1,35 @@
 /**
  * Scheduled Handler for Cron Triggers
  *
- * Handles scheduled tasks triggered by Cloudflare Workers Cron:
- * - Automatic Limitless.ai sync
- * - Scheduled maintenance tasks
+ * Dispatches to the appropriate handler based on cron expression:
+ * - "0 * * * *"   → Hourly Limitless.ai sync (backup)
+ * - "0 21 * * *"  → Daily action item check (6AM JST)
+ * - "0 0 * * 0"   → Weekly digest generation (Sunday 9AM JST)
  */
 
 import { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { syncToSupabase } from '../services/limitless';
+import { supabaseSelect, supabaseUpsert, type SupabaseConfig } from '../services/supabase-client';
+import {
+  aggregateWeeklyDigest,
+  aggregateActionItems,
+  generateWeeklyMarkdown,
+  generateActionItemsMarkdown,
+  type LifelogRecord,
+} from '../services/digest-generator';
+
+// ============================================================================
+// Cron Expression Constants
+// ============================================================================
+
+const CRON_HOURLY_SYNC = '0 * * * *';
+const CRON_DAILY_ACTIONS = '0 21 * * *';   // 21:00 UTC = 06:00 JST
+const CRON_WEEKLY_DIGEST = '0 0 * * 0';    // Sun 00:00 UTC = Sun 09:00 JST
+
+// ============================================================================
+// Distributed Lock Helpers
+// ============================================================================
 
 /**
  * Acquire distributed lock using KV compare-and-swap
@@ -16,19 +37,13 @@ import { syncToSupabase } from '../services/limitless';
  */
 async function acquireLock(kv: KVNamespace, lockKey: string, ttlSeconds: number): Promise<boolean> {
   const lockValue = Date.now().toString();
-
-  // Use KV.put with metadata to implement compare-and-swap pattern
-  // If key doesn't exist, it will be created with our value
   const metadata = { acquiredAt: Date.now() };
 
   try {
-    // Try to create lock with expiration
     await kv.put(lockKey, lockValue, {
       expirationTtl: ttlSeconds,
       metadata,
     });
-
-    // Verify we actually got the lock by reading it back
     const verifyValue = await kv.get(lockKey);
     return verifyValue === lockValue;
   } catch {
@@ -51,7 +66,36 @@ async function releaseLock(kv: KVNamespace, lockKey: string): Promise<void> {
 }
 
 /**
- * Handle scheduled events from Cloudflare Workers Cron
+ * Run a handler with an independent distributed lock.
+ * Soft-fail: logs errors but never throws.
+ */
+async function withLock(
+  kv: KVNamespace,
+  lockKey: string,
+  ttlSeconds: number,
+  handler: () => Promise<void>
+): Promise<void> {
+  const acquired = await acquireLock(kv, lockKey, ttlSeconds);
+  if (!acquired) {
+    safeLog.info('[Scheduled] Lock held, skipping', { lockKey });
+    return;
+  }
+  try {
+    await handler();
+  } catch (error) {
+    safeLog.error('[Scheduled] Handler failed', { lockKey, error: String(error) });
+  } finally {
+    await releaseLock(kv, lockKey);
+  }
+}
+
+// ============================================================================
+// Main Dispatcher
+// ============================================================================
+
+/**
+ * Handle scheduled events from Cloudflare Workers Cron.
+ * Dispatches to the appropriate handler based on the cron expression.
  */
 export async function handleScheduled(
   controller: ScheduledController,
@@ -65,44 +109,50 @@ export async function handleScheduled(
     cron: controller.cron,
   });
 
-  // Early return if CACHE KV is not available
   if (!env.CACHE) {
     safeLog.warn('[Scheduled] CACHE KV not configured, cannot use distributed locking');
     return;
   }
 
-  // Distributed lock to prevent race conditions
-  const lockKey = `limitless:sync_lock:${env.LIMITLESS_USER_ID || 'default'}`;
-  const lockTTL = 300; // 5 minutes
-  const lockAcquired = await acquireLock(env.CACHE, lockKey, lockTTL);
+  switch (controller.cron) {
+    case CRON_HOURLY_SYNC:
+      return handleLimitlessSync(env);
 
-  if (!lockAcquired) {
-    safeLog.info('[Scheduled] Sync already in progress (lock held), skipping');
-    return;
+    case CRON_DAILY_ACTIONS:
+      return handleDailyActionCheck(env);
+
+    case CRON_WEEKLY_DIGEST:
+      return handleWeeklyDigest(env);
+
+    default:
+      safeLog.warn('[Scheduled] Unknown cron expression', { cron: controller.cron });
   }
+}
 
-  try {
-    // Check if Limitless auto-sync is enabled
+// ============================================================================
+// Handler: Hourly Limitless Sync (existing logic, extracted)
+// ============================================================================
+
+async function handleLimitlessSync(env: Env): Promise<void> {
+  const lockKey = `limitless:sync_lock:${env.LIMITLESS_USER_ID || 'default'}`;
+
+  await withLock(env.CACHE!, lockKey, 300, async () => {
     const autoSyncEnabled = env.LIMITLESS_AUTO_SYNC_ENABLED === 'true';
-
     if (!autoSyncEnabled) {
       safeLog.info('[Scheduled] Limitless auto-sync is disabled');
       return;
     }
 
-    // Check if LIMITLESS_API_KEY is configured
     if (!env.LIMITLESS_API_KEY) {
       safeLog.warn('[Scheduled] LIMITLESS_API_KEY not configured, skipping sync');
       return;
     }
 
-    // Check if LIMITLESS_USER_ID is configured
     if (!env.LIMITLESS_USER_ID) {
       safeLog.warn('[Scheduled] LIMITLESS_USER_ID not configured, skipping sync');
       return;
     }
 
-    // Get sync interval (default: 24 hours for backup)
     const syncIntervalHours = parseInt(env.LIMITLESS_SYNC_INTERVAL_HOURS || '24', 10);
 
     safeLog.info('[Scheduled] Starting Limitless backup sync', {
@@ -113,9 +163,7 @@ export async function handleScheduled(
 
     // Check last backup sync time from KV
     const lastSyncKey = `limitless:backup_sync:${env.LIMITLESS_USER_ID}`;
-    let shouldSync = true;
-
-    const lastSyncData = await env.CACHE.get(lastSyncKey);
+    const lastSyncData = await env.CACHE!.get(lastSyncKey);
 
     if (lastSyncData) {
       const lastSync = new Date(lastSyncData);
@@ -127,30 +175,22 @@ export async function handleScheduled(
           hoursSinceLastSync: hoursSinceLastSync.toFixed(2),
           minInterval: syncIntervalHours,
         });
-        shouldSync = false;
+        return;
       }
     }
 
-    if (!shouldSync) {
-      return;
-    }
-
-    // Perform backup sync (longer time range to catch any missed items)
-    // This acts as a safety net for items not caught by iPhone triggers
     const startTime = Date.now();
     const result = await syncToSupabase(env, env.LIMITLESS_API_KEY, {
       userId: env.LIMITLESS_USER_ID,
-      maxAgeHours: syncIntervalHours + 2, // Fetch slightly more to ensure no gaps
-      includeAudio: false, // Don't download audio for backup sync (save bandwidth)
-      maxItems: 5, // Workers Free Tier: 50 subrequest limit per invocation
+      maxAgeHours: syncIntervalHours + 2,
+      includeAudio: false,
+      maxItems: 5,
     });
 
     const duration = Date.now() - startTime;
 
-    // Update last backup sync time in KV
-    await env.CACHE.put(lastSyncKey, new Date().toISOString());
+    await env.CACHE!.put(lastSyncKey, new Date().toISOString());
 
-    // Update backup sync stats
     const statsKey = `limitless:backup_stats:${env.LIMITLESS_USER_ID}`;
     const stats = {
       lastSync: new Date().toISOString(),
@@ -160,7 +200,7 @@ export async function handleScheduled(
       durationMs: duration,
       purpose: 'backup',
     };
-    await env.CACHE.put(statsKey, JSON.stringify(stats));
+    await env.CACHE!.put(statsKey, JSON.stringify(stats));
 
     safeLog.info('[Scheduled] Limitless backup sync completed', {
       userId: env.LIMITLESS_USER_ID,
@@ -171,20 +211,187 @@ export async function handleScheduled(
       note: result.synced > 0 ? 'Caught items missed by iPhone triggers' : 'No new items',
     });
 
-    // Log errors if any
     if (result.errors.length > 0) {
       safeLog.warn('[Scheduled] Sync completed with errors', {
-        errors: result.errors.slice(0, 5), // Log first 5 errors
+        errors: result.errors.slice(0, 5),
       });
     }
-  } catch (error) {
-    safeLog.error('[Scheduled] Auto-sync failed', {
-      error: String(error),
+  });
+}
+
+// ============================================================================
+// Handler: Weekly Digest
+// ============================================================================
+
+async function handleWeeklyDigest(env: Env): Promise<void> {
+  const lockKey = 'digest:weekly_lock';
+
+  await withLock(env.CACHE!, lockKey, 300, async () => {
+    if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+      safeLog.warn('[WeeklyDigest] Supabase not configured, skipping');
+      return;
+    }
+
+    const config: SupabaseConfig = {
+      url: env.SUPABASE_URL,
+      serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+    };
+
+    // Calculate 7-day range ending yesterday (JST)
+    const now = new Date();
+    const jstOffset = 9 * 60 * 60 * 1000;
+    const jstNow = new Date(now.getTime() + jstOffset);
+    const jstToday = new Date(jstNow.getFullYear(), jstNow.getMonth(), jstNow.getDate());
+
+    const periodEnd = new Date(jstToday.getTime() - jstOffset); // Yesterday end → today 00:00 JST
+    const periodStart = new Date(periodEnd.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+    const periodStartISO = periodStart.toISOString();
+    const periodEndISO = periodEnd.toISOString();
+    const periodStartDate = periodStartISO.slice(0, 10);
+    const periodEndDate = new Date(periodEnd.getTime() - 1).toISOString().slice(0, 10);
+
+    safeLog.info('[WeeklyDigest] Generating weekly digest', {
+      periodStart: periodStartISO,
+      periodEnd: periodEndISO,
     });
 
-    // Don't throw - let the cron continue running
-  } finally {
-    // Always release lock on completion or error
-    await releaseLock(env.CACHE, lockKey);
-  }
+    // Fetch all lifelogs for the period
+    const selectFields = 'id,classification,summary,key_insights,action_items,topics,speakers,sentiment,title,start_time,end_time,duration_seconds,is_starred';
+    const query = `select=${selectFields}&start_time=gte.${periodStartISO}&start_time=lt.${periodEndISO}&classification=neq.pending&order=start_time.asc&limit=500`;
+
+    const { data: lifelogs, error } = await supabaseSelect<LifelogRecord>(config, 'processed_lifelogs', query);
+
+    if (error) {
+      safeLog.error('[WeeklyDigest] Failed to fetch lifelogs', { error: error.message });
+      return;
+    }
+
+    if (!lifelogs || lifelogs.length === 0) {
+      safeLog.info('[WeeklyDigest] No lifelogs found for period, skipping');
+      return;
+    }
+
+    safeLog.info('[WeeklyDigest] Aggregating data', { count: lifelogs.length });
+
+    // Aggregate and generate markdown
+    const digest = aggregateWeeklyDigest(lifelogs, periodStartDate, periodEndDate);
+    const markdown = generateWeeklyMarkdown(digest);
+
+    // Upsert into digest_reports (unique on type + period_start)
+    const { error: upsertError } = await supabaseUpsert(
+      config,
+      'digest_reports',
+      {
+        type: 'weekly',
+        period_start: periodStartISO,
+        period_end: periodEndISO,
+        content: digest,
+        markdown,
+        obsidian_synced: false,
+      },
+      'type,period_start'
+    );
+
+    if (upsertError) {
+      safeLog.error('[WeeklyDigest] Failed to store digest', { error: upsertError.message });
+      return;
+    }
+
+    safeLog.info('[WeeklyDigest] Weekly digest generated', {
+      recordings: digest.totalRecordings,
+      topics: digest.topTopics.length,
+      actionItems: digest.allActionItems.length,
+      period: `${periodStartDate} ~ ${periodEndDate}`,
+    });
+  });
+}
+
+// ============================================================================
+// Handler: Daily Action Item Check
+// ============================================================================
+
+async function handleDailyActionCheck(env: Env): Promise<void> {
+  const lockKey = 'digest:daily_actions_lock';
+
+  await withLock(env.CACHE!, lockKey, 300, async () => {
+    if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+      safeLog.warn('[DailyActions] Supabase not configured, skipping');
+      return;
+    }
+
+    const config: SupabaseConfig = {
+      url: env.SUPABASE_URL,
+      serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+    };
+
+    // Look back 14 days for unresolved action items
+    const lookbackDays = 14;
+    const periodEnd = new Date();
+    const periodStart = new Date(periodEnd.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+
+    const periodStartISO = periodStart.toISOString();
+    const periodEndISO = periodEnd.toISOString();
+    const todayDate = new Date().toISOString().slice(0, 10);
+
+    safeLog.info('[DailyActions] Checking action items', {
+      lookbackDays,
+      periodStart: periodStartISO,
+    });
+
+    // Fetch lifelogs with action items (only those that have non-empty action_items)
+    const selectFields = 'id,classification,action_items,topics,start_time';
+    const query = `select=${selectFields}&start_time=gte.${periodStartISO}&start_time=lt.${periodEndISO}&classification=neq.pending&classification=neq.casual&order=start_time.desc&limit=200`;
+
+    const { data: lifelogs, error } = await supabaseSelect<LifelogRecord>(config, 'processed_lifelogs', query);
+
+    if (error) {
+      safeLog.error('[DailyActions] Failed to fetch lifelogs', { error: error.message });
+      return;
+    }
+
+    if (!lifelogs || lifelogs.length === 0) {
+      safeLog.info('[DailyActions] No lifelogs found, skipping');
+      return;
+    }
+
+    // Aggregate action items
+    const report = aggregateActionItems(
+      lifelogs,
+      periodStartISO.slice(0, 10),
+      todayDate
+    );
+
+    if (report.totalItems === 0) {
+      safeLog.info('[DailyActions] No action items found, skipping');
+      return;
+    }
+
+    const markdown = generateActionItemsMarkdown(report);
+
+    // Upsert into digest_reports
+    const { error: upsertError } = await supabaseUpsert(
+      config,
+      'digest_reports',
+      {
+        type: 'daily_actions',
+        period_start: periodStartISO,
+        period_end: periodEndISO,
+        content: report,
+        markdown,
+        obsidian_synced: false,
+      },
+      'type,period_start'
+    );
+
+    if (upsertError) {
+      safeLog.error('[DailyActions] Failed to store report', { error: upsertError.message });
+      return;
+    }
+
+    safeLog.info('[DailyActions] Action item report generated', {
+      totalItems: report.totalItems,
+      topicGroups: Object.keys(report.itemsByTopic).length,
+    });
+  });
 }
