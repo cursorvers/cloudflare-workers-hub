@@ -14,7 +14,7 @@ import { Env } from '../types';
 import cronHandler, { CreateTaskInput, UpdateTaskInput } from './cron';
 import { safeLog, maskUserId } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
-import { verifyAPIKey, authorizeUserAccess } from './queue';
+import { verifyAPIKey, authorizeUserAccess } from '../utils/api-auth';
 import { validateRequestBody, validatePathParameter } from '../schemas/validation-helper';
 import { CreateTaskSchema, UpdateTaskSchema } from '../schemas/cron';
 import { UserIdPathSchema, TaskIdPathSchema } from '../schemas/path-params';

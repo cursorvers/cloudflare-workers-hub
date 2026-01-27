@@ -6,10 +6,12 @@
  * - Release and renew leases
  * - Update task status
  * - Store and retrieve results
+ *
+ * Migrated to use KV prefix scan instead of single pending list array
  */
 
 import { Env } from '../types';
-import { safeLog, maskUserId } from '../utils/log-sanitizer';
+import { safeLog } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
 import { validateRequestBody, validatePathParameter } from '../schemas/validation-helper';
 import {
@@ -21,158 +23,7 @@ import {
   ResultSchema
 } from '../schemas/queue';
 import { TaskIdPathSchema } from '../schemas/path-params';
-
-// Cache version for schema changes (update when KV schema changes)
-const CACHE_VERSION = 'v1';
-
-type APIScope = 'queue' | 'memory' | 'admin';
-
-/**
- * Verify API Key with constant-time comparison
- */
-export function verifyAPIKey(request: Request, env: Env, scope: APIScope = 'queue'): boolean {
-  // Get scoped key or fall back to legacy ASSISTANT_API_KEY
-  const scopedKeys: Record<APIScope, string | undefined> = {
-    queue: env.QUEUE_API_KEY || env.ASSISTANT_API_KEY,
-    memory: env.MEMORY_API_KEY || env.ASSISTANT_API_KEY,
-    admin: env.ADMIN_API_KEY, // No fallback for admin - explicit key required
-  };
-
-  const expectedKey = scopedKeys[scope];
-
-  // SECURITY: Fail-closed - API Key is mandatory
-  if (!expectedKey) {
-    safeLog.error(`[API] ${scope.toUpperCase()}_API_KEY not configured - access denied`);
-    return false;
-  }
-
-  const apiKey = request.headers.get('X-API-Key');
-  if (!apiKey) {
-    safeLog.warn(`[API] Missing API key for scope: ${scope}`);
-    return false;
-  }
-
-  // Constant-time comparison to prevent timing attacks
-  // Always execute full comparison regardless of length to prevent timing leaks
-  let result = apiKey.length === expectedKey.length ? 0 : 1;
-  const maxLen = Math.max(apiKey.length, expectedKey.length);
-  for (let i = 0; i < maxLen; i++) {
-    const a = i < apiKey.length ? apiKey.charCodeAt(i) : 0;
-    const b = i < expectedKey.length ? expectedKey.charCodeAt(i) : 0;
-    result |= a ^ b;
-  }
-
-  if (result !== 0) {
-    safeLog.warn(`[API] Invalid API key for scope: ${scope}`);
-    return false;
-  }
-
-  return true;
-}
-
-/**
- * Hash API key using SHA-256 and return first 16 characters
- * Used for storing API key -> userId mappings without exposing full keys
- */
-export async function hashAPIKey(apiKey: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(apiKey);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-  return hashHex.substring(0, 16);
-}
-
-interface APIKeyMapping {
-  userId: string;
-  role?: 'service' | 'user';
-}
-
-/**
- * Extract userId and role from API key by looking up KV mapping
- * Returns null if mapping doesn't exist
- *
- * SECURITY: This prevents IDOR by deriving userId from cryptographic API key
- * instead of trusting URL parameters.
- * Service role keys (role: 'service') bypass per-user checks for system daemons.
- */
-async function extractUserIdFromKey(apiKey: string, env: Env): Promise<APIKeyMapping | null> {
-  if (!env.CACHE) {
-    safeLog.error('[API] CACHE KV namespace not available');
-    return null;
-  }
-
-  const keyHash = await hashAPIKey(apiKey);
-  const mappingKey = `apikey:mapping:${keyHash}`;
-
-  const mapping = await env.CACHE.get(mappingKey, 'json') as APIKeyMapping | null;
-
-  if (!mapping || !mapping.userId) {
-    safeLog.warn('[API] No userId mapping found for API key', { keyHash: keyHash.substring(0, 8) });
-    return null;
-  }
-
-  return mapping;
-}
-
-/**
- * Verify that the requested userId matches the userId derived from API key
- * Returns true if authorized, false otherwise
- *
- * SECURITY: Prevents IDOR by ensuring users can only access their own data.
- * Service role keys (role: 'service') bypass per-user checks for system daemons
- * like assistant-daemon.js that process tasks for all users.
- */
-export async function authorizeUserAccess(
-  request: Request,
-  requestedUserId: string,
-  env: Env
-): Promise<boolean> {
-  const apiKey = request.headers.get('X-API-Key');
-  if (!apiKey) {
-    safeLog.warn('[API] Missing API key for authorization');
-    return false;
-  }
-
-  const mapping = await extractUserIdFromKey(apiKey, env);
-  if (!mapping) {
-    safeLog.warn('[API] Failed to derive userId from API key');
-    return false;
-  }
-
-  // Service role: bypass per-user check (for system daemons)
-  if (mapping.role === 'service') {
-    safeLog.log('[API:audit] Service role access', {
-      targetUserId: maskUserId(requestedUserId),
-      serviceId: maskUserId(mapping.userId),
-      endpoint: new URL(request.url).pathname,
-    });
-    return true;
-  }
-
-  const derivedUserId = mapping.userId;
-
-  // Constant-time comparison to prevent timing attacks
-  // Always execute full comparison regardless of length to prevent timing leaks
-  let result = derivedUserId.length === requestedUserId.length ? 0 : 1;
-  const maxLen = Math.max(derivedUserId.length, requestedUserId.length);
-  for (let i = 0; i < maxLen; i++) {
-    const a = i < derivedUserId.length ? derivedUserId.charCodeAt(i) : 0;
-    const b = i < requestedUserId.length ? requestedUserId.charCodeAt(i) : 0;
-    result |= a ^ b;
-  }
-
-  const authorized = result === 0;
-
-  if (!authorized) {
-    safeLog.warn('[API] Authorization failed: userId mismatch', {
-      requested: maskUserId(requestedUserId),
-      derived: maskUserId(derivedUserId),
-    });
-  }
-
-  return authorized;
-}
+import { verifyAPIKey, authorizeUserAccess } from '../utils/api-auth';
 
 export async function handleQueueAPI(request: Request, env: Env, path: string): Promise<Response> {
   // Verify API Key with 'queue' scope (fail-closed, generic error to prevent enumeration)
@@ -201,9 +52,19 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
 
   const kv = env.CACHE;
 
-  // GET /api/queue - List pending tasks
+  // GET /api/queue - List pending tasks using KV prefix scan
   if (path === '/api/queue' && request.method === 'GET') {
-    const pending = await kv.get<string[]>(`${CACHE_VERSION}:orchestrator:pending`, 'json') || [];
+    const taskKeys = await kv.list({ prefix: 'queue:task:' });
+    const pending: string[] = [];
+
+    for (const key of taskKeys.keys) {
+      // Extract taskId from key: queue:task:{taskId}
+      const taskId = key.name.replace('queue:task:', '');
+      pending.push(taskId);
+    }
+
+    safeLog.log('[Queue API] Listed tasks', { count: pending.length });
+
     return new Response(JSON.stringify({ pending, count: pending.length }), {
       headers: { 'Content-Type': 'application/json' },
     });
@@ -221,19 +82,21 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     const workerId = body.workerId || `worker_${Date.now()}`;
     const leaseDuration = Math.min(body.leaseDurationSec || 300, 600); // Max 10 minutes
 
-    const pending = await kv.get<string[]>(`${CACHE_VERSION}:orchestrator:pending`, 'json') || [];
+    // Use KV prefix scan to find all tasks
+    const taskKeys = await kv.list({ prefix: 'queue:task:' });
 
     // OPTIMIZATION: Batch fetch all active leases instead of checking one by one
     // This reduces KV operations from N to 1 when there are many leased tasks
-    const leasePrefix = 'orchestrator:lease:';
+    const leasePrefix = 'queue:lease:';
     const activeLeasesResult = await kv.list({ prefix: leasePrefix });
     const leasedTaskIds = new Set(
       activeLeasesResult.keys.map(key => key.name.substring(leasePrefix.length))
     );
 
     // Find first task that isn't already leased
-    for (const taskId of pending) {
-      const leaseKey = `orchestrator:lease:${taskId}`;
+    for (const key of taskKeys.keys) {
+      const taskId = key.name.replace('queue:task:', '');
+      const leaseKey = `queue:lease:${taskId}`;
 
       // O(1) lookup against pre-fetched leased tasks
       if (leasedTaskIds.has(taskId)) {
@@ -264,8 +127,8 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
         continue;
       }
 
-      // Successfully claimed - fetch task details
-      const task = await kv.get(`${CACHE_VERSION}:orchestrator:queue:${taskId}`, 'json');
+      // Successfully claimed - fetch task details from new key format
+      const task = await kv.get(`queue:task:${taskId}`, 'json');
       if (!task) {
         // Task was deleted, release lease and try next
         await kv.delete(leaseKey);
@@ -288,7 +151,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     return new Response(JSON.stringify({
       success: false,
       message: 'No tasks available or all tasks are leased',
-      pending: pending.length,
+      pending: taskKeys.keys.length,
     }), {
       headers: { 'Content-Type': 'application/json' },
     });
@@ -311,7 +174,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     }
 
     const body = validation.data;
-    const leaseKey = `orchestrator:lease:${taskId}`;
+    const leaseKey = `queue:lease:${taskId}`;
 
     const leaseData = await kv.get(leaseKey, 'json');
     if (!leaseData) {
@@ -371,7 +234,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     }
 
     const body = validation.data;
-    const leaseKey = `orchestrator:lease:${taskId}`;
+    const leaseKey = `queue:lease:${taskId}`;
     const extendDuration = Math.min(body.extendSec || 300, 600);
 
     const lease = await kv.get<{ workerId: string; claimedAt: string }>(leaseKey, 'json');
@@ -406,7 +269,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
       return taskIdValidation.response;
     }
 
-    const task = await kv.get(`${CACHE_VERSION}:orchestrator:queue:${taskId}`, 'json');
+    const task = await kv.get(`queue:task:${taskId}`, 'json');
     if (!task) {
       return new Response(JSON.stringify({ error: 'Task not found' }), {
         status: 404,
@@ -436,7 +299,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
 
     const body = validation.data;
 
-    const task = await kv.get(`${CACHE_VERSION}:orchestrator:queue:${taskId}`, 'json') as Record<string, unknown> | null;
+    const task = await kv.get(`queue:task:${taskId}`, 'json') as Record<string, unknown> | null;
     if (!task) {
       return new Response(JSON.stringify({ error: 'Task not found' }), {
         status: 404,
@@ -447,7 +310,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     // Update task status
     task.status = body.status;
     task.updatedAt = new Date().toISOString();
-    await kv.put(`${CACHE_VERSION}:orchestrator:queue:${taskId}`, JSON.stringify(task), { expirationTtl: 3600 });
+    await kv.put(`queue:task:${taskId}`, JSON.stringify(task), { expirationTtl: 3600 });
 
     return new Response(JSON.stringify({ success: true, status: body.status }), {
       headers: { 'Content-Type': 'application/json' },
@@ -472,18 +335,18 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
 
     const result = validation.data;
 
-    // Store result
-    await kv.put(`${CACHE_VERSION}:orchestrator:result:${taskId}`, JSON.stringify(result), {
+    // Store result (keeps orchestrator:result:* format for backwards compatibility)
+    await kv.put(`orchestrator:result:${taskId}`, JSON.stringify(result), {
       expirationTtl: 3600,
     });
 
-    // Remove from pending list
-    const pendingList = await kv.get<string[]>(`${CACHE_VERSION}:orchestrator:pending`, 'json') || [];
-    const updatedList = pendingList.filter(id => id !== taskId);
-    await kv.put(`${CACHE_VERSION}:orchestrator:pending`, JSON.stringify(updatedList), { expirationTtl: 3600 });
+    // Delete task key directly (no need to update pending list anymore)
+    await kv.delete(`queue:task:${taskId}`);
 
-    // Delete queue entry
-    await kv.delete(`${CACHE_VERSION}:orchestrator:queue:${taskId}`);
+    // Delete lease if it exists
+    await kv.delete(`queue:lease:${taskId}`);
+
+    safeLog.log('[Queue API] Task completed and removed', { taskId });
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { 'Content-Type': 'application/json' },
@@ -500,7 +363,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
       return taskIdValidation.response;
     }
 
-    const result = await kv.get(`${CACHE_VERSION}:orchestrator:result:${taskId}`, 'json');
+    const result = await kv.get(`orchestrator:result:${taskId}`, 'json');
     if (!result) {
       return new Response(JSON.stringify({ error: 'Result not found' }), {
         status: 404,

@@ -6,7 +6,7 @@
  */
 
 import { Env } from '../types';
-import { hashAPIKey } from './queue';
+import { hashAPIKey } from '../utils/api-auth';
 import { safeLog } from '../utils/log-sanitizer';
 
 /**

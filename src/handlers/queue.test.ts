@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { verifyAPIKey, authorizeUserAccess } from './queue';
+import { verifyAPIKey, authorizeUserAccess } from '../utils/api-auth';
 
 // Mock environment
 interface MockEnv {

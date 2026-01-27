@@ -13,7 +13,7 @@ import { Env } from '../types';
 import memoryHandler, { ConversationMessage, UserPreferences } from './memory';
 import { safeLog, maskUserId } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
-import { verifyAPIKey, authorizeUserAccess } from './queue';
+import { verifyAPIKey, authorizeUserAccess } from '../utils/api-auth';
 import { validateRequestBody, validatePathParameter } from '../schemas/validation-helper';
 import { ConversationMessageSchema, UserPreferencesSchema } from '../schemas/memory';
 import { UserIdPathSchema, ChannelPathSchema } from '../schemas/path-params';

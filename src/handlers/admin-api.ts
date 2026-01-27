@@ -9,7 +9,7 @@
 import { Env } from '../types';
 import { safeLog, maskUserId } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
-import { verifyAPIKey, hashAPIKey } from './queue';
+import { verifyAPIKey, hashAPIKey } from '../utils/api-auth';
 
 export async function handleAdminAPI(request: Request, env: Env, path: string): Promise<Response> {
   // Verify API key with admin scope

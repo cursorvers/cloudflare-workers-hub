@@ -11,7 +11,7 @@ import { Env } from '../types';
 import { registerDaemon, updateHeartbeat, getDaemonHealth, DaemonRegistration, DaemonHeartbeat } from './daemon';
 import { safeLog } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
-import { verifyAPIKey } from './queue';
+import { verifyAPIKey } from '../utils/api-auth';
 import { validateRequestBody } from '../schemas/validation-helper';
 import { DaemonRegistrationSchema, DaemonHeartbeatSchema } from '../schemas/daemon';
 
