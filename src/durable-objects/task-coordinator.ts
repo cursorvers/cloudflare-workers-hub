@@ -72,8 +72,22 @@ export class TaskCoordinator extends DurableObject<Env> {
 
   /**
    * Handle internal HTTP requests
+   * Requires Bearer token matching QUEUE_API_KEY for authentication.
    */
   async fetch(request: Request): Promise<Response> {
+    // Verify internal bearer token (prevents unauthorized DO access)
+    const expectedKey = this.env.QUEUE_API_KEY;
+    if (expectedKey) {
+      const authHeader = request.headers.get('Authorization');
+      const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+      if (token !== expectedKey) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -113,11 +127,8 @@ export class TaskCoordinator extends DurableObject<Env> {
         headers: { 'Content-Type': 'application/json' },
       });
     } catch (error) {
-      console.error('[TaskCoordinator] Request error:', error);
-      return new Response(JSON.stringify({
-        error: 'Internal error',
-        message: error instanceof Error ? error.message : 'Unknown error'
-      }), {
+      console.error('[TaskCoordinator] Request error:', error instanceof Error ? error.message : String(error));
+      return new Response(JSON.stringify({ error: 'Internal error' }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' },
       });

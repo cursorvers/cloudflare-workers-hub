@@ -39,11 +39,14 @@ async function coordinatorFetch(
   path: string,
   method: string,
   body?: unknown,
+  env?: Env,
 ): Promise<{ status: number; data: Record<string, unknown> }> {
-  const init: RequestInit = {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-  };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  // Add internal bearer token for DO authentication
+  if (env?.QUEUE_API_KEY) {
+    headers['Authorization'] = `Bearer ${env.QUEUE_API_KEY}`;
+  }
+  const init: RequestInit = { method, headers };
   if (body) init.body = JSON.stringify(body);
 
   const res = await stub.fetch(new Request(`http://do${path}`, init));
@@ -110,7 +113,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
 
     // Route through DO for atomic claim (or fall back to KV)
     if (coordinator) {
-      return claimViaDO(coordinator, kv, candidates, workerId, leaseDuration);
+      return claimViaDO(coordinator, kv, candidates, workerId, leaseDuration, env);
     }
     return claimViaKV(kv, candidates, workerId, leaseDuration);
   }
@@ -130,7 +133,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     if (coordinator) {
       const { status, data } = await coordinatorFetch(coordinator, '/release', 'POST', {
         taskId, workerId: body.workerId,
-      });
+      }, env);
       safeLog.log('[Queue API] Lease released via DO', { taskId, reason: body.reason || 'manual' });
       return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
     }
@@ -155,7 +158,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     if (coordinator) {
       const { status, data } = await coordinatorFetch(coordinator, '/renew', 'POST', {
         taskId, workerId: body.workerId, extendSec: extendDuration,
-      });
+      }, env);
       return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
     }
 
@@ -226,7 +229,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
 
     // Delete lease from DO (or KV fallback)
     if (coordinator) {
-      await coordinatorFetch(coordinator, `/task/${taskId}`, 'DELETE');
+      await coordinatorFetch(coordinator, `/task/${taskId}`, 'DELETE', undefined, env);
     } else {
       await kv.delete(`queue:lease:${taskId}`);
     }
@@ -263,10 +266,11 @@ async function claimViaDO(
   candidates: string[],
   workerId: string,
   leaseDuration: number,
+  env: Env,
 ): Promise<Response> {
   const { data } = await coordinatorFetch(coordinator, '/claim-next', 'POST', {
     candidates, workerId, leaseDurationSec: leaseDuration,
-  });
+  }, env);
 
   if (!data.claimed) {
     return new Response(JSON.stringify({
@@ -278,7 +282,7 @@ async function claimViaDO(
   const task = await kv.get(`queue:task:${taskId}`, 'json');
   if (!task) {
     // Task was deleted between scan and claim; release DO lease and retry once
-    await coordinatorFetch(coordinator, `/task/${taskId}`, 'DELETE');
+    await coordinatorFetch(coordinator, `/task/${taskId}`, 'DELETE', undefined, env);
     safeLog.warn('[Queue API] Task disappeared after DO claim', { taskId });
     return new Response(JSON.stringify({
       success: false, message: 'Task no longer available', pending: candidates.length,
