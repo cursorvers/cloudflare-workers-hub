@@ -25,6 +25,13 @@ import {
 import { sendDiscordNotification, type Notification } from './notifications';
 
 // ============================================================================
+// Constants
+// ============================================================================
+
+/** JST offset in milliseconds (UTC+9) */
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+
+// ============================================================================
 // Cron Expression Constants
 // ============================================================================
 
@@ -180,15 +187,24 @@ async function handleLimitlessSync(env: Env): Promise<void> {
 
     if (lastSyncData) {
       const lastSync = new Date(lastSyncData);
-      const hoursSinceLastSync = (Date.now() - lastSync.getTime()) / (1000 * 60 * 60);
+      const timeDiffMs = Date.now() - lastSync.getTime();
 
-      if (hoursSinceLastSync < syncIntervalHours) {
-        safeLog.info('[Scheduled] Skipping backup sync (too soon)', {
+      // Guard: Prevent division by zero and negative time differences
+      if (timeDiffMs < 0) {
+        safeLog.warn('[Scheduled] Invalid lastSync time (future date), forcing sync', {
           lastSync: lastSync.toISOString(),
-          hoursSinceLastSync: hoursSinceLastSync.toFixed(2),
-          minInterval: syncIntervalHours,
         });
-        return;
+      } else {
+        const hoursSinceLastSync = timeDiffMs / (1000 * 60 * 60);
+
+        if (hoursSinceLastSync < syncIntervalHours) {
+          safeLog.info('[Scheduled] Skipping backup sync (too soon)', {
+            lastSync: lastSync.toISOString(),
+            hoursSinceLastSync: hoursSinceLastSync.toFixed(2),
+            minInterval: syncIntervalHours,
+          });
+          return;
+        }
       }
     }
 
@@ -252,11 +268,11 @@ async function handleWeeklyDigest(env: Env): Promise<void> {
 
     // Calculate 7-day range ending yesterday (JST)
     const now = new Date();
-    const jstOffset = 9 * 60 * 60 * 1000;
-    const jstNow = new Date(now.getTime() + jstOffset);
-    const jstToday = new Date(jstNow.getFullYear(), jstNow.getMonth(), jstNow.getDate());
-
-    const periodEnd = new Date(jstToday.getTime() - jstOffset); // Yesterday end → today 00:00 JST
+    const jstNow = new Date(now.getTime() + JST_OFFSET_MS);
+    // Today midnight JST → UTC (use UTC methods to avoid local timezone bug)
+    const periodEnd = new Date(
+      Date.UTC(jstNow.getUTCFullYear(), jstNow.getUTCMonth(), jstNow.getUTCDate()) - JST_OFFSET_MS
+    );
     const periodStart = new Date(periodEnd.getTime() - 7 * 24 * 60 * 60 * 1000);
 
     const periodStartISO = periodStart.toISOString();
@@ -439,16 +455,17 @@ async function handleMonthlyDigest(env: Env): Promise<void> {
 
     // Calculate previous calendar month range (JST)
     const now = new Date();
-    const jstOffset = 9 * 60 * 60 * 1000;
-    const jstNow = new Date(now.getTime() + jstOffset);
+    const jstNow = new Date(now.getTime() + JST_OFFSET_MS);
 
-    // First day of current month in JST → that's the end boundary
-    const jstFirstOfMonth = new Date(jstNow.getFullYear(), jstNow.getMonth(), 1);
-    const periodEnd = new Date(jstFirstOfMonth.getTime() - jstOffset); // Convert back to UTC
+    // First day of current month in JST → that's the end boundary (use UTC methods)
+    const periodEnd = new Date(
+      Date.UTC(jstNow.getUTCFullYear(), jstNow.getUTCMonth(), 1) - JST_OFFSET_MS
+    );
 
-    // First day of previous month in JST
-    const prevMonth = new Date(jstNow.getFullYear(), jstNow.getMonth() - 1, 1);
-    const periodStart = new Date(prevMonth.getTime() - jstOffset); // Convert back to UTC
+    // First day of previous month in JST (use UTC methods)
+    const periodStart = new Date(
+      Date.UTC(jstNow.getUTCFullYear(), jstNow.getUTCMonth() - 1, 1) - JST_OFFSET_MS
+    );
 
     const periodStartISO = periodStart.toISOString();
     const periodEndISO = periodEnd.toISOString();
@@ -593,16 +610,17 @@ async function handleAnnualDigest(env: Env): Promise<void> {
 
     // Calculate previous calendar year range (JST)
     const now = new Date();
-    const jstOffset = 9 * 60 * 60 * 1000;
-    const jstNow = new Date(now.getTime() + jstOffset);
+    const jstNow = new Date(now.getTime() + JST_OFFSET_MS);
 
-    // Jan 1st of current year in JST → that's the end boundary
-    const jstJan1 = new Date(jstNow.getFullYear(), 0, 1);
-    const periodEnd = new Date(jstJan1.getTime() - jstOffset); // Convert back to UTC
+    // Jan 1st of current year in JST → that's the end boundary (use UTC methods)
+    const periodEnd = new Date(
+      Date.UTC(jstNow.getUTCFullYear(), 0, 1) - JST_OFFSET_MS
+    );
 
-    // Jan 1st of previous year in JST
-    const prevYearJan1 = new Date(jstNow.getFullYear() - 1, 0, 1);
-    const periodStart = new Date(prevYearJan1.getTime() - jstOffset); // Convert back to UTC
+    // Jan 1st of previous year in JST (use UTC methods)
+    const periodStart = new Date(
+      Date.UTC(jstNow.getUTCFullYear() - 1, 0, 1) - JST_OFFSET_MS
+    );
 
     const periodStartISO = periodStart.toISOString();
     const periodEndISO = periodEnd.toISOString();

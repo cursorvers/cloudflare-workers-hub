@@ -379,19 +379,30 @@ function buildDataviewFrontmatter(digest: WeeklyDigest, type: string, label: str
   return lines;
 }
 
+// ============================================================================
+// Internal Helpers for Markdown Generation
+// ============================================================================
+
 /**
- * Generate Obsidian-compatible weekly digest markdown
+ * Configuration for generating digest markdown
  */
-export function generateWeeklyMarkdown(digest: WeeklyDigest): string {
-  const weekLabel = getISOWeek(digest.periodStart);
-  const lines: string[] = buildDataviewFrontmatter(digest, 'weekly-digest', weekLabel);
-  lines.push('');
+interface DigestMarkdownConfig {
+  title: string;
+  label: string;
+  type: string;
+  topicLimit: number;
+  insightLimit: number;
+  highlightLimit: number;
+  breakdownTitle: string;
+  breakdownColumns: string;
+  breakdownRows: (digest: WeeklyDigest) => string[];
+}
 
-  // Title
-  lines.push(`# ${weekLabel} 週次レポート`);
-  lines.push('');
-
-  // Summary stats
+/**
+ * Render summary statistics section
+ */
+function renderSummaryStats(digest: WeeklyDigest): string[] {
+  const lines: string[] = [];
   const clsParts = Object.entries(digest.classificationBreakdown)
     .sort(([, a], [, b]) => b - a)
     .map(([cls, count]) => `${classLabel(cls)} ×${count}`);
@@ -400,8 +411,14 @@ export function generateWeeklyMarkdown(digest: WeeklyDigest): string {
     lines.push(`> ⭐ スター付き: ${digest.starredCount}件`);
   }
   lines.push('');
+  return lines;
+}
 
-  // Action Items
+/**
+ * Render action items section
+ */
+function renderActionItems(digest: WeeklyDigest): string[] {
+  const lines: string[] = [];
   if (digest.allActionItems.length > 0) {
     lines.push('## Action Items');
     lines.push('');
@@ -410,32 +427,50 @@ export function generateWeeklyMarkdown(digest: WeeklyDigest): string {
     }
     lines.push('');
   }
+  return lines;
+}
 
-  // Topic Trends
+/**
+ * Render topic trends section
+ */
+function renderTopicTrends(digest: WeeklyDigest, limit: number): string[] {
+  const lines: string[] = [];
   if (digest.topTopics.length > 0) {
     lines.push('## トピックトレンド');
     lines.push('');
     lines.push('| # | トピック | 回数 | 分類 |');
     lines.push('|---|---------|------|------|');
-    for (let i = 0; i < digest.topTopics.length; i++) {
+    for (let i = 0; i < Math.min(digest.topTopics.length, limit); i++) {
       const t = digest.topTopics[i];
       const clsLabels = t.classifications.map((c) => classLabel(c)).join(', ');
       lines.push(`| ${i + 1} | ${t.topic} | ${t.count} | ${clsLabels} |`);
     }
     lines.push('');
   }
+  return lines;
+}
 
-  // Key Insights
+/**
+ * Render key insights section
+ */
+function renderInsights(digest: WeeklyDigest, limit: number): string[] {
+  const lines: string[] = [];
   if (digest.allInsights.length > 0) {
     lines.push('## Key Insights');
     lines.push('');
-    for (const insight of digest.allInsights.slice(0, 10)) {
+    for (const insight of digest.allInsights.slice(0, limit)) {
       lines.push(`> [!tip] ${insight}`);
     }
     lines.push('');
   }
+  return lines;
+}
 
-  // Sentiment
+/**
+ * Render sentiment section
+ */
+function renderSentiment(digest: WeeklyDigest): string[] {
+  const lines: string[] = [];
   const knownSentiments = ['positive', 'neutral', 'negative', 'mixed'];
   const hasSentiment = knownSentiments.some((s) => (digest.sentimentDistribution[s] || 0) > 0);
   if (hasSentiment) {
@@ -454,55 +489,206 @@ export function generateWeeklyMarkdown(digest: WeeklyDigest): string {
     }
     lines.push('');
   }
+  return lines;
+}
 
-  // Daily Breakdown
+/**
+ * Render period breakdown section (daily/weekly/monthly)
+ */
+function renderBreakdown(
+  digest: WeeklyDigest,
+  config: { title: string; columns: string; rows: (digest: WeeklyDigest) => string[] }
+): string[] {
+  const lines: string[] = [];
   if (digest.dailyStats.length > 0) {
-    lines.push('## 日別アクティビティ');
+    lines.push(`## ${config.title}`);
     lines.push('');
-    lines.push('| 日付 | 録音数 | 時間 | 主な活動 |');
-    lines.push('|------|-------|------|---------|');
-    for (const day of digest.dailyStats) {
-      const topCls = Object.entries(day.classifications)
-        .sort(([, a], [, b]) => b - a)
-        .slice(0, 2)
-        .map(([cls, count]) => `${classLabel(cls)} ×${count}`)
-        .join(', ');
-      lines.push(`| ${day.date} (${day.dayOfWeek}) | ${day.count} | ${formatDuration(day.durationSeconds)} | ${topCls} |`);
-    }
+    lines.push(config.columns);
+    lines.push(...config.rows(digest));
     lines.push('');
+  }
+  return lines;
+}
 
-    // Busyness indicator
+/**
+ * Render busyness section
+ */
+function renderBusyness(digest: WeeklyDigest): string[] {
+  const lines: string[] = [];
+  if (digest.dailyStats.length > 0) {
     const counts = digest.dailyStats.map((d) => d.count);
-    const maxCount = Math.max(...counts);
-    const avgCount = counts.reduce((a, b) => a + b, 0) / counts.length;
-    const busiestDay = digest.dailyStats.find((d) => d.count === maxCount);
+    const avgCount = counts.length > 0 ? counts.reduce((a, b) => a + b, 0) / counts.length : 0;
+    const busiestDay = digest.dailyStats.reduce((a, b) => a.count > b.count ? a : b);
     const quietestDay = digest.dailyStats.reduce((a, b) => a.count < b.count ? a : b);
+
     lines.push('## 多忙度');
     lines.push('');
     const busyPct = Math.min(100, Math.round((avgCount / 30) * 100)); // 30 recordings/day = 100%
     const busyBar = '█'.repeat(Math.round(busyPct / 5)) + '░'.repeat(20 - Math.round(busyPct / 5));
     lines.push(`> 活動量: ${busyBar} ${busyPct}%`);
-    if (busiestDay) {
-      lines.push(`> 最多: ${busiestDay.date} (${busiestDay.dayOfWeek}) ${busiestDay.count}件`);
-    }
+    lines.push(`> 最多: ${busiestDay.date} (${busiestDay.dayOfWeek}) ${busiestDay.count}件`);
     lines.push(`> 最少: ${quietestDay.date} (${quietestDay.dayOfWeek}) ${quietestDay.count}件`);
     lines.push(`> 平均: ${avgCount.toFixed(1)}件/日`);
     lines.push('');
   }
+  return lines;
+}
 
-  // Highlights
+/**
+ * Render highlights section
+ */
+function renderHighlights(digest: WeeklyDigest, limit: number): string[] {
+  const lines: string[] = [];
   if (digest.highlights.length > 0) {
     lines.push('## ハイライト');
     lines.push('');
-    for (const h of digest.highlights) {
+    for (const h of digest.highlights.slice(0, limit)) {
       const time = toJSTDate(h.time);
       lines.push(`- **${classLabel(h.classification)}** ${h.title} (${time})`);
       lines.push(`  ${h.summary.substring(0, 80)}${h.summary.length > 80 ? '...' : ''}`);
     }
     lines.push('');
   }
+  return lines;
+}
 
+/**
+ * Generate daily breakdown rows for weekly digest
+ */
+function generateDailyBreakdownRows(digest: WeeklyDigest): string[] {
+  const lines: string[] = [];
+  lines.push('|------|-------|------|---------|');
+  for (const day of digest.dailyStats) {
+    const topCls = Object.entries(day.classifications)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 2)
+      .map(([cls, count]) => `${classLabel(cls)} ×${count}`)
+      .join(', ');
+    lines.push(`| ${day.date} (${day.dayOfWeek}) | ${day.count} | ${formatDuration(day.durationSeconds)} | ${topCls} |`);
+  }
+  return lines;
+}
+
+/**
+ * Generate weekly breakdown rows for monthly digest
+ */
+function generateWeeklyBreakdownRows(digest: WeeklyDigest): string[] {
+  const lines: string[] = [];
+  lines.push('|-----|-------|------|---------|');
+
+  const weeklyMap = new Map<string, { count: number; duration: number; classifications: Record<string, number> }>();
+  for (const day of digest.dailyStats) {
+    const week = getISOWeek(day.date);
+    const existing = weeklyMap.get(week);
+    if (existing) {
+      existing.count += day.count;
+      existing.duration += day.durationSeconds;
+      for (const [cls, cnt] of Object.entries(day.classifications)) {
+        existing.classifications[cls] = (existing.classifications[cls] || 0) + cnt;
+      }
+    } else {
+      weeklyMap.set(week, {
+        count: day.count,
+        duration: day.durationSeconds,
+        classifications: { ...day.classifications },
+      });
+    }
+  }
+
+  for (const [week, data] of [...weeklyMap.entries()].sort()) {
+    const topCls = Object.entries(data.classifications)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 2)
+      .map(([cls, count]) => `${classLabel(cls)} ×${count}`)
+      .join(', ');
+    lines.push(`| ${week} | ${data.count} | ${formatDuration(data.duration)} | ${topCls} |`);
+  }
+
+  return lines;
+}
+
+/**
+ * Generate monthly breakdown rows for annual digest
+ */
+function generateMonthlyBreakdownRows(digest: WeeklyDigest): string[] {
+  const lines: string[] = [];
+  lines.push('|-----|-------|------|---------|');
+
+  const monthlyMap = new Map<string, { count: number; duration: number; classifications: Record<string, number> }>();
+  for (const day of digest.dailyStats) {
+    const month = day.date.slice(0, 7); // YYYY-MM
+    const existing = monthlyMap.get(month);
+    if (existing) {
+      existing.count += day.count;
+      existing.duration += day.durationSeconds;
+      for (const [cls, cnt] of Object.entries(day.classifications)) {
+        existing.classifications[cls] = (existing.classifications[cls] || 0) + cnt;
+      }
+    } else {
+      monthlyMap.set(month, {
+        count: day.count,
+        duration: day.durationSeconds,
+        classifications: { ...day.classifications },
+      });
+    }
+  }
+
+  for (const [month, data] of [...monthlyMap.entries()].sort()) {
+    const topCls = Object.entries(data.classifications)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 2)
+      .map(([cls, count]) => `${classLabel(cls)} ×${count}`)
+      .join(', ');
+    lines.push(`| ${month} | ${data.count} | ${formatDuration(data.duration)} | ${topCls} |`);
+  }
+
+  return lines;
+}
+
+/**
+ * Core template function for generating digest markdown.
+ * Used by weekly/monthly/annual digest generators.
+ */
+function generateDigestMarkdown(digest: WeeklyDigest, config: DigestMarkdownConfig): string {
+  const lines: string[] = buildDataviewFrontmatter(digest, config.type, config.label);
+  lines.push('');
+  lines.push(`# ${config.title}`);
+  lines.push('');
+  lines.push(...renderSummaryStats(digest));
+  lines.push(...renderActionItems(digest));
+  lines.push(...renderTopicTrends(digest, config.topicLimit));
+  lines.push(...renderInsights(digest, config.insightLimit));
+  lines.push(...renderSentiment(digest));
+  lines.push(...renderBreakdown(digest, {
+    title: config.breakdownTitle,
+    columns: config.breakdownColumns,
+    rows: config.breakdownRows,
+  }));
+  lines.push(...renderBusyness(digest));
+  lines.push(...renderHighlights(digest, config.highlightLimit));
   return lines.join('\n');
+}
+
+// ============================================================================
+// Public Markdown Generation Functions
+// ============================================================================
+
+/**
+ * Generate Obsidian-compatible weekly digest markdown
+ */
+export function generateWeeklyMarkdown(digest: WeeklyDigest): string {
+  const weekLabel = getISOWeek(digest.periodStart);
+  return generateDigestMarkdown(digest, {
+    title: `${weekLabel} 週次レポート`,
+    label: weekLabel,
+    type: 'weekly-digest',
+    topicLimit: 15,
+    insightLimit: 10,
+    highlightLimit: 10,
+    breakdownTitle: '日別アクティビティ',
+    breakdownColumns: '| 日付 | 録音数 | 時間 | 主な活動 |',
+    breakdownRows: generateDailyBreakdownRows,
+  });
 }
 
 /**
@@ -511,142 +697,17 @@ export function generateWeeklyMarkdown(digest: WeeklyDigest): string {
  */
 export function generateMonthlyMarkdown(digest: WeeklyDigest): string {
   const monthLabel = digest.periodStart.slice(0, 7); // YYYY-MM
-  const lines: string[] = buildDataviewFrontmatter(digest, 'monthly-digest', monthLabel);
-  lines.push('');
-
-  // Title
-  lines.push(`# ${monthLabel} 月次レポート`);
-  lines.push('');
-
-  // Summary stats
-  const clsParts = Object.entries(digest.classificationBreakdown)
-    .sort(([, a], [, b]) => b - a)
-    .map(([cls, count]) => `${classLabel(cls)} ×${count}`);
-  lines.push(`> ${digest.totalRecordings}件 | ${formatDuration(digest.totalDurationSeconds)} | ${clsParts.join(' / ')}`);
-  if (digest.starredCount > 0) {
-    lines.push(`> ⭐ スター付き: ${digest.starredCount}件`);
-  }
-  lines.push('');
-
-  // Action Items
-  if (digest.allActionItems.length > 0) {
-    lines.push('## Action Items');
-    lines.push('');
-    for (const item of digest.allActionItems) {
-      lines.push(`- [ ] ${item}`);
-    }
-    lines.push('');
-  }
-
-  // Topic Trends (top 20 for monthly)
-  if (digest.topTopics.length > 0) {
-    lines.push('## トピックトレンド');
-    lines.push('');
-    lines.push('| # | トピック | 回数 | 分類 |');
-    lines.push('|---|---------|------|------|');
-    for (let i = 0; i < Math.min(digest.topTopics.length, 20); i++) {
-      const t = digest.topTopics[i];
-      const clsLabels = t.classifications.map((c) => classLabel(c)).join(', ');
-      lines.push(`| ${i + 1} | ${t.topic} | ${t.count} | ${clsLabels} |`);
-    }
-    lines.push('');
-  }
-
-  // Key Insights (top 15 for monthly)
-  if (digest.allInsights.length > 0) {
-    lines.push('## Key Insights');
-    lines.push('');
-    for (const insight of digest.allInsights.slice(0, 15)) {
-      lines.push(`> [!tip] ${insight}`);
-    }
-    lines.push('');
-  }
-
-  // Sentiment
-  const knownSentiments = ['positive', 'neutral', 'negative', 'mixed'];
-  const hasSentiment = knownSentiments.some((s) => (digest.sentimentDistribution[s] || 0) > 0);
-  if (hasSentiment) {
-    lines.push('## 感情トレンド');
-    lines.push('');
-    const total = digest.totalRecordings || 1;
-    const sentimentEmojis: Record<string, string> = {
-      positive: '😊', neutral: '😐', negative: '😔', mixed: '🤔',
-    };
-    for (const s of knownSentiments) {
-      const count = digest.sentimentDistribution[s] || 0;
-      if (count === 0) continue;
-      const pct = Math.round((count / total) * 100);
-      const bar = '█'.repeat(Math.round(pct / 5)) + '░'.repeat(20 - Math.round(pct / 5));
-      lines.push(`- ${sentimentEmojis[s]} ${s}: ${bar} ${pct}% (${count}件)`);
-    }
-    lines.push('');
-  }
-
-  // Weekly Breakdown (group daily stats by ISO week)
-  if (digest.dailyStats.length > 0) {
-    lines.push('## 週別アクティビティ');
-    lines.push('');
-    lines.push('| 週 | 録音数 | 時間 | 主な活動 |');
-    lines.push('|-----|-------|------|---------|');
-
-    const weeklyMap = new Map<string, { count: number; duration: number; classifications: Record<string, number> }>();
-    for (const day of digest.dailyStats) {
-      const week = getISOWeek(day.date);
-      const existing = weeklyMap.get(week);
-      if (existing) {
-        existing.count += day.count;
-        existing.duration += day.durationSeconds;
-        for (const [cls, cnt] of Object.entries(day.classifications)) {
-          existing.classifications[cls] = (existing.classifications[cls] || 0) + cnt;
-        }
-      } else {
-        weeklyMap.set(week, {
-          count: day.count,
-          duration: day.durationSeconds,
-          classifications: { ...day.classifications },
-        });
-      }
-    }
-
-    for (const [week, data] of [...weeklyMap.entries()].sort()) {
-      const topCls = Object.entries(data.classifications)
-        .sort(([, a], [, b]) => b - a)
-        .slice(0, 2)
-        .map(([cls, count]) => `${classLabel(cls)} ×${count}`)
-        .join(', ');
-      lines.push(`| ${week} | ${data.count} | ${formatDuration(data.duration)} | ${topCls} |`);
-    }
-    lines.push('');
-
-    // Busyness
-    const counts = digest.dailyStats.map((d) => d.count);
-    const avgCount = counts.reduce((a, b) => a + b, 0) / counts.length;
-    const busiestDay = digest.dailyStats.reduce((a, b) => a.count > b.count ? a : b);
-    const quietestDay = digest.dailyStats.reduce((a, b) => a.count < b.count ? a : b);
-    lines.push('## 多忙度');
-    lines.push('');
-    const busyPct = Math.min(100, Math.round((avgCount / 30) * 100));
-    const busyBar = '█'.repeat(Math.round(busyPct / 5)) + '░'.repeat(20 - Math.round(busyPct / 5));
-    lines.push(`> 活動量: ${busyBar} ${busyPct}%`);
-    lines.push(`> 最多: ${busiestDay.date} (${busiestDay.dayOfWeek}) ${busiestDay.count}件`);
-    lines.push(`> 最少: ${quietestDay.date} (${quietestDay.dayOfWeek}) ${quietestDay.count}件`);
-    lines.push(`> 平均: ${avgCount.toFixed(1)}件/日`);
-    lines.push('');
-  }
-
-  // Highlights (top 15 for monthly)
-  if (digest.highlights.length > 0) {
-    lines.push('## ハイライト');
-    lines.push('');
-    for (const h of digest.highlights.slice(0, 15)) {
-      const time = toJSTDate(h.time);
-      lines.push(`- **${classLabel(h.classification)}** ${h.title} (${time})`);
-      lines.push(`  ${h.summary.substring(0, 80)}${h.summary.length > 80 ? '...' : ''}`);
-    }
-    lines.push('');
-  }
-
-  return lines.join('\n');
+  return generateDigestMarkdown(digest, {
+    title: `${monthLabel} 月次レポート`,
+    label: monthLabel,
+    type: 'monthly-digest',
+    topicLimit: 20,
+    insightLimit: 15,
+    highlightLimit: 15,
+    breakdownTitle: '週別アクティビティ',
+    breakdownColumns: '| 週 | 録音数 | 時間 | 主な活動 |',
+    breakdownRows: generateWeeklyBreakdownRows,
+  });
 }
 
 /**
@@ -656,142 +717,17 @@ export function generateMonthlyMarkdown(digest: WeeklyDigest): string {
  */
 export function generateAnnualMarkdown(digest: WeeklyDigest): string {
   const yearLabel = digest.periodStart.slice(0, 4); // YYYY
-  const lines: string[] = buildDataviewFrontmatter(digest, 'annual-digest', yearLabel);
-  lines.push('');
-
-  // Title
-  lines.push(`# ${yearLabel} 年次レポート`);
-  lines.push('');
-
-  // Summary stats
-  const clsParts = Object.entries(digest.classificationBreakdown)
-    .sort(([, a], [, b]) => b - a)
-    .map(([cls, count]) => `${classLabel(cls)} ×${count}`);
-  lines.push(`> ${digest.totalRecordings}件 | ${formatDuration(digest.totalDurationSeconds)} | ${clsParts.join(' / ')}`);
-  if (digest.starredCount > 0) {
-    lines.push(`> ⭐ スター付き: ${digest.starredCount}件`);
-  }
-  lines.push('');
-
-  // Action Items
-  if (digest.allActionItems.length > 0) {
-    lines.push('## Action Items');
-    lines.push('');
-    for (const item of digest.allActionItems) {
-      lines.push(`- [ ] ${item}`);
-    }
-    lines.push('');
-  }
-
-  // Topic Trends (top 30 for annual)
-  if (digest.topTopics.length > 0) {
-    lines.push('## トピックトレンド');
-    lines.push('');
-    lines.push('| # | トピック | 回数 | 分類 |');
-    lines.push('|---|---------|------|------|');
-    for (let i = 0; i < Math.min(digest.topTopics.length, 30); i++) {
-      const t = digest.topTopics[i];
-      const clsLabels = t.classifications.map((c) => classLabel(c)).join(', ');
-      lines.push(`| ${i + 1} | ${t.topic} | ${t.count} | ${clsLabels} |`);
-    }
-    lines.push('');
-  }
-
-  // Key Insights (top 20 for annual)
-  if (digest.allInsights.length > 0) {
-    lines.push('## Key Insights');
-    lines.push('');
-    for (const insight of digest.allInsights.slice(0, 20)) {
-      lines.push(`> [!tip] ${insight}`);
-    }
-    lines.push('');
-  }
-
-  // Sentiment
-  const knownSentiments = ['positive', 'neutral', 'negative', 'mixed'];
-  const hasSentiment = knownSentiments.some((s) => (digest.sentimentDistribution[s] || 0) > 0);
-  if (hasSentiment) {
-    lines.push('## 感情トレンド');
-    lines.push('');
-    const total = digest.totalRecordings || 1;
-    const sentimentEmojis: Record<string, string> = {
-      positive: '😊', neutral: '😐', negative: '😔', mixed: '🤔',
-    };
-    for (const s of knownSentiments) {
-      const count = digest.sentimentDistribution[s] || 0;
-      if (count === 0) continue;
-      const pct = Math.round((count / total) * 100);
-      const bar = '█'.repeat(Math.round(pct / 5)) + '░'.repeat(20 - Math.round(pct / 5));
-      lines.push(`- ${sentimentEmojis[s]} ${s}: ${bar} ${pct}% (${count}件)`);
-    }
-    lines.push('');
-  }
-
-  // Monthly Breakdown (group daily stats by YYYY-MM)
-  if (digest.dailyStats.length > 0) {
-    lines.push('## 月別アクティビティ');
-    lines.push('');
-    lines.push('| 月 | 録音数 | 時間 | 主な活動 |');
-    lines.push('|-----|-------|------|---------|');
-
-    const monthlyMap = new Map<string, { count: number; duration: number; classifications: Record<string, number> }>();
-    for (const day of digest.dailyStats) {
-      const month = day.date.slice(0, 7); // YYYY-MM
-      const existing = monthlyMap.get(month);
-      if (existing) {
-        existing.count += day.count;
-        existing.duration += day.durationSeconds;
-        for (const [cls, cnt] of Object.entries(day.classifications)) {
-          existing.classifications[cls] = (existing.classifications[cls] || 0) + cnt;
-        }
-      } else {
-        monthlyMap.set(month, {
-          count: day.count,
-          duration: day.durationSeconds,
-          classifications: { ...day.classifications },
-        });
-      }
-    }
-
-    for (const [month, data] of [...monthlyMap.entries()].sort()) {
-      const topCls = Object.entries(data.classifications)
-        .sort(([, a], [, b]) => b - a)
-        .slice(0, 2)
-        .map(([cls, count]) => `${classLabel(cls)} ×${count}`)
-        .join(', ');
-      lines.push(`| ${month} | ${data.count} | ${formatDuration(data.duration)} | ${topCls} |`);
-    }
-    lines.push('');
-
-    // Busyness
-    const counts = digest.dailyStats.map((d) => d.count);
-    const avgCount = counts.reduce((a, b) => a + b, 0) / counts.length;
-    const busiestDay = digest.dailyStats.reduce((a, b) => a.count > b.count ? a : b);
-    const quietestDay = digest.dailyStats.reduce((a, b) => a.count < b.count ? a : b);
-    lines.push('## 多忙度');
-    lines.push('');
-    const busyPct = Math.min(100, Math.round((avgCount / 30) * 100));
-    const busyBar = '█'.repeat(Math.round(busyPct / 5)) + '░'.repeat(20 - Math.round(busyPct / 5));
-    lines.push(`> 活動量: ${busyBar} ${busyPct}%`);
-    lines.push(`> 最多: ${busiestDay.date} (${busiestDay.dayOfWeek}) ${busiestDay.count}件`);
-    lines.push(`> 最少: ${quietestDay.date} (${quietestDay.dayOfWeek}) ${quietestDay.count}件`);
-    lines.push(`> 平均: ${avgCount.toFixed(1)}件/日`);
-    lines.push('');
-  }
-
-  // Highlights (top 20 for annual)
-  if (digest.highlights.length > 0) {
-    lines.push('## ハイライト');
-    lines.push('');
-    for (const h of digest.highlights.slice(0, 20)) {
-      const time = toJSTDate(h.time);
-      lines.push(`- **${classLabel(h.classification)}** ${h.title} (${time})`);
-      lines.push(`  ${h.summary.substring(0, 80)}${h.summary.length > 80 ? '...' : ''}`);
-    }
-    lines.push('');
-  }
-
-  return lines.join('\n');
+  return generateDigestMarkdown(digest, {
+    title: `${yearLabel} 年次レポート`,
+    label: yearLabel,
+    type: 'annual-digest',
+    topicLimit: 30,
+    insightLimit: 20,
+    highlightLimit: 20,
+    breakdownTitle: '月別アクティビティ',
+    breakdownColumns: '| 月 | 録音数 | 時間 | 主な活動 |',
+    breakdownRows: generateMonthlyBreakdownRows,
+  });
 }
 
 /**
