@@ -3,6 +3,7 @@
  *
  * Pure functions that aggregate processed lifelogs into:
  * - Weekly digest: topic trends, sentiment, busyness, highlights
+ * - Monthly digest: same aggregation over a calendar month
  * - Daily action items: unresolved action items across recordings
  *
  * No side effects. No external calls. Input → Output only.
@@ -339,23 +340,51 @@ export function aggregateActionItems(
 // ============================================================================
 
 /**
+ * Compute a sentiment score from -1 (all negative) to +1 (all positive)
+ */
+function computeSentimentScore(dist: Record<string, number>): number {
+  const pos = dist['positive'] || 0;
+  const neg = dist['negative'] || 0;
+  const total = pos + neg + (dist['neutral'] || 0) + (dist['mixed'] || 0);
+  if (total === 0) return 0;
+  return Math.round(((pos - neg) / total) * 100) / 100;
+}
+
+/**
+ * Generate Dataview-compatible frontmatter fields
+ */
+function buildDataviewFrontmatter(digest: WeeklyDigest, type: string, label: string): string[] {
+  const topTags = digest.topTopics.slice(0, 5).map((t) => t.topic.replace(/\s+/g, '-'));
+  const lines: string[] = [];
+
+  lines.push('---');
+  lines.push(`date: ${label}`);
+  lines.push(`period: ${digest.periodStart} ~ ${digest.periodEnd}`);
+  lines.push(`period_start: ${digest.periodStart}`);
+  lines.push(`period_end: ${digest.periodEnd}`);
+  lines.push('source: Limitless Pendant');
+  lines.push(`type: ${type}`);
+  lines.push(`recordings: ${digest.totalRecordings}`);
+  lines.push(`total_duration: ${formatDuration(digest.totalDurationSeconds)}`);
+  lines.push(`total_duration_minutes: ${Math.round(digest.totalDurationSeconds / 60)}`);
+  lines.push(`action_items_count: ${digest.allActionItems.length}`);
+  lines.push(`starred_count: ${digest.starredCount}`);
+  lines.push(`sentiment_score: ${computeSentimentScore(digest.sentimentDistribution)}`);
+  if (digest.topTopics.length > 0) {
+    lines.push(`top_topics: [${digest.topTopics.slice(0, 5).map((t) => t.topic).join(', ')}]`);
+  }
+  lines.push(`tags: [pendant, ${type.split('-')[0]}${topTags.length > 0 ? ', ' + topTags.join(', ') : ''}]`);
+  lines.push('---');
+
+  return lines;
+}
+
+/**
  * Generate Obsidian-compatible weekly digest markdown
  */
 export function generateWeeklyMarkdown(digest: WeeklyDigest): string {
   const weekLabel = getISOWeek(digest.periodStart);
-  const lines: string[] = [];
-
-  // Frontmatter
-  lines.push('---');
-  lines.push(`date: ${weekLabel}`);
-  lines.push(`period: ${digest.periodStart} ~ ${digest.periodEnd}`);
-  lines.push('source: Limitless Pendant');
-  lines.push('type: weekly-digest');
-  lines.push(`recordings: ${digest.totalRecordings}`);
-  lines.push(`total_duration: ${formatDuration(digest.totalDurationSeconds)}`);
-  const topTags = digest.topTopics.slice(0, 5).map((t) => t.topic.replace(/\s+/g, '-'));
-  lines.push(`tags: [pendant, weekly${topTags.length > 0 ? ', ' + topTags.join(', ') : ''}]`);
-  lines.push('---');
+  const lines: string[] = buildDataviewFrontmatter(digest, 'weekly-digest', weekLabel);
   lines.push('');
 
   // Title
@@ -477,18 +506,166 @@ export function generateWeeklyMarkdown(digest: WeeklyDigest): string {
 }
 
 /**
+ * Generate Obsidian-compatible monthly digest markdown.
+ * Reuses WeeklyDigest data structure (period-agnostic aggregation).
+ */
+export function generateMonthlyMarkdown(digest: WeeklyDigest): string {
+  const monthLabel = digest.periodStart.slice(0, 7); // YYYY-MM
+  const lines: string[] = buildDataviewFrontmatter(digest, 'monthly-digest', monthLabel);
+  lines.push('');
+
+  // Title
+  lines.push(`# ${monthLabel} 月次レポート`);
+  lines.push('');
+
+  // Summary stats
+  const clsParts = Object.entries(digest.classificationBreakdown)
+    .sort(([, a], [, b]) => b - a)
+    .map(([cls, count]) => `${classLabel(cls)} ×${count}`);
+  lines.push(`> ${digest.totalRecordings}件 | ${formatDuration(digest.totalDurationSeconds)} | ${clsParts.join(' / ')}`);
+  if (digest.starredCount > 0) {
+    lines.push(`> ⭐ スター付き: ${digest.starredCount}件`);
+  }
+  lines.push('');
+
+  // Action Items
+  if (digest.allActionItems.length > 0) {
+    lines.push('## Action Items');
+    lines.push('');
+    for (const item of digest.allActionItems) {
+      lines.push(`- [ ] ${item}`);
+    }
+    lines.push('');
+  }
+
+  // Topic Trends (top 20 for monthly)
+  if (digest.topTopics.length > 0) {
+    lines.push('## トピックトレンド');
+    lines.push('');
+    lines.push('| # | トピック | 回数 | 分類 |');
+    lines.push('|---|---------|------|------|');
+    for (let i = 0; i < Math.min(digest.topTopics.length, 20); i++) {
+      const t = digest.topTopics[i];
+      const clsLabels = t.classifications.map((c) => classLabel(c)).join(', ');
+      lines.push(`| ${i + 1} | ${t.topic} | ${t.count} | ${clsLabels} |`);
+    }
+    lines.push('');
+  }
+
+  // Key Insights (top 15 for monthly)
+  if (digest.allInsights.length > 0) {
+    lines.push('## Key Insights');
+    lines.push('');
+    for (const insight of digest.allInsights.slice(0, 15)) {
+      lines.push(`> [!tip] ${insight}`);
+    }
+    lines.push('');
+  }
+
+  // Sentiment
+  const knownSentiments = ['positive', 'neutral', 'negative', 'mixed'];
+  const hasSentiment = knownSentiments.some((s) => (digest.sentimentDistribution[s] || 0) > 0);
+  if (hasSentiment) {
+    lines.push('## 感情トレンド');
+    lines.push('');
+    const total = digest.totalRecordings || 1;
+    const sentimentEmojis: Record<string, string> = {
+      positive: '😊', neutral: '😐', negative: '😔', mixed: '🤔',
+    };
+    for (const s of knownSentiments) {
+      const count = digest.sentimentDistribution[s] || 0;
+      if (count === 0) continue;
+      const pct = Math.round((count / total) * 100);
+      const bar = '█'.repeat(Math.round(pct / 5)) + '░'.repeat(20 - Math.round(pct / 5));
+      lines.push(`- ${sentimentEmojis[s]} ${s}: ${bar} ${pct}% (${count}件)`);
+    }
+    lines.push('');
+  }
+
+  // Weekly Breakdown (group daily stats by ISO week)
+  if (digest.dailyStats.length > 0) {
+    lines.push('## 週別アクティビティ');
+    lines.push('');
+    lines.push('| 週 | 録音数 | 時間 | 主な活動 |');
+    lines.push('|-----|-------|------|---------|');
+
+    const weeklyMap = new Map<string, { count: number; duration: number; classifications: Record<string, number> }>();
+    for (const day of digest.dailyStats) {
+      const week = getISOWeek(day.date);
+      const existing = weeklyMap.get(week);
+      if (existing) {
+        existing.count += day.count;
+        existing.duration += day.durationSeconds;
+        for (const [cls, cnt] of Object.entries(day.classifications)) {
+          existing.classifications[cls] = (existing.classifications[cls] || 0) + cnt;
+        }
+      } else {
+        weeklyMap.set(week, {
+          count: day.count,
+          duration: day.durationSeconds,
+          classifications: { ...day.classifications },
+        });
+      }
+    }
+
+    for (const [week, data] of [...weeklyMap.entries()].sort()) {
+      const topCls = Object.entries(data.classifications)
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, 2)
+        .map(([cls, count]) => `${classLabel(cls)} ×${count}`)
+        .join(', ');
+      lines.push(`| ${week} | ${data.count} | ${formatDuration(data.duration)} | ${topCls} |`);
+    }
+    lines.push('');
+
+    // Busyness
+    const counts = digest.dailyStats.map((d) => d.count);
+    const avgCount = counts.reduce((a, b) => a + b, 0) / counts.length;
+    const busiestDay = digest.dailyStats.reduce((a, b) => a.count > b.count ? a : b);
+    const quietestDay = digest.dailyStats.reduce((a, b) => a.count < b.count ? a : b);
+    lines.push('## 多忙度');
+    lines.push('');
+    const busyPct = Math.min(100, Math.round((avgCount / 30) * 100));
+    const busyBar = '█'.repeat(Math.round(busyPct / 5)) + '░'.repeat(20 - Math.round(busyPct / 5));
+    lines.push(`> 活動量: ${busyBar} ${busyPct}%`);
+    lines.push(`> 最多: ${busiestDay.date} (${busiestDay.dayOfWeek}) ${busiestDay.count}件`);
+    lines.push(`> 最少: ${quietestDay.date} (${quietestDay.dayOfWeek}) ${quietestDay.count}件`);
+    lines.push(`> 平均: ${avgCount.toFixed(1)}件/日`);
+    lines.push('');
+  }
+
+  // Highlights (top 15 for monthly)
+  if (digest.highlights.length > 0) {
+    lines.push('## ハイライト');
+    lines.push('');
+    for (const h of digest.highlights.slice(0, 15)) {
+      const time = toJSTDate(h.time);
+      lines.push(`- **${classLabel(h.classification)}** ${h.title} (${time})`);
+      lines.push(`  ${h.summary.substring(0, 80)}${h.summary.length > 80 ? '...' : ''}`);
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+/**
  * Generate Obsidian-compatible action items markdown
  */
 export function generateActionItemsMarkdown(report: ActionItemReport): string {
   const lines: string[] = [];
   const dateLabel = report.periodEnd;
+  const topicKeys = Object.keys(report.itemsByTopic);
 
-  // Frontmatter
+  // Frontmatter (Dataview-compatible)
   lines.push('---');
   lines.push(`date: ${dateLabel}`);
+  lines.push(`period_start: ${report.periodStart}`);
+  lines.push(`period_end: ${report.periodEnd}`);
   lines.push('source: Limitless Pendant');
   lines.push('type: action-items');
   lines.push(`total_items: ${report.totalItems}`);
+  lines.push(`topic_count: ${topicKeys.length}`);
   lines.push('tags: [pendant, actions]');
   lines.push('---');
   lines.push('');

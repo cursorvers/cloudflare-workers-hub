@@ -3,11 +3,12 @@
  * Obsidian Sync Script
  *
  * Phase 1: Syncs processed lifelogs from Supabase → daily digest .md files
- * Phase 2: Syncs digest reports (weekly/daily actions) from Supabase → Obsidian
+ * Phase 2: Syncs digest reports (weekly/monthly/daily actions) from Supabase → Obsidian
  *
  * Pipeline:
  *   Supabase (processed_lifelogs) → 04_Journals/Pendant/YYYY/MM/YYYY-MM-DD.md
  *   Supabase (digest_reports)     → 04_Journals/Pendant/Weekly/YYYY-Wxx.md
+ *                                 → 04_Journals/Pendant/Monthly/YYYY-MM.md
  *                                 → 04_Journals/Pendant/Actions/YYYY-MM-DD.md
  *
  * Usage:
@@ -43,7 +44,7 @@ const specificDate = dateArgIdx >= 0 ? args[dateArgIdx + 1] : null;
 
 interface DigestReport {
   id: string;
-  type: 'weekly' | 'daily_actions';
+  type: 'weekly' | 'monthly' | 'daily_actions';
   period_start: string;
   period_end: string;
   content: unknown;
@@ -371,6 +372,11 @@ function getDigestOutputPath(pendantDir: string, report: DigestReport): string {
     const weekLabel = getISOWeekNumber(report.period_start);
     return path.join(pendantDir, 'Weekly', `${weekLabel}.md`);
   }
+  if (report.type === 'monthly') {
+    // Monthly → Monthly/YYYY-MM.md (using period_start month)
+    const monthLabel = report.period_start.slice(0, 7); // YYYY-MM
+    return path.join(pendantDir, 'Monthly', `${monthLabel}.md`);
+  }
   // daily_actions → Actions/YYYY-MM-DD.md (using period_end date in JST)
   const dateStr = getJSTDate(report.period_end);
   return path.join(pendantDir, 'Actions', `${dateStr}.md`);
@@ -405,7 +411,8 @@ async function syncDigestReports(
   for (const report of reports) {
     const filePath = getDigestOutputPath(pendantDir, report);
     const dirPath = path.dirname(filePath);
-    const typeLabel = report.type === 'weekly' ? 'Weekly Digest' : 'Daily Actions';
+    const typeLabels: Record<string, string> = { weekly: 'Weekly Digest', monthly: 'Monthly Digest', daily_actions: 'Daily Actions' };
+    const typeLabel = typeLabels[report.type] || report.type;
 
     console.log(`  📝 ${typeLabel} (${report.period_start.slice(0, 10)}) → ${filePath}`);
 

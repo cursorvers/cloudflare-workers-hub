@@ -4,6 +4,7 @@ import {
   aggregateWeeklyDigest,
   aggregateActionItems,
   generateWeeklyMarkdown,
+  generateMonthlyMarkdown,
   generateActionItemsMarkdown,
   type LifelogRecord,
 } from './digest-generator';
@@ -404,5 +405,157 @@ describe('generateActionItemsMarkdown', () => {
     const md = generateActionItemsMarkdown(report);
 
     expect(md).toContain('0件のアクションアイテム');
+  });
+
+  it('should include Dataview frontmatter fields', () => {
+    const logs = createWeekOfLogs();
+    const report = aggregateActionItems(logs, '2026-01-20', '2026-01-26');
+    const md = generateActionItemsMarkdown(report);
+
+    expect(md).toContain('period_start: 2026-01-20');
+    expect(md).toContain('period_end: 2026-01-26');
+    expect(md).toContain('topic_count:');
+    expect(md).toContain('total_items:');
+  });
+});
+
+// ============================================================================
+// generateMonthlyMarkdown
+// ============================================================================
+
+describe('generateMonthlyMarkdown', () => {
+  it('should generate valid frontmatter with monthly type', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2026-01-01', '2026-01-31');
+    const md = generateMonthlyMarkdown(digest);
+
+    expect(md).toContain('---');
+    expect(md).toContain('type: monthly-digest');
+    expect(md).toContain('source: Limitless Pendant');
+    expect(md).toContain('tags: [pendant, monthly');
+  });
+
+  it('should use YYYY-MM as label', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2026-01-01', '2026-01-31');
+    const md = generateMonthlyMarkdown(digest);
+
+    expect(md).toContain('date: 2026-01');
+    expect(md).toContain('# 2026-01 月次レポート');
+  });
+
+  it('should include summary stats', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2026-01-01', '2026-01-31');
+    const md = generateMonthlyMarkdown(digest);
+
+    expect(md).toContain('7件');
+  });
+
+  it('should include weekly breakdown table', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2026-01-01', '2026-01-31');
+    const md = generateMonthlyMarkdown(digest);
+
+    expect(md).toContain('## 週別アクティビティ');
+    expect(md).toContain('| 週 | 録音数 | 時間 | 主な活動 |');
+  });
+
+  it('should include action items', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2026-01-01', '2026-01-31');
+    const md = generateMonthlyMarkdown(digest);
+
+    expect(md).toContain('## Action Items');
+    expect(md).toContain('- [ ] ');
+  });
+
+  it('should include topic trends', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2026-01-01', '2026-01-31');
+    const md = generateMonthlyMarkdown(digest);
+
+    expect(md).toContain('## トピックトレンド');
+    expect(md).toContain('| # | トピック | 回数 | 分類 |');
+  });
+
+  it('should include sentiment trends', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2026-01-01', '2026-01-31');
+    const md = generateMonthlyMarkdown(digest);
+
+    expect(md).toContain('## 感情トレンド');
+    expect(md).toContain('positive');
+  });
+
+  it('should include busyness section', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2026-01-01', '2026-01-31');
+    const md = generateMonthlyMarkdown(digest);
+
+    expect(md).toContain('## 多忙度');
+    expect(md).toContain('活動量:');
+  });
+
+  it('should handle empty data gracefully', () => {
+    const digest = aggregateWeeklyDigest([], '2026-01-01', '2026-01-31');
+    const md = generateMonthlyMarkdown(digest);
+
+    expect(md).toContain('---');
+    expect(md).toContain('# 2026-01 月次レポート');
+    expect(md).toContain('0件');
+    expect(md).not.toContain('## Action Items');
+    expect(md).not.toContain('## トピックトレンド');
+  });
+});
+
+// ============================================================================
+// Dataview Frontmatter Fields
+// ============================================================================
+
+describe('Dataview frontmatter fields', () => {
+  it('should include Dataview fields in weekly markdown', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2026-01-20', '2026-01-26');
+    const md = generateWeeklyMarkdown(digest);
+
+    expect(md).toContain('period_start: 2026-01-20');
+    expect(md).toContain('period_end: 2026-01-26');
+    expect(md).toContain('total_duration_minutes:');
+    expect(md).toContain('action_items_count:');
+    expect(md).toContain('starred_count:');
+    expect(md).toContain('sentiment_score:');
+    expect(md).toContain('top_topics:');
+  });
+
+  it('should include Dataview fields in monthly markdown', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2026-01-01', '2026-01-31');
+    const md = generateMonthlyMarkdown(digest);
+
+    expect(md).toContain('period_start: 2026-01-01');
+    expect(md).toContain('period_end: 2026-01-31');
+    expect(md).toContain('total_duration_minutes:');
+    expect(md).toContain('action_items_count:');
+    expect(md).toContain('starred_count:');
+    expect(md).toContain('sentiment_score:');
+  });
+
+  it('should calculate correct sentiment score', () => {
+    const logs = createWeekOfLogs();
+    // 3 positive, 3 neutral, 1 mixed = (3 - 0) / 7 ≈ 0.43
+    const digest = aggregateWeeklyDigest(logs, '2026-01-20', '2026-01-26');
+    const md = generateWeeklyMarkdown(digest);
+
+    expect(md).toContain('sentiment_score: 0.43');
+  });
+
+  it('should calculate duration in minutes', () => {
+    const logs = createWeekOfLogs();
+    const digest = aggregateWeeklyDigest(logs, '2026-01-20', '2026-01-26');
+    const md = generateWeeklyMarkdown(digest);
+    const totalMinutes = Math.round((3600 + 1200 + 300 + 2400 + 600 + 900 + 1800) / 60);
+
+    expect(md).toContain(`total_duration_minutes: ${totalMinutes}`);
   });
 });

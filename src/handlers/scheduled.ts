@@ -2,9 +2,10 @@
  * Scheduled Handler for Cron Triggers
  *
  * Dispatches to the appropriate handler based on cron expression:
- * - "0 * * * *"   → Hourly Limitless.ai sync (backup)
- * - "0 21 * * *"  → Daily action item check (6AM JST)
- * - "0 0 * * 0"   → Weekly digest generation (Sunday 9AM JST)
+ * - "0 * * * *"    → Hourly Limitless.ai sync (backup)
+ * - "0 21 * * *"   → Daily action item check (6AM JST)
+ * - "0 0 * * SUN"  → Weekly digest generation (Sunday 9AM JST)
+ * - "0 0 1 * *"    → Monthly digest generation (1st of month, 9AM JST)
  */
 
 import { Env } from '../types';
@@ -15,6 +16,7 @@ import {
   aggregateWeeklyDigest,
   aggregateActionItems,
   generateWeeklyMarkdown,
+  generateMonthlyMarkdown,
   generateActionItemsMarkdown,
   type LifelogRecord,
 } from '../services/digest-generator';
@@ -26,6 +28,7 @@ import {
 const CRON_HOURLY_SYNC = '0 * * * *';
 const CRON_DAILY_ACTIONS = '0 21 * * *';   // 21:00 UTC = 06:00 JST
 const CRON_WEEKLY_DIGEST = '0 0 * * SUN';  // Sun 00:00 UTC = Sun 09:00 JST
+const CRON_MONTHLY_DIGEST = '0 0 1 * *';  // 1st 00:00 UTC = 1st 09:00 JST
 
 // ============================================================================
 // Distributed Lock Helpers
@@ -123,6 +126,9 @@ export async function handleScheduled(
 
     case CRON_WEEKLY_DIGEST:
       return handleWeeklyDigest(env);
+
+    case CRON_MONTHLY_DIGEST:
+      return handleMonthlyDigest(env);
 
     default:
       safeLog.warn('[Scheduled] Unknown cron expression', { cron: controller.cron });
@@ -392,6 +398,98 @@ async function handleDailyActionCheck(env: Env): Promise<void> {
     safeLog.info('[DailyActions] Action item report generated', {
       totalItems: report.totalItems,
       topicGroups: Object.keys(report.itemsByTopic).length,
+    });
+  });
+}
+
+// ============================================================================
+// Handler: Monthly Digest
+// ============================================================================
+
+async function handleMonthlyDigest(env: Env): Promise<void> {
+  const lockKey = 'digest:monthly_lock';
+
+  await withLock(env.CACHE!, lockKey, 600, async () => {
+    if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+      safeLog.warn('[MonthlyDigest] Supabase not configured, skipping');
+      return;
+    }
+
+    const config: SupabaseConfig = {
+      url: env.SUPABASE_URL,
+      serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+    };
+
+    // Calculate previous calendar month range (JST)
+    const now = new Date();
+    const jstOffset = 9 * 60 * 60 * 1000;
+    const jstNow = new Date(now.getTime() + jstOffset);
+
+    // First day of current month in JST → that's the end boundary
+    const jstFirstOfMonth = new Date(jstNow.getFullYear(), jstNow.getMonth(), 1);
+    const periodEnd = new Date(jstFirstOfMonth.getTime() - jstOffset); // Convert back to UTC
+
+    // First day of previous month in JST
+    const prevMonth = new Date(jstNow.getFullYear(), jstNow.getMonth() - 1, 1);
+    const periodStart = new Date(prevMonth.getTime() - jstOffset); // Convert back to UTC
+
+    const periodStartISO = periodStart.toISOString();
+    const periodEndISO = periodEnd.toISOString();
+    const periodStartDate = periodStartISO.slice(0, 10);
+    const periodEndDate = new Date(periodEnd.getTime() - 1).toISOString().slice(0, 10);
+
+    safeLog.info('[MonthlyDigest] Generating monthly digest', {
+      periodStart: periodStartISO,
+      periodEnd: periodEndISO,
+    });
+
+    // Fetch all lifelogs for the month
+    const selectFields = 'id,classification,summary,key_insights,action_items,topics,speakers,sentiment,title,start_time,end_time,duration_seconds,is_starred';
+    const query = `select=${selectFields}&start_time=gte.${periodStartISO}&start_time=lt.${periodEndISO}&classification=neq.pending&order=start_time.asc&limit=2000`;
+
+    const { data: lifelogs, error } = await supabaseSelect<LifelogRecord>(config, 'processed_lifelogs', query);
+
+    if (error) {
+      safeLog.error('[MonthlyDigest] Failed to fetch lifelogs', { error: error.message });
+      return;
+    }
+
+    if (!lifelogs || lifelogs.length === 0) {
+      safeLog.info('[MonthlyDigest] No lifelogs found for period, skipping');
+      return;
+    }
+
+    safeLog.info('[MonthlyDigest] Aggregating data', { count: lifelogs.length });
+
+    // Aggregate and generate markdown
+    const digest = aggregateWeeklyDigest(lifelogs, periodStartDate, periodEndDate);
+    const markdown = generateMonthlyMarkdown(digest);
+
+    // Upsert into digest_reports
+    const { error: upsertError } = await supabaseUpsert(
+      config,
+      'digest_reports',
+      {
+        type: 'monthly',
+        period_start: periodStartISO,
+        period_end: periodEndISO,
+        content: digest,
+        markdown,
+        obsidian_synced: false,
+      },
+      'type,period_start'
+    );
+
+    if (upsertError) {
+      safeLog.error('[MonthlyDigest] Failed to store digest', { error: upsertError.message });
+      return;
+    }
+
+    safeLog.info('[MonthlyDigest] Monthly digest generated', {
+      recordings: digest.totalRecordings,
+      topics: digest.topTopics.length,
+      actionItems: digest.allActionItems.length,
+      period: `${periodStartDate} ~ ${periodEndDate}`,
     });
   });
 }
