@@ -12,6 +12,9 @@ import { CommHubAdapter } from './adapters/commhub';
 import { performStartupCheck } from './utils/secrets-validator';
 import { safeLog } from './utils/log-sanitizer';
 
+// Durable Objects
+export { TaskCoordinator } from './durable-objects/task-coordinator';
+
 // Handlers
 import { ensureServiceRoleMappings } from './handlers/initialization';
 import { initGenericWebhook } from './handlers/generic-webhook';
@@ -82,7 +85,16 @@ export default {
 
     // Queue API endpoints (for AI Assistant Daemon)
     if (path.startsWith('/api/queue') || path.startsWith('/api/result')) {
-      return handleQueueAPI(request, env, path);
+      try {
+        return await handleQueueAPI(request, env, path);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const stack = e instanceof Error ? e.stack : undefined;
+        safeLog.error('[Queue] Unhandled error:', { message: msg, stack });
+        return new Response(JSON.stringify({ error: 'Internal error' }), {
+          status: 500, headers: { 'Content-Type': 'application/json' },
+        });
+      }
     }
 
     // Memory API endpoints (for persistent conversation history)

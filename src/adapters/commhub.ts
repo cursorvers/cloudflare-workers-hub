@@ -9,6 +9,7 @@
 
 import { NormalizedEvent } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
+import { addToTaskIndex, getTaskIds } from '../utils/task-index';
 
 export interface SkillHint {
   category: string;
@@ -241,7 +242,8 @@ async function sendViaKVQueue(
     status: 'pending',
   }), { expirationTtl: 3600 });
 
-  // No need to update pending list - prefix scan will find it
+  // Update cached task index (avoids KV list on next claim)
+  await addToTaskIndex(kv, request.id);
 
   safeLog.log(`[Orchestrator] Request ${request.id} queued in KV (new format)`);
 
@@ -408,22 +410,11 @@ export class CommHubAdapter {
   }
 
   /**
-   * Get pending requests from queue (for external orchestrator polling)
-   * NEW: Use KV prefix scan instead of pending list
+   * Get pending requests from queue (cached to reduce KV list ops)
    */
   async getPendingRequests(): Promise<string[]> {
     if (!this.kv) return [];
-
-    const taskKeys = await this.kv.list({ prefix: 'queue:task:' });
-    const pending: string[] = [];
-
-    for (const key of taskKeys.keys) {
-      // Extract taskId from key: queue:task:{taskId}
-      const taskId = key.name.replace('queue:task:', '');
-      pending.push(taskId);
-    }
-
-    return pending;
+    return getTaskIds(this.kv);
   }
 
   /**
