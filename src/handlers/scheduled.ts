@@ -220,6 +220,7 @@ async function handleLimitlessSync(env: Env): Promise<void> {
       maxAgeHours: syncIntervalHours + 2,
       includeAudio: false,
       maxItems: 5,
+      syncSource: 'backup',
     });
 
     const duration = Date.now() - startTime;

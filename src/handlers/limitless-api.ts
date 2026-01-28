@@ -112,6 +112,7 @@ async function handleManualSync(request: Request, env: Env): Promise<Response> {
       userId,
       maxAgeHours: 24, // Default: last 24 hours
       includeAudio: false, // Default: don't download audio
+      syncSource: 'manual',
     });
 
     safeLog.info('[Limitless API] Manual sync completed', {
@@ -211,7 +212,7 @@ async function handleCustomSync(request: Request, env: Env): Promise<Response> {
 
   try {
     // Perform sync
-    const result = await syncToSupabase(env, limitlessApiKey, syncOptions);
+    const result = await syncToSupabase(env, limitlessApiKey, { ...syncOptions, syncSource: syncOptions.syncSource ?? 'manual' });
 
     safeLog.info('[Limitless API] Custom sync completed', {
       userId: maskUserId(syncOptions.userId),

@@ -93,6 +93,7 @@ const SyncOptionsSchema = z.object({
   maxAgeHours: z.number().min(1).max(168).optional().default(24),
   includeAudio: z.boolean().optional().default(false),
   maxItems: z.number().min(1).max(100).optional(), // Limit total items processed (for subrequest budget)
+  syncSource: z.enum(['webhook', 'backup', 'manual']).optional().default('webhook'),
 });
 
 export type SyncOptions = z.infer<typeof SyncOptionsSchema>;
@@ -566,7 +567,7 @@ export async function syncToSupabase(
             raw_markdown: lifelog.markdown || null,
             raw_contents: lifelog.contents ? JSON.stringify(lifelog.contents) : null,
             processed_at: processed.classification !== 'unprocessed' ? new Date().toISOString() : null,
-            sync_source: 'webhook',
+            sync_source: validatedOptions.syncSource,
           };
 
           const upsertResult = await supabaseUpsert(
