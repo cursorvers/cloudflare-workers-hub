@@ -1,14 +1,15 @@
 /**
- * Slack Webhook Handler
+ * Slack Webhook Handler — Task Input Only
  *
- * Slack Events API からのイベントを処理し、
- * チャネルに応じて適切なアクションを実行する。
+ * Slack はタスク入力専用チャネル。
+ * スマートフォンからの指示受付 → Orchestrator 転送に特化。
+ * 通知（alerts/status/digest）は全て Discord に集約。
  */
 
 import { NormalizedEvent, Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { handleGenericWebhook } from './generic-webhook';
-import { broadcastNotification, notifications } from './notifications';
+import { notifyDiscord, notifications } from './notifications';
 import { isSimpleQuery, handleWithWorkersAI } from '../ai';
 
 export interface SlackEvent {
@@ -35,7 +36,7 @@ export interface SlackResponse {
   error?: string;
 }
 
-// Channel routing rules
+// Channel routing rules (task-input channels only; notifications → Discord)
 const CHANNEL_RULES: Record<string, ChannelRule> = {
   'vibe-coding': {
     autoExecute: true,
@@ -47,10 +48,7 @@ const CHANNEL_RULES: Record<string, ChannelRule> = {
     requiresConsensus: true,
     allowedActions: ['approve', 'reject', 'review'],
   },
-  'alerts': {
-    autoExecute: false,
-    notificationOnly: true,
-  },
+  // NOTE: 'alerts' channel removed — all notifications consolidated to Discord
 };
 
 interface ChannelRule {
@@ -289,9 +287,9 @@ export async function handleSlackWebhook(request: Request, env: Env): Promise<Re
   // Check channel rules
   const channelName = event.metadata.channelName as string;
   if (requiresConsensus(channelName)) {
-    await broadcastNotification(
-      notifications.approvalRequired(event.content, `Slack #${channelName}`),
-      { slackWebhookUrl: undefined }
+    await notifyDiscord(
+      env,
+      notifications.approvalRequired(event.content, `Slack #${channelName}`)
     );
   }
 

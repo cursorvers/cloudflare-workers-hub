@@ -8,7 +8,7 @@
 import { NormalizedEvent, Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { handleGenericWebhook } from './generic-webhook';
-import { broadcastNotification, notifications } from './notifications';
+import { notifyDiscord, notifications } from './notifications';
 
 export interface ClawdBotMessage {
   id: string;
@@ -211,12 +211,12 @@ export async function handleClawdBotWebhook(request: Request, env: Env): Promise
   // Escalations or complex requests go to Orchestrator
   if (event.metadata.needsEscalation) {
     // Notify about escalation
-    await broadcastNotification(
+    await notifyDiscord(
+      env,
       notifications.approvalRequired(
         `Customer escalation from ${clawdPayload.channel}`,
         event.content.substring(0, 100)
-      ),
-      { slackWebhookUrl: undefined }
+      )
     );
   }
 

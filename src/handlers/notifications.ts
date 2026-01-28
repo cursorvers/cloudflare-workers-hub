@@ -1,11 +1,12 @@
 /**
  * Notification Handler
  *
- * #alerts チャネルへの通知を管理
- * Slack/Discord 両方に対応
+ * 全通知を Discord に集約。
+ * Slack はタスク入力専用チャネルとして使用し、通知は送信しない。
  */
 
 import { safeLog } from '../utils/log-sanitizer';
+import type { Env } from '../types';
 
 export interface Notification {
   type: 'info' | 'warning' | 'error' | 'success';
@@ -264,11 +265,31 @@ export const notifications = {
   }),
 };
 
+/**
+ * Send notification to Discord using env.DISCORD_WEBHOOK_URL.
+ * All system notifications are consolidated to Discord.
+ * Non-blocking: failures are logged but never throw.
+ */
+export async function notifyDiscord(env: Env, notification: Notification): Promise<boolean> {
+  if (!env.DISCORD_WEBHOOK_URL) {
+    safeLog.warn('[Notification] DISCORD_WEBHOOK_URL not configured, skipping');
+    return false;
+  }
+
+  try {
+    return await sendDiscordNotification(env.DISCORD_WEBHOOK_URL, notification);
+  } catch (error) {
+    safeLog.warn('[Notification] Failed to send Discord notification', { error: String(error) });
+    return false;
+  }
+}
+
 export default {
   formatSlackNotification,
   formatDiscordNotification,
   sendSlackNotification,
   sendDiscordNotification,
   broadcastNotification,
+  notifyDiscord,
   notifications,
 };
