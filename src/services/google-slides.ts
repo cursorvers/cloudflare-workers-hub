@@ -45,6 +45,8 @@ interface SlideSection {
   body: string[];
   isTitle: boolean;
   subtitle?: string;
+  /** Public image URL to embed (from ![](url) or mermaid code block) */
+  imageUrl?: string;
 }
 
 interface PlaceholderInfo {
@@ -343,13 +345,39 @@ export function normalizeMarkdownForSlides(rawMarkdown: string): string {
  * Parse slide-ready Markdown into structured sections.
  * Sections are separated by `---`.
  * First section with `# Title` becomes the title slide.
+ *
+ * Supports:
+ * - `![alt](url)` → image embed
+ * - ````mermaid ... ``` → diagram via mermaid.ink
  */
 function parseMarkdownToSections(markdown: string): SlideSection[] {
   const rawSections = markdown.split(/\n---\n/).map((s) => s.trim()).filter(Boolean);
   const sections: SlideSection[] = [];
 
   for (let i = 0; i < rawSections.length; i++) {
-    const lines = rawSections[i].split('\n');
+    const raw = rawSections[i];
+
+    // Detect mermaid code block → convert to mermaid.ink image URL
+    let imageUrl: string | undefined;
+    const mermaidMatch = raw.match(/```mermaid\n([\s\S]*?)```/);
+    if (mermaidMatch) {
+      imageUrl = mermaidToImageUrl(mermaidMatch[1].trim());
+    }
+
+    // Detect image markdown: ![alt](url)
+    if (!imageUrl) {
+      const imgMatch = raw.match(/!\[([^\]]*)\]\(([^)]+)\)/);
+      if (imgMatch) {
+        imageUrl = imgMatch[2];
+      }
+    }
+
+    // Filter out mermaid blocks and image lines for body parsing
+    const cleaned = raw
+      .replace(/```mermaid\n[\s\S]*?```/g, '')
+      .replace(/!\[[^\]]*\]\([^)]+\)/g, '');
+
+    const lines = cleaned.split('\n');
     const headingLine = lines.find((l) => /^#{1,2}\s/.test(l));
     const heading = headingLine?.replace(/^#{1,2}\s*/, '') || '';
 
@@ -367,17 +395,30 @@ function parseMarkdownToSections(markdown: string): SlideSection[] {
         body: [],
         isTitle: true,
         subtitle: textLines.join(' ') || undefined,
+        imageUrl,
       });
     } else {
       sections.push({
         heading,
         body: bulletLines.length > 0 ? bulletLines : textLines,
         isTitle: false,
+        imageUrl,
       });
     }
   }
 
   return sections;
+}
+
+/**
+ * Convert Mermaid diagram code to a public image URL via mermaid.ink.
+ *
+ * mermaid.ink renders Mermaid diagrams as PNG images.
+ * The URL is deterministic and publicly accessible — ideal for Google Slides createImage.
+ */
+function mermaidToImageUrl(mermaidCode: string): string {
+  const encoded = Buffer.from(mermaidCode, 'utf-8').toString('base64');
+  return `https://mermaid.ink/img/${encoded}`;
 }
 
 // ============================================================================
@@ -525,65 +566,154 @@ function buildBatchRequests(
     const slideId = `slide_${i}`;
     const titleId = `slide_${i}_title`;
     const bodyId = `slide_${i}_body`;
+    const hasImage = !!section.imageUrl;
+    const hasBody = section.body.length > 0;
 
-    // Create slide with TITLE_AND_BODY layout
-    requests.push({
-      createSlide: {
-        objectId: slideId,
-        insertionIndex: i,
-        slideLayoutReference: {
-          predefinedLayout: 'TITLE_AND_BODY',
+    if (hasImage && !hasBody) {
+      // Image-only slide: BLANK layout + title text box + image
+      requests.push({
+        createSlide: {
+          objectId: slideId,
+          insertionIndex: i,
+          slideLayoutReference: { predefinedLayout: 'BLANK' },
         },
-        placeholderIdMappings: [
-          {
-            layoutPlaceholder: { type: 'TITLE', index: 0 },
-            objectId: titleId,
-          },
-          {
-            layoutPlaceholder: { type: 'BODY', index: 0 },
+      });
+
+      // Add title as text box at top
+      if (section.heading) {
+        requests.push(...createTitleTextBox(slideId, titleId, section.heading));
+      }
+
+      // Add centered image below title
+      requests.push(...createImageRequest(slideId, `slide_${i}_img`, section.imageUrl!, {
+        x: 572_000,       // ~0.6" left margin
+        y: 1_300_000,     // below title
+        width: 8_000_000, // ~8.7" wide
+        height: 5_000_000, // ~5.5" tall
+      }));
+    } else {
+      // Text slide (possibly with image on right side)
+      requests.push({
+        createSlide: {
+          objectId: slideId,
+          insertionIndex: i,
+          slideLayoutReference: { predefinedLayout: 'TITLE_AND_BODY' },
+          placeholderIdMappings: [
+            { layoutPlaceholder: { type: 'TITLE', index: 0 }, objectId: titleId },
+            { layoutPlaceholder: { type: 'BODY', index: 0 }, objectId: bodyId },
+          ],
+        },
+      });
+
+      // Insert heading text
+      if (section.heading) {
+        requests.push({
+          insertText: { objectId: titleId, text: section.heading, insertionIndex: 0 },
+        });
+      }
+
+      // Insert body bullets
+      if (hasBody) {
+        const bodyText = section.body.map((b) => b.replace(/\*\*/g, '')).join('\n');
+        requests.push({
+          insertText: { objectId: bodyId, text: bodyText, insertionIndex: 0 },
+        });
+        requests.push({
+          createParagraphBullets: {
             objectId: bodyId,
+            textRange: { type: 'ALL' },
+            bulletPreset: 'BULLET_DISC_CIRCLE_SQUARE',
           },
-        ],
-      },
-    });
+        });
+      }
 
-    // Insert heading text
-    if (section.heading) {
-      requests.push({
-        insertText: {
-          objectId: titleId,
-          text: section.heading,
-          insertionIndex: 0,
-        },
-      });
-    }
-
-    // Insert body bullets
-    if (section.body.length > 0) {
-      // Strip markdown bold markers for plain text slides
-      const bodyText = section.body
-        .map((b) => b.replace(/\*\*/g, ''))
-        .join('\n');
-      requests.push({
-        insertText: {
-          objectId: bodyId,
-          text: bodyText,
-          insertionIndex: 0,
-        },
-      });
-
-      // Make body text bulleted
-      requests.push({
-        createParagraphBullets: {
-          objectId: bodyId,
-          textRange: { type: 'ALL' },
-          bulletPreset: 'BULLET_DISC_CIRCLE_SQUARE',
-        },
-      });
+      // Add image on right side if present alongside text
+      if (hasImage) {
+        requests.push(...createImageRequest(slideId, `slide_${i}_img`, section.imageUrl!, {
+          x: 4_800_000,     // right half
+          y: 1_500_000,     // below title
+          width: 4_000_000, // ~4.4" wide
+          height: 4_000_000, // ~4.4" tall
+        }));
+      }
     }
   }
 
   return requests;
+}
+
+/**
+ * Build createImage request for embedding an image on a slide.
+ */
+function createImageRequest(
+  pageId: string,
+  imageId: string,
+  url: string,
+  pos: { x: number; y: number; width: number; height: number }
+): unknown[] {
+  return [{
+    createImage: {
+      objectId: imageId,
+      url,
+      elementProperties: {
+        pageObjectId: pageId,
+        size: {
+          width: { magnitude: pos.width, unit: 'EMU' },
+          height: { magnitude: pos.height, unit: 'EMU' },
+        },
+        transform: {
+          scaleX: 1,
+          scaleY: 1,
+          translateX: pos.x,
+          translateY: pos.y,
+          unit: 'EMU',
+        },
+      },
+    },
+  }];
+}
+
+/**
+ * Build requests for a title text box on a BLANK slide.
+ */
+function createTitleTextBox(
+  pageId: string,
+  textBoxId: string,
+  text: string
+): unknown[] {
+  return [
+    {
+      createShape: {
+        objectId: textBoxId,
+        shapeType: 'TEXT_BOX',
+        elementProperties: {
+          pageObjectId: pageId,
+          size: {
+            width: { magnitude: 8_000_000, unit: 'EMU' },
+            height: { magnitude: 800_000, unit: 'EMU' },
+          },
+          transform: {
+            scaleX: 1,
+            scaleY: 1,
+            translateX: 572_000,
+            translateY: 200_000,
+            unit: 'EMU',
+          },
+        },
+      },
+    },
+    {
+      insertText: { objectId: textBoxId, text, insertionIndex: 0 },
+    },
+    {
+      updateTextStyle: {
+        objectId: textBoxId,
+        style: { fontSize: { magnitude: 28, unit: 'PT' }, bold: true },
+        textRange: { type: 'ALL' },
+        fields: 'fontSize,bold',
+      },
+    },
+  ];
 }
 
 async function appendSlides(
@@ -651,6 +781,19 @@ async function appendSlides(
           bulletPreset: 'BULLET_DISC_CIRCLE_SQUARE',
         },
       });
+    }
+
+    // Add image if present in appended slide
+    if (section.imageUrl) {
+      const hasBody = section.body.length > 0;
+      requests.push(...createImageRequest(
+        slideId,
+        `append_${ts}_${i}_img`,
+        section.imageUrl,
+        hasBody
+          ? { x: 4_800_000, y: 1_500_000, width: 4_000_000, height: 4_000_000 }
+          : { x: 572_000, y: 1_300_000, width: 8_000_000, height: 5_000_000 }
+      ));
     }
   }
 
