@@ -264,13 +264,20 @@ async function executeRouteA(
   // Authenticate
   console.log('  Authenticating...');
   const credentialsPath = process.env.GOOGLE_CREDENTIALS_PATH || undefined;
-  const { accessToken } = await authenticate(credentialsPath);
+  const { accessToken, credentials } = await authenticate(credentialsPath);
+
+  // Share with user when using service account auth
+  const shareWithEmail = credentials.type === 'service_account'
+    ? (process.env.GOOGLE_SHARE_EMAIL || undefined)
+    : undefined;
 
   const result = await generateSlidesFromMarkdown({
     markdown,
     title: resolvedTitle,
     accessToken,
     appendTo: appendTo || undefined,
+    shareWithEmail,
+    quotaProject: process.env.GCP_PROJECT_ID || 'juken-ai-workflow',
   });
 
   console.log(`  Google Slides URL: ${result.slidesUrl}`);

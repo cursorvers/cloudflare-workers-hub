@@ -21,6 +21,10 @@ const GenerateSlidesOptionsSchema = z.object({
   accessToken: z.string().min(1),
   /** Append to existing presentation instead of creating a new one */
   appendTo: z.string().optional(),
+  /** Share the created presentation with this email (needed for service account auth) */
+  shareWithEmail: z.string().email().optional(),
+  /** GCP project ID for quota attribution */
+  quotaProject: z.string().optional(),
 });
 
 export type GenerateSlidesOptions = z.infer<typeof GenerateSlidesOptionsSchema>;
@@ -55,6 +59,19 @@ interface PlaceholderInfo {
 const SLIDES_API = 'https://slides.googleapis.com/v1/presentations';
 const REQUEST_TIMEOUT = 30_000;
 
+interface AuthHeaders {
+  Authorization: string;
+  'x-goog-user-project'?: string;
+}
+
+function buildAuthHeaders(accessToken: string, quotaProject?: string): AuthHeaders {
+  const h: AuthHeaders = { Authorization: `Bearer ${accessToken}` };
+  if (quotaProject) {
+    h['x-goog-user-project'] = quotaProject;
+  }
+  return h;
+}
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -68,31 +85,37 @@ const REQUEST_TIMEOUT = 30_000;
 export async function generateSlidesFromMarkdown(
   options: GenerateSlidesOptions
 ): Promise<GenerateSlidesResult> {
-  const { markdown, title, accessToken, appendTo } = GenerateSlidesOptionsSchema.parse(options);
+  const { markdown, title, accessToken, appendTo, shareWithEmail, quotaProject } = GenerateSlidesOptionsSchema.parse(options);
 
   const sections = parseMarkdownToSections(markdown);
   if (sections.length === 0) {
     throw new Error('No slide sections found in markdown');
   }
 
+  const headers = buildAuthHeaders(accessToken, quotaProject);
   let presentationId: string;
 
   if (appendTo) {
     presentationId = appendTo;
     // Append: create all sections as new slides
-    await appendSlides(presentationId, accessToken, sections);
+    await appendSlides(presentationId, headers, sections);
   } else {
     // Create new presentation (comes with one blank title slide)
-    presentationId = await createPresentation(title, accessToken);
+    presentationId = await createPresentation(title, headers);
 
     // Get the auto-created first slide's placeholder IDs
-    const firstSlidePlaceholders = await getFirstSlidePlaceholders(presentationId, accessToken);
+    const firstSlidePlaceholders = await getFirstSlidePlaceholders(presentationId, headers);
 
     // Build batch: populate first slide + create additional slides + populate them
     const requests = buildBatchRequests(sections, firstSlidePlaceholders);
     if (requests.length > 0) {
-      await batchUpdate(presentationId, requests, accessToken);
+      await batchUpdate(presentationId, requests, headers);
     }
+  }
+
+  // Share with user if using service account auth
+  if (shareWithEmail && !appendTo) {
+    await sharePresentation(presentationId, headers, shareWithEmail);
   }
 
   const slidesUrl = `https://docs.google.com/presentation/d/${presentationId}`;
@@ -361,13 +384,10 @@ function parseMarkdownToSections(markdown: string): SlideSection[] {
 // Google Slides REST API
 // ============================================================================
 
-async function createPresentation(title: string, accessToken: string): Promise<string> {
+async function createPresentation(title: string, auth: AuthHeaders): Promise<string> {
   const response = await fetchWithTimeout(`${SLIDES_API}`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { ...auth, 'Content-Type': 'application/json' },
     body: JSON.stringify({ title }),
   });
 
@@ -382,11 +402,11 @@ async function createPresentation(title: string, accessToken: string): Promise<s
 
 async function getFirstSlidePlaceholders(
   presentationId: string,
-  accessToken: string
+  auth: AuthHeaders
 ): Promise<{ slideObjectId: string; placeholders: PlaceholderInfo[] }> {
   const response = await fetchWithTimeout(`${SLIDES_API}/${presentationId}`, {
     method: 'GET',
-    headers: { 'Authorization': `Bearer ${accessToken}` },
+    headers: auth,
   });
 
   if (!response.ok) {
@@ -418,20 +438,42 @@ async function getFirstSlidePlaceholders(
 async function batchUpdate(
   presentationId: string,
   requests: unknown[],
-  accessToken: string
+  auth: AuthHeaders
 ): Promise<void> {
   const response = await fetchWithTimeout(`${SLIDES_API}/${presentationId}:batchUpdate`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { ...auth, 'Content-Type': 'application/json' },
     body: JSON.stringify({ requests }),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`Slides batchUpdate failed (${response.status}): ${errorText.substring(0, 300)}`);
+  }
+}
+
+async function sharePresentation(
+  presentationId: string,
+  auth: AuthHeaders,
+  email: string
+): Promise<void> {
+  const response = await fetchWithTimeout(
+    `https://www.googleapis.com/drive/v3/files/${presentationId}/permissions`,
+    {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'user',
+        role: 'writer',
+        emailAddress: email,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    // Non-fatal: log warning but don't fail
+    console.warn(`  Warning: Failed to share presentation with ${email} (${response.status}): ${errorText.substring(0, 200)}`);
   }
 }
 
@@ -546,13 +588,13 @@ function buildBatchRequests(
 
 async function appendSlides(
   presentationId: string,
-  accessToken: string,
+  auth: AuthHeaders,
   sections: SlideSection[]
 ): Promise<void> {
   // Get current slide count for insertion index
   const response = await fetchWithTimeout(`${SLIDES_API}/${presentationId}`, {
     method: 'GET',
-    headers: { 'Authorization': `Bearer ${accessToken}` },
+    headers: auth,
   });
 
   if (!response.ok) {
@@ -613,7 +655,7 @@ async function appendSlides(
   }
 
   if (requests.length > 0) {
-    await batchUpdate(presentationId, requests, accessToken);
+    await batchUpdate(presentationId, requests, auth);
   }
 }
 
