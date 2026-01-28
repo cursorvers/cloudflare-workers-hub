@@ -2,7 +2,7 @@
 /**
  * Google Slides / NotebookLM Unified Generator
  *
- * Route A: Markdown → Google Slides (via md2gslides)
+ * Route A: Markdown → Google Slides (via REST API)
  * Route B: Source → NotebookLM Enterprise → Slide Deck (PDF)
  * Route both: A → B (create Slides, then feed into NotebookLM)
  *
@@ -34,7 +34,6 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 
 // ============================================================================
 // CLI Argument Parsing
@@ -71,7 +70,6 @@ if (digestTypeRaw && !VALID_DIGEST_TYPES.includes(digestTypeRaw as typeof VALID_
 }
 const digestType = digestTypeRaw as 'weekly' | 'monthly' | 'annual' | 'actions' | null;
 const appendTo = getArg('--append-to');
-const outputDir = path.resolve(getArg('--output') || os.tmpdir());
 
 // ============================================================================
 // Types
@@ -247,7 +245,7 @@ function generateTopicContent(topicText: string): string {
 // ============================================================================
 
 /**
- * Route A: Write Markdown to temp file → md2gslides → Google Slides URL
+ * Route A: Markdown → Google Slides (via REST API)
  */
 async function executeRouteA(
   markdown: string,
@@ -260,28 +258,25 @@ async function executeRouteA(
     return {};
   }
 
+  const { authenticate } = await import('../src/services/google-auth');
   const { generateSlidesFromMarkdown } = await import('../src/services/google-slides');
 
-  // Write markdown to temp file
-  const tmpFile = path.join(outputDir, `slides-${Date.now()}.md`);
-  fs.writeFileSync(tmpFile, markdown, 'utf-8');
-  console.log(`  Temp markdown: ${tmpFile}`);
+  // Authenticate
+  console.log('  Authenticating...');
+  const credentialsPath = process.env.GOOGLE_CREDENTIALS_PATH || undefined;
+  const { accessToken } = await authenticate(credentialsPath);
 
-  try {
-    const result = await generateSlidesFromMarkdown({
-      markdownPath: tmpFile,
-      title: resolvedTitle,
-      appendTo: appendTo || undefined,
-    });
+  const result = await generateSlidesFromMarkdown({
+    markdown,
+    title: resolvedTitle,
+    accessToken,
+    appendTo: appendTo || undefined,
+  });
 
-    console.log(`  Google Slides URL: ${result.slidesUrl}`);
-    console.log(`  Slides ID: ${result.slidesId}`);
+  console.log(`  Google Slides URL: ${result.slidesUrl}`);
+  console.log(`  Slides ID: ${result.slidesId}`);
 
-    return { slidesUrl: result.slidesUrl, slidesId: result.slidesId };
-  } finally {
-    // Clean up temp file
-    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
-  }
+  return { slidesUrl: result.slidesUrl, slidesId: result.slidesId };
 }
 
 /**
