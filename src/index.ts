@@ -14,6 +14,7 @@ import { safeLog } from './utils/log-sanitizer';
 
 // Durable Objects
 export { TaskCoordinator } from './durable-objects/task-coordinator';
+export { CockpitWebSocket } from './durable-objects/cockpit-websocket';
 
 // Handlers
 import { ensureServiceRoleMappings } from './handlers/initialization';
@@ -29,6 +30,7 @@ import { handleDaemonAPI } from './handlers/daemon-api';
 import { handleLimitlessAPI } from './handlers/limitless-api';
 import { handleLimitlessWebhook } from './handlers/limitless-webhook';
 import { handleScheduled } from './handlers/scheduled';
+import { handleCockpitAPI } from './handlers/cockpit-api';
 
 export type { Env };
 
@@ -125,6 +127,21 @@ export default {
       }
       // Other Limitless API endpoints
       return handleLimitlessAPI(request, env, path);
+    }
+
+    // Cockpit API endpoints (for FUGUE monitoring)
+    if (path.startsWith('/api/cockpit')) {
+      return handleCockpitAPI(request, env, path);
+    }
+
+    // WebSocket upgrade for Cockpit (upgrade to DO)
+    if (path === '/api/ws' && request.headers.get('Upgrade') === 'websocket') {
+      if (!env.COCKPIT_WS) {
+        return new Response('WebSocket not available', { status: 503 });
+      }
+      const doId = env.COCKPIT_WS.idFromName('cockpit');
+      const doStub = env.COCKPIT_WS.get(doId);
+      return doStub.fetch(new Request('http://do/ws', request));
     }
 
     // Webhook endpoints

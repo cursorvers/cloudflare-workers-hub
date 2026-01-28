@@ -21,13 +21,18 @@ id = "378a478680ec41d280737181530f58a9"
 # Durable Objects for atomic task queue coordination
 [durable_objects]
 bindings = [
-  { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" }
+  { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
+  { name = "COCKPIT_WS", class_name = "CockpitWebSocket" }
 ]
 
 # DO migration (required for first deployment, free plan requires new_sqlite_classes)
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["TaskCoordinator"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["CockpitWebSocket"]
 
 # R2 bucket for audio staging and Obsidian vault (requires R2 enabled on account)
 # [[r2_buckets]]
@@ -77,7 +82,8 @@ id = "378a478680ec41d280737181530f58a9"
 
 [env.production.durable_objects]
 bindings = [
-  { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" }
+  { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
+  { name = "COCKPIT_WS", class_name = "CockpitWebSocket" }
 ]
 
 # [[env.production.r2_buckets]]

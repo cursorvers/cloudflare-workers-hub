@@ -1,0 +1,21 @@
+{
+  "repositories": [
+    "~/Dev/cloudflare-workers-hub",
+    "~/Dev/ai-assistant-daemon"
+  ],
+  "checkInterval": 60000,
+  "workersHubUrl": "https://orchestrator-hub.masa-stage1.workers.dev",
+  "tunnelPort": 3100,
+  "agent": {
+    "id": "local-mac-agent-001",
+    "name": "Local Mac Agent",
+    "capabilities": [
+      "git-monitor",
+      "task-execution",
+      "claude-code"
+    ]
+  },
+  "authentication": {
+    "apiKey": "your-api-key-here"
+  }
+}

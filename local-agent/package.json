@@ -1,0 +1,32 @@
+{
+  "name": "@fugue/local-agent",
+  "version": "0.1.0",
+  "description": "FUGUE Cockpit Local Agent - Mac上でGit監視とタスク実行を担当",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "type-check": "tsc --noEmit"
+  },
+  "keywords": [
+    "fugue",
+    "orchestrator",
+    "git-monitor",
+    "local-agent"
+  ],
+  "author": "cursorvers",
+  "license": "MIT",
+  "dependencies": {
+    "simple-git": "^3.25.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.19",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.7.1",
+    "typescript": "^5.3.3"
+  }
+}

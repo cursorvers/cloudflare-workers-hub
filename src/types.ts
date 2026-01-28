@@ -23,6 +23,7 @@ export interface Env {
   DB?: D1Database;
   CACHE?: KVNamespace;
   TASK_COORDINATOR?: DurableObjectNamespace;
+  COCKPIT_WS?: DurableObjectNamespace;
   AUDIO_STAGING?: R2Bucket;
   OBSIDIAN_VAULT?: R2Bucket;
   KNOWLEDGE_INDEX?: VectorizeIndex;
