@@ -368,6 +368,44 @@ async function executeRouteB(
 }
 
 // ============================================================================
+// Supabase Slides URL Update
+// ============================================================================
+
+/**
+ * Store generated slides URL back to digest_reports in Supabase.
+ * Only runs when --source supabase was used.
+ */
+async function storeSlidesUrl(slidesUrl: string): Promise<void> {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl || !serviceRoleKey) return;
+
+  const typeFilter = digestType
+    ? `type=eq.${digestType === 'actions' ? 'daily_actions' : digestType}`
+    : 'type=eq.weekly';
+
+  const fullUrl = `${supabaseUrl}/rest/v1/digest_reports?${typeFilter}&order=created_at.desc&limit=1`;
+
+  const response = await fetch(fullUrl, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${serviceRoleKey}`,
+      'apikey': serviceRoleKey,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=minimal',
+    },
+    body: JSON.stringify({ slides_url: slidesUrl }),
+  });
+
+  if (response.ok) {
+    console.log(`  Slides URL saved to Supabase digest_reports`);
+  } else {
+    console.warn(`  Failed to save slides URL to Supabase: ${response.status}`);
+  }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -409,6 +447,11 @@ async function main(): Promise<void> {
     console.log('Route A: Markdown → Google Slides');
     const resultA = await executeRouteA(markdown, resolvedTitle);
     slidesId = resultA.slidesId;
+
+    // Store slides URL back to Supabase when source is supabase
+    if (resultA.slidesUrl && source === 'supabase' && !isDryRun) {
+      await storeSlidesUrl(resultA.slidesUrl);
+    }
     console.log('');
   }
 

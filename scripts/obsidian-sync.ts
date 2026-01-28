@@ -51,6 +51,7 @@ interface DigestReport {
   content: unknown;
   markdown: string;
   obsidian_synced: boolean;
+  slides_url: string | null;
   created_at: string;
 }
 
@@ -402,7 +403,7 @@ async function syncDigestReports(
     supabaseUrl,
     serviceRoleKey,
     'digest_reports',
-    'select=id,type,period_start,period_end,markdown,obsidian_synced,created_at&obsidian_synced=eq.false&order=period_start.asc'
+    'select=id,type,period_start,period_end,markdown,obsidian_synced,slides_url,created_at&obsidian_synced=eq.false&order=period_start.asc'
   );
 
   if (reports.length === 0) {
@@ -427,15 +428,36 @@ async function syncDigestReports(
       continue;
     }
 
+    // Inject slides_url into frontmatter and body if available
+    let finalMarkdown = report.markdown;
+    if (report.slides_url) {
+      // Add slides_url to frontmatter (before closing ---)
+      finalMarkdown = finalMarkdown.replace(
+        /^(---\n[\s\S]*?)(---)/m,
+        `$1slides_url: "${report.slides_url}"\n$2`
+      );
+      // Add a link after the first heading
+      finalMarkdown = finalMarkdown.replace(
+        /^(# .+)$/m,
+        `$1\n\n> [Google Slides](${report.slides_url})`
+      );
+    }
+
     if (!isDryRun) {
       fs.mkdirSync(dirPath, { recursive: true });
       const existed = fs.existsSync(filePath);
-      fs.writeFileSync(filePath, report.markdown, 'utf-8');
+      fs.writeFileSync(filePath, finalMarkdown, 'utf-8');
       console.log(existed ? `    ↻ Updated existing file` : `    ✨ Created new file`);
+      if (report.slides_url) {
+        console.log(`    🎯 Slides: ${report.slides_url}`);
+      }
       syncedIds.push(report.id);
     } else {
       console.log(`    (dry run - skipped)`);
-      console.log(`    Preview (first 200 chars): ${report.markdown.substring(0, 200)}...`);
+      console.log(`    Preview (first 200 chars): ${finalMarkdown.substring(0, 200)}...`);
+      if (report.slides_url) {
+        console.log(`    🎯 Slides: ${report.slides_url}`);
+      }
     }
   }
 

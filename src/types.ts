@@ -61,4 +61,11 @@ export interface Env {
   SUPABASE_SERVICE_ROLE_KEY?: string; // Supabase service role key (server-side only)
   // OpenAI (optional, for higher-quality lifelog processing)
   OPENAI_API_KEY?: string;         // GPT-4o-mini for classification/summarization
+  // Google Slides (optional, for auto-generating slides from digests)
+  GOOGLE_CLIENT_ID?: string;       // Google OAuth client ID
+  GOOGLE_CLIENT_SECRET?: string;   // Google OAuth client secret
+  GOOGLE_REFRESH_TOKEN?: string;   // Google OAuth refresh token
+  GOOGLE_SHARE_EMAIL?: string;     // Email to share generated slides with
+  GCP_PROJECT_ID?: string;         // GCP project ID (for quota attribution)
+  SLIDES_AUTO_GENERATE?: string;   // Enable/disable auto slide generation (default: false)
 }

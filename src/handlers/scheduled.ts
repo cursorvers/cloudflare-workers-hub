@@ -21,9 +21,16 @@ import {
   generateAnnualMarkdown,
   generateActionItemsMarkdown,
   type LifelogRecord,
+  type WeeklyDigest,
 } from '../services/digest-generator';
 import { sendDiscordNotification, type Notification } from './notifications';
 import { handleDaemonHealthCheck } from './daemon-monitor';
+import { getAccessToken, type GoogleCredentials } from '../services/google-auth';
+import {
+  generateSlidesFromMarkdown,
+  formatDigestAsSlideMarkdown,
+  formatActionItemsAsSlideMarkdown,
+} from '../services/google-slides';
 
 // ============================================================================
 // Constants
@@ -341,12 +348,23 @@ async function handleWeeklyDigest(env: Env): Promise<void> {
       period: `${periodStartDate} ~ ${periodEndDate}`,
     });
 
+    // Generate Google Slides (optional, non-blocking)
+    const slideMarkdown = formatDigestAsSlideMarkdown(
+      digest,
+      `Weekly Digest: ${periodStartDate}`
+    );
+    const slidesUrl = await generateSlidesForDigest(
+      env, config, 'weekly', `${periodStartDate} ~ ${periodEndDate}`,
+      slideMarkdown, `Weekly Digest: ${periodStartDate}`, periodStartISO
+    );
+
     // Send notification
     await sendDigestNotification(env, 'Weekly', {
       recordings: digest.totalRecordings,
       topics: digest.topTopics.length,
       actionItems: digest.allActionItems.length,
       period: `${periodStartDate} ~ ${periodEndDate}`,
+      slidesUrl,
     });
   });
 }
@@ -533,14 +551,111 @@ async function handleMonthlyDigest(env: Env): Promise<void> {
       period: `${periodStartDate} ~ ${periodEndDate}`,
     });
 
+    // Generate Google Slides (optional, non-blocking)
+    const slideMarkdown = formatDigestAsSlideMarkdown(
+      digest,
+      `Monthly Digest: ${periodStartDate.slice(0, 7)}`
+    );
+    const slidesUrl = await generateSlidesForDigest(
+      env, config, 'monthly', `${periodStartDate} ~ ${periodEndDate}`,
+      slideMarkdown, `Monthly Digest: ${periodStartDate.slice(0, 7)}`, periodStartISO
+    );
+
     // Send notification
     await sendDigestNotification(env, 'Monthly', {
       recordings: digest.totalRecordings,
       topics: digest.topTopics.length,
       actionItems: digest.allActionItems.length,
       period: `${periodStartDate} ~ ${periodEndDate}`,
+      slidesUrl,
     });
   });
+}
+
+// ============================================================================
+// Slides Generation Helper
+// ============================================================================
+
+/**
+ * Check if Google Slides auto-generation is configured.
+ */
+function isSlidesEnabled(env: Env): boolean {
+  return (
+    env.SLIDES_AUTO_GENERATE === 'true' &&
+    !!env.GOOGLE_CLIENT_ID &&
+    !!env.GOOGLE_CLIENT_SECRET &&
+    !!env.GOOGLE_REFRESH_TOKEN
+  );
+}
+
+/**
+ * Build Google ADC credentials from environment variables (Workers-compatible).
+ * Uses refresh_token flow — no file I/O required.
+ */
+function buildGoogleCredentials(env: Env): GoogleCredentials {
+  return {
+    type: 'authorized_user' as const,
+    client_id: env.GOOGLE_CLIENT_ID!,
+    client_secret: env.GOOGLE_CLIENT_SECRET!,
+    refresh_token: env.GOOGLE_REFRESH_TOKEN!,
+  };
+}
+
+/**
+ * Generate Google Slides from a digest and store the URL in Supabase.
+ * Non-blocking: failures are logged but never throw.
+ *
+ * @returns The Slides URL if successful, undefined otherwise
+ */
+async function generateSlidesForDigest(
+  env: Env,
+  config: SupabaseConfig,
+  digestType: string,
+  periodLabel: string,
+  markdown: string,
+  title: string,
+  reportPeriodStart: string
+): Promise<string | undefined> {
+  if (!isSlidesEnabled(env)) return undefined;
+
+  try {
+    const credentials = buildGoogleCredentials(env);
+    const { access_token: accessToken } = await getAccessToken(credentials);
+
+    const result = await generateSlidesFromMarkdown({
+      markdown,
+      title,
+      accessToken,
+      shareWithEmail: env.GOOGLE_SHARE_EMAIL,
+      quotaProject: env.GCP_PROJECT_ID,
+    });
+
+    // Store slides_url in digest_reports
+    const typeFilter = digestType === 'daily_actions' ? 'daily_actions' : digestType;
+    await supabaseUpsert(
+      config,
+      'digest_reports',
+      {
+        type: typeFilter,
+        period_start: reportPeriodStart,
+        slides_url: result.slidesUrl,
+      },
+      'type,period_start'
+    );
+
+    safeLog.info(`[Slides] Generated for ${digestType}`, {
+      slidesUrl: result.slidesUrl,
+      period: periodLabel,
+    });
+
+    return result.slidesUrl;
+  } catch (error) {
+    safeLog.warn(`[Slides] Failed to generate for ${digestType}`, {
+      error: String(error),
+      period: periodLabel,
+    });
+    return undefined;
+  }
 }
 
 // ============================================================================
@@ -554,20 +669,26 @@ async function handleMonthlyDigest(env: Env): Promise<void> {
 async function sendDigestNotification(
   env: Env,
   digestType: string,
-  stats: { recordings: number; topics: number; actionItems: number; period: string }
+  stats: { recordings: number; topics: number; actionItems: number; period: string; slidesUrl?: string }
 ): Promise<void> {
   if (!env.DISCORD_WEBHOOK_URL) return;
+
+  const fields = [
+    { name: 'Recordings', value: String(stats.recordings), inline: true },
+    { name: 'Topics', value: String(stats.topics), inline: true },
+    { name: 'Action Items', value: String(stats.actionItems), inline: true },
+  ];
+
+  if (stats.slidesUrl) {
+    fields.push({ name: 'Slides', value: stats.slidesUrl, inline: false });
+  }
 
   const notification: Notification = {
     type: 'success',
     title: `${digestType} Digest Generated`,
     message: `${stats.recordings}件の録音を集計しました (${stats.period})`,
     source: 'cron-digest',
-    fields: [
-      { name: 'Recordings', value: String(stats.recordings), inline: true },
-      { name: 'Topics', value: String(stats.topics), inline: true },
-      { name: 'Action Items', value: String(stats.actionItems), inline: true },
-    ],
+    fields,
   };
 
   try {
@@ -688,12 +809,23 @@ async function handleAnnualDigest(env: Env): Promise<void> {
       period: `${periodStartDate} ~ ${periodEndDate}`,
     });
 
+    // Generate Google Slides (optional, non-blocking)
+    const slideMarkdown = formatDigestAsSlideMarkdown(
+      digest,
+      `Annual Digest: ${periodStartDate.slice(0, 4)}`
+    );
+    const slidesUrl = await generateSlidesForDigest(
+      env, config, 'annual', `${periodStartDate} ~ ${periodEndDate}`,
+      slideMarkdown, `Annual Digest: ${periodStartDate.slice(0, 4)}`, periodStartISO
+    );
+
     // Send notification
     await sendDigestNotification(env, 'Annual', {
       recordings: digest.totalRecordings,
       topics: digest.topTopics.length,
       actionItems: digest.allActionItems.length,
       period: `${periodStartDate} ~ ${periodEndDate}`,
+      slidesUrl,
     });
   });
 }
