@@ -71,11 +71,57 @@ const PongSchema = z.object({
   timestamp: z.number().optional(),
 });
 
+// =============================================================================
+// Observability Schemas
+// =============================================================================
+
+const ProviderHealthSchema = z.object({
+  provider: z.string(),
+  status: z.enum(['healthy', 'degraded', 'unhealthy', 'unknown']),
+  latency_p95_ms: z.number().optional(),
+  error_rate: z.number().optional(),
+  last_request_at: z.number().optional(),
+});
+
+const CostDataSchema = z.object({
+  date: z.string(),
+  provider: z.string(),
+  call_count: z.number().int().min(0),
+  total_tokens: z.number().int().min(0),
+  total_cost_usd: z.number().min(0),
+});
+
+const RequestSampleSchema = z.object({
+  timestamp: z.number(),
+  provider: z.string(),
+  agent: z.string().optional(),
+  latency_ms: z.number().optional(),
+  input_tokens: z.number().optional(),
+  output_tokens: z.number().optional(),
+  cost_usd: z.number().optional(),
+  status: z.enum(['success', 'error', 'timeout']).optional(),
+  error_message: z.string().optional(),
+});
+
+const ObservabilitySyncSchema = z.object({
+  type: z.literal('observability-sync'),
+  provider_health: z.array(ProviderHealthSchema).optional(),
+  costs: z.array(CostDataSchema).optional(),
+  requests: z.array(RequestSampleSchema).optional(),
+  budget_status: z.object({
+    provider: z.string(),
+    daily_spent_usd: z.number(),
+    weekly_spent_usd: z.number().optional(),
+    monthly_spent_usd: z.number().optional(),
+  }).array().optional(),
+});
+
 const IncomingMessageSchema = z.discriminatedUnion('type', [
   AgentStatusSchema,
   GitStatusMessageSchema,
   TaskResultSchema,
   PongSchema,
+  ObservabilitySyncSchema,
 ]);
 
 // Outgoing message types (sent to agent)
@@ -220,6 +266,9 @@ export class CockpitWebSocket extends DurableObject<Env> {
           break;
         case 'pong':
           await this.handlePong(ws);
+          break;
+        case 'observability-sync':
+          await this.handleObservabilitySync(validated);
           break;
         default:
           safeLog.warn('[CockpitWebSocket] Unknown message type', { type: (validated as any).type });
@@ -408,6 +457,144 @@ export class CockpitWebSocket extends DurableObject<Env> {
       const key = `agent:${agent.agentId}`;
       await this.ctx.storage.put(key, agent);
     }
+  }
+
+  /**
+   * Handle observability data sync from local agent
+   */
+  private async handleObservabilitySync(
+    message: z.infer<typeof ObservabilitySyncSchema>
+  ): Promise<void> {
+    if (!this.env.DB) {
+      safeLog.warn('[CockpitWebSocket] DB not available for observability sync');
+      return;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+
+    // Sync provider health
+    if (message.provider_health) {
+      for (const health of message.provider_health) {
+        try {
+          await this.env.DB.prepare(`
+            UPDATE cockpit_provider_health
+            SET status = ?, latency_p95_ms = ?, error_rate = ?,
+                last_request_at = ?, updated_at = ?
+            WHERE provider = ?
+          `).bind(
+            health.status,
+            health.latency_p95_ms || null,
+            health.error_rate || null,
+            health.last_request_at || null,
+            now,
+            health.provider
+          ).run();
+        } catch (error) {
+          safeLog.error('[CockpitWebSocket] Failed to update provider health', {
+            provider: health.provider,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+
+    // Sync costs
+    if (message.costs) {
+      for (const cost of message.costs) {
+        try {
+          await this.env.DB.prepare(`
+            INSERT INTO cockpit_costs (date, provider, call_count, total_tokens, total_cost_usd, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date, provider) DO UPDATE SET
+              call_count = excluded.call_count,
+              total_tokens = excluded.total_tokens,
+              total_cost_usd = excluded.total_cost_usd,
+              synced_at = excluded.synced_at
+          `).bind(
+            cost.date,
+            cost.provider,
+            cost.call_count,
+            cost.total_tokens,
+            cost.total_cost_usd,
+            now
+          ).run();
+        } catch (error) {
+          safeLog.error('[CockpitWebSocket] Failed to sync cost', {
+            date: cost.date,
+            provider: cost.provider,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+
+    // Sync recent requests (sample)
+    if (message.requests) {
+      for (const req of message.requests) {
+        try {
+          await this.env.DB.prepare(`
+            INSERT INTO cockpit_observability_requests (
+              timestamp, provider, agent, latency_ms,
+              input_tokens, output_tokens, cost_usd, status, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).bind(
+            req.timestamp,
+            req.provider,
+            req.agent || null,
+            req.latency_ms || null,
+            req.input_tokens || null,
+            req.output_tokens || null,
+            req.cost_usd || null,
+            req.status || null,
+            req.error_message || null
+          ).run();
+        } catch (error) {
+          safeLog.error('[CockpitWebSocket] Failed to insert request sample', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      // Cleanup old requests (keep last 1000)
+      await this.env.DB.prepare(`
+        DELETE FROM cockpit_observability_requests
+        WHERE id NOT IN (
+          SELECT id FROM cockpit_observability_requests
+          ORDER BY timestamp DESC LIMIT 1000
+        )
+      `).run();
+    }
+
+    // Sync budget status
+    if (message.budget_status) {
+      for (const budget of message.budget_status) {
+        try {
+          await this.env.DB.prepare(`
+            UPDATE cockpit_budget_status
+            SET daily_spent_usd = ?, weekly_spent_usd = ?,
+                monthly_spent_usd = ?, updated_at = ?
+            WHERE provider = ?
+          `).bind(
+            budget.daily_spent_usd,
+            budget.weekly_spent_usd || null,
+            budget.monthly_spent_usd || null,
+            now,
+            budget.provider
+          ).run();
+        } catch (error) {
+          safeLog.error('[CockpitWebSocket] Failed to update budget status', {
+            provider: budget.provider,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+
+    safeLog.log('[CockpitWebSocket] Observability data synced', {
+      providerHealthCount: message.provider_health?.length || 0,
+      costsCount: message.costs?.length || 0,
+      requestsCount: message.requests?.length || 0,
+    });
   }
 
   /**

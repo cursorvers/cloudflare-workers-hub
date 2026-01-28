@@ -4,6 +4,7 @@ import WebSocket from 'ws';
 import { loadConfig, type Config } from './config.js';
 import { MultiRepoMonitor, type GitStatus } from './git-monitor.js';
 import { TaskExecutor, type Task, type TaskResult } from './task-executor.js';
+import { ObservabilitySync } from './observability-sync.js';
 
 /**
  * FUGUE Cockpit Local Agent
@@ -13,18 +14,24 @@ class LocalAgent {
   private config: Config;
   private monitor: MultiRepoMonitor;
   private executor: TaskExecutor;
+  private observability: ObservabilitySync;
   private ws: WebSocket | null = null;
   private checkInterval: NodeJS.Timeout | null = null;
+  private observabilityInterval: NodeJS.Timeout | null = null;
   private reconnectTimeout: NodeJS.Timeout | null = null;
 
   constructor(configPath: string = './config.json') {
     this.config = loadConfig(configPath);
     this.monitor = new MultiRepoMonitor(this.config.repositories);
     this.executor = new TaskExecutor();
+    this.observability = new ObservabilitySync();
 
     console.log('✅ FUGUE Cockpit Local Agent 初期化完了');
     console.log(`📁 監視対象リポジトリ: ${this.config.repositories.length}件`);
     console.log(`🔄 チェック間隔: ${this.config.checkInterval / 1000}秒`);
+    if (this.observability.isAvailable()) {
+      console.log('📊 Observability 同期: 有効');
+    }
   }
 
   /**
@@ -149,6 +156,27 @@ class LocalAgent {
     this.checkInterval = setInterval(() => {
       this.checkRepositories();
     }, this.config.checkInterval);
+
+    // Observability 同期 (60秒ごと)
+    if (this.observability.isAvailable()) {
+      this.syncObservability(); // 初回
+      this.observabilityInterval = setInterval(() => {
+        this.syncObservability();
+      }, 60000);
+    }
+  }
+
+  /**
+   * Observability データを同期
+   */
+  private syncObservability(): void {
+    try {
+      const data = this.observability.collectSyncData();
+      this.send(data);
+      console.log('📊 Observability 同期完了');
+    } catch (error) {
+      console.error('Observability 同期エラー:', error);
+    }
   }
 
   /**
@@ -244,6 +272,13 @@ class LocalAgent {
       clearInterval(this.checkInterval);
       this.checkInterval = null;
     }
+
+    // Observability 同期を停止
+    if (this.observabilityInterval) {
+      clearInterval(this.observabilityInterval);
+      this.observabilityInterval = null;
+    }
+    this.observability.close();
 
     // 再接続タイマーをクリア
     if (this.reconnectTimeout) {
