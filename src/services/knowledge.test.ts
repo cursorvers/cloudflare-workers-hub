@@ -439,11 +439,15 @@ describe('Knowledge Service', () => {
         mockVectorizeResults
       );
 
-      // Mock D1 query for R2 path
-      const mockD1Result = { r2_path: 'knowledge/user123/abc123.md' };
+      // Mock D1 batch query for R2 paths (batch IN clause)
+      const mockD1BatchResult = {
+        results: [
+          { vectorize_id: 'knowledge_abc123', r2_path: 'knowledge/user123/abc123.md' },
+        ],
+      };
       const mockPrepare = {
         bind: vi.fn().mockReturnThis(),
-        first: vi.fn().mockResolvedValue(mockD1Result),
+        all: vi.fn().mockResolvedValue(mockD1BatchResult),
       };
       (mockEnv.DB!.prepare as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockPrepare);
 

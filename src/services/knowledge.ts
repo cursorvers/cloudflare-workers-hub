@@ -441,48 +441,65 @@ async function semanticSearch(
     });
 
     // Convert Vectorize results to KnowledgeItem
-    const items: KnowledgeItem[] = [];
+    // Batch approach: 1 D1 query + parallel R2 fetches (eliminates N+1)
+    const validMatches = results.matches.filter((m) => m.metadata);
+    const vectorizeIds = validMatches.map((m) => m.id);
 
-    for (const match of results.matches) {
-      if (!match.metadata) continue;
+    // Batch D1 query: get all r2_paths in a single query
+    const r2PathMap = new Map<string, string>();
+    if (env.OBSIDIAN_VAULT && env.DB && vectorizeIds.length > 0) {
+      try {
+        const placeholders = vectorizeIds.map(() => '?').join(',');
+        const dbResults = await env.DB.prepare(
+          `SELECT vectorize_id, r2_path FROM knowledge_items WHERE vectorize_id IN (${placeholders})`
+        )
+          .bind(...vectorizeIds)
+          .all<{ vectorize_id: string; r2_path: string }>();
 
-      // Fetch full content from R2 if available
-      let content = '';
-      if (env.OBSIDIAN_VAULT && env.DB) {
-        try {
-          // Get R2 path from D1
-          const dbResult = await env.DB.prepare(
-            'SELECT r2_path FROM knowledge_items WHERE vectorize_id = ?'
-          )
-            .bind(match.id)
-            .first<{ r2_path: string }>();
+        for (const row of dbResults.results) {
+          if (row.r2_path) {
+            r2PathMap.set(row.vectorize_id, row.r2_path);
+          }
+        }
+      } catch (error) {
+        safeLog.warn('[Knowledge] Batch D1 lookup failed', {
+          error: String(error),
+        });
+      }
+    }
 
-          if (dbResult?.r2_path) {
-            const r2Object = await env.OBSIDIAN_VAULT.get(dbResult.r2_path);
+    // Parallel R2 fetches for all matched paths
+    const contentMap = new Map<string, string>();
+    if (env.OBSIDIAN_VAULT && r2PathMap.size > 0) {
+      const fetchPromises = Array.from(r2PathMap.entries()).map(
+        async ([vectorizeId, r2Path]) => {
+          try {
+            const r2Object = await env.OBSIDIAN_VAULT!.get(r2Path);
             if (r2Object) {
               const fullContent = await r2Object.text();
-              // Extract content from markdown (remove frontmatter and title)
-              content = extractContentFromMarkdown(fullContent);
+              contentMap.set(vectorizeId, extractContentFromMarkdown(fullContent));
             }
+          } catch (error) {
+            safeLog.warn('[Knowledge] Failed to fetch content from R2', {
+              vectorizeId,
+              error: String(error),
+            });
           }
-        } catch (error) {
-          safeLog.warn('[Knowledge] Failed to fetch content from R2', {
-            vectorizeId: match.id,
-            error: String(error),
-          });
         }
-      }
-
-      items.push({
-        id: match.id.replace('knowledge_', ''),
-        userId: match.metadata.userId as string,
-        source: match.metadata.source as 'telegram' | 'whatsapp' | 'discord' | 'line' | 'manual',
-        type: match.metadata.type as 'voice_note' | 'conversation' | 'document',
-        title: match.metadata.title as string,
-        content: content || '(content not available)',
-        createdAt: match.metadata.createdAt as string,
-      });
+      );
+      await Promise.all(fetchPromises);
     }
+
+    // Build items from pre-fetched data
+    const items: KnowledgeItem[] = validMatches.map((match) => ({
+      id: match.id.replace('knowledge_', ''),
+      userId: match.metadata!.userId as string,
+      source: match.metadata!.source as 'telegram' | 'whatsapp' | 'discord' | 'line' | 'manual',
+      type: match.metadata!.type as 'voice_note' | 'conversation' | 'document',
+      title: match.metadata!.title as string,
+      content: contentMap.get(match.id) || '(content not available)',
+      createdAt: match.metadata!.createdAt as string,
+    }));
 
     return items;
   } catch (error) {

@@ -11,7 +11,7 @@
  * 7. 204 No Content responses
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   supabaseInsert,
   supabaseUpsert,
@@ -40,8 +40,13 @@ describe('Supabase Client', () => {
   };
 
   beforeEach(() => {
+    vi.useFakeTimers();
     vi.clearAllMocks();
     mockFetch.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('supabaseInsert', () => {
@@ -333,13 +338,16 @@ describe('Supabase Client', () => {
     it('should handle HTTP error responses with non-JSON error body', async () => {
       const errorText = 'Internal Server Error';
 
-      mockFetch.mockResolvedValueOnce({
+      // 500 is retryable, so it will be called 4 times (1 initial + 3 retries)
+      mockFetch.mockResolvedValue({
         ok: false,
         status: 500,
         text: async () => errorText,
       });
 
-      const result = await supabaseSelect(mockConfig, 'items', 'id=eq.test');
+      const promise = supabaseSelect(mockConfig, 'items', 'id=eq.test');
+      await vi.advanceTimersByTimeAsync(5000);
+      const result = await promise;
 
       expect(result.data).toEqual([]); // select returns empty array on error
       expect(result.error).not.toBeNull();
@@ -351,13 +359,16 @@ describe('Supabase Client', () => {
     it('should truncate very long error messages', async () => {
       const longErrorText = 'A'.repeat(500);
 
-      mockFetch.mockResolvedValueOnce({
+      // 500 is retryable, so it will be called 4 times
+      mockFetch.mockResolvedValue({
         ok: false,
         status: 500,
         text: async () => longErrorText,
       });
 
-      const result = await supabaseInsert(mockConfig, 'items', {});
+      const promise = supabaseInsert(mockConfig, 'items', {});
+      await vi.advanceTimersByTimeAsync(5000);
+      const result = await promise;
 
       expect(result.error?.message).toHaveLength(200);
       expect(result.error?.message).toBe('A'.repeat(200));
@@ -398,10 +409,13 @@ describe('Supabase Client', () => {
   });
 
   describe('Network Errors', () => {
-    it('should handle network errors with NETWORK_ERROR code', async () => {
-      mockFetch.mockRejectedValueOnce(new Error('Failed to fetch'));
+    it('should handle network errors with NETWORK_ERROR code after retries', async () => {
+      // Network errors are retryable (4 attempts total)
+      mockFetch.mockRejectedValue(new Error('Failed to fetch'));
 
-      const result = await supabaseInsert(mockConfig, 'items', { test: 'data' });
+      const promise = supabaseInsert(mockConfig, 'items', { test: 'data' });
+      await vi.advanceTimersByTimeAsync(5000);
+      const result = await promise;
 
       expect(result.data).toBeNull();
       expect(result.error).not.toBeNull();
@@ -410,27 +424,155 @@ describe('Supabase Client', () => {
       expect(result.error?.details).toBe('');
     });
 
-    it('should handle timeout errors', async () => {
-      mockFetch.mockRejectedValueOnce(new Error('Request timeout'));
+    it('should handle timeout errors after retries', async () => {
+      mockFetch.mockRejectedValue(new Error('Request timeout'));
 
-      const result = await supabaseUpdate(
+      const promise = supabaseUpdate(
         mockConfig,
         'items',
         { status: 'updated' },
         'id=eq.123'
       );
+      await vi.advanceTimersByTimeAsync(5000);
+      const result = await promise;
 
       expect(result.error?.code).toBe('NETWORK_ERROR');
       expect(result.error?.message).toContain('Request timeout');
     });
 
-    it('should handle connection refused errors', async () => {
-      mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    it('should handle connection refused errors after retries', async () => {
+      mockFetch.mockRejectedValue(new Error('ECONNREFUSED'));
 
-      const result = await supabaseSelect(mockConfig, 'items', '');
+      const promise = supabaseSelect(mockConfig, 'items', '');
+      await vi.advanceTimersByTimeAsync(5000);
+      const result = await promise;
 
       expect(result.data).toEqual([]);
       expect(result.error?.code).toBe('NETWORK_ERROR');
+    });
+
+    it('should recover on retry after transient network failure', async () => {
+      mockFetch
+        .mockRejectedValueOnce(new Error('network error'))
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'recovered' }),
+        });
+
+      const promise = supabaseInsert(mockConfig, 'items', { test: 'data' });
+      await vi.advanceTimersByTimeAsync(600);
+      const result = await promise;
+
+      expect(result.data).toEqual({ id: 'recovered' });
+      expect(result.error).toBeNull();
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('Retry Behavior', () => {
+    it('should retry on 500 and succeed on second attempt', async () => {
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 500,
+          text: async () => 'Server Error',
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'success' }),
+        });
+
+      const promise = supabaseInsert(mockConfig, 'test', { data: 1 });
+      await vi.advanceTimersByTimeAsync(600);
+      const result = await promise;
+
+      expect(result.data).toEqual({ id: 'success' });
+      expect(result.error).toBeNull();
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('should retry on 429 rate limit', async () => {
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 429,
+          text: async () => JSON.stringify({ message: 'Rate limited', code: '429', details: '' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => [{ id: '1' }],
+        });
+
+      const promise = supabaseSelect(mockConfig, 'items', 'limit=1');
+      await vi.advanceTimersByTimeAsync(600);
+      const result = await promise;
+
+      expect(result.data).toEqual([{ id: '1' }]);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('should NOT retry on 400 client error', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({ message: 'Bad Request', code: '400', details: '' }),
+      });
+
+      const result = await supabaseInsert(mockConfig, 'test', { bad: 'data' });
+
+      expect(result.error?.code).toBe('400');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('should NOT retry on 401 unauthorized', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        text: async () => JSON.stringify({ message: 'Unauthorized', code: '401', details: '' }),
+      });
+
+      const result = await supabaseInsert(mockConfig, 'test', {});
+
+      expect(result.error?.code).toBe('401');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('should include AbortController signal for timeout', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ id: '1' }),
+      });
+
+      await supabaseInsert(mockConfig, 'test', { data: 1 });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          signal: expect.any(AbortSignal),
+        })
+      );
+    });
+
+    it('should handle AbortError as timeout and retry', async () => {
+      const abortError = new DOMException('The operation was aborted', 'AbortError');
+      mockFetch
+        .mockRejectedValueOnce(abortError)
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'after-timeout' }),
+        });
+
+      const promise = supabaseInsert(mockConfig, 'test', { data: 1 });
+      await vi.advanceTimersByTimeAsync(600);
+      const result = await promise;
+
+      expect(result.data).toEqual({ id: 'after-timeout' });
+      expect(mockFetch).toHaveBeenCalledTimes(2);
     });
   });
 

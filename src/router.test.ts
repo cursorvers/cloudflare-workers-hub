@@ -64,9 +64,14 @@ describe('Router Utilities', () => {
       expect(detectSource(request)).toBe('slack');
     });
 
-    it('should match first source when path contains multiple keywords', () => {
-      // Since .includes() checks sequentially, /slack-discord would match 'slack' first
+    it('should not match partial segment names', () => {
+      // Map-based lookup requires exact segment match: /slack-discord is not /slack
       const request = new Request('http://localhost/slack-discord');
+      expect(detectSource(request)).toBe('unknown');
+    });
+
+    it('should match first source when path has multiple source segments', () => {
+      const request = new Request('http://localhost/slack/discord');
       expect(detectSource(request)).toBe('slack');
     });
 
