@@ -52,14 +52,26 @@ function hasFlag(flag: string): boolean {
 }
 
 const isDryRun = hasFlag('--dry-run');
-const route = (getArg('--route') || 'a') as 'a' | 'b' | 'both';
+const routeRaw = getArg('--route') || 'a';
+const VALID_ROUTES = ['a', 'b', 'both'] as const;
+if (!VALID_ROUTES.includes(routeRaw as typeof VALID_ROUTES[number])) {
+  console.error(`Invalid route: "${routeRaw}". Use: a, b, or both`);
+  process.exit(1);
+}
+const route = routeRaw as 'a' | 'b' | 'both';
 const inputFile = getArg('--file');
 const topic = getArg('--topic');
 const title = getArg('--title');
 const source = getArg('--source'); // 'supabase' | null
-const digestType = getArg('--digest') as 'weekly' | 'monthly' | 'annual' | 'actions' | null;
+const VALID_DIGEST_TYPES = ['weekly', 'monthly', 'annual', 'actions'] as const;
+const digestTypeRaw = getArg('--digest');
+if (digestTypeRaw && !VALID_DIGEST_TYPES.includes(digestTypeRaw as typeof VALID_DIGEST_TYPES[number])) {
+  console.error(`Invalid digest type: "${digestTypeRaw}". Use: weekly, monthly, annual, or actions`);
+  process.exit(1);
+}
+const digestType = digestTypeRaw as 'weekly' | 'monthly' | 'annual' | 'actions' | null;
 const appendTo = getArg('--append-to');
-const outputDir = getArg('--output') || os.tmpdir();
+const outputDir = path.resolve(getArg('--output') || os.tmpdir());
 
 // ============================================================================
 // Types
@@ -181,9 +193,16 @@ async function resolveSupabaseDigest(): Promise<{ markdown: string; resolvedTitl
   const resolvedTitle = title || `${typeLabels[report.type] || report.type}: ${report.period_start.slice(0, 10)}`;
 
   // Parse the content JSON into the expected digest structure
-  const content = typeof report.content === 'string'
-    ? JSON.parse(report.content)
-    : report.content;
+  let content: unknown;
+  if (typeof report.content === 'string') {
+    try {
+      content = JSON.parse(report.content);
+    } catch {
+      throw new Error(`Failed to parse digest report content as JSON (report id: ${report.id})`);
+    }
+  } else {
+    content = report.content;
+  }
 
   let markdown: string;
 
@@ -356,12 +375,6 @@ async function main(): Promise<void> {
   console.log(`  Route: ${route}`);
   if (isDryRun) console.log('  Mode: DRY RUN');
   console.log('');
-
-  // Validate route
-  if (!['a', 'b', 'both'].includes(route)) {
-    console.error(`Invalid route: ${route}. Use: a, b, or both`);
-    process.exit(1);
-  }
 
   // Resolve input
   console.log('Resolving input...');

@@ -8,6 +8,7 @@
  */
 
 import { z } from 'zod';
+import { homedir } from 'node:os';
 
 // ============================================================================
 // Schemas
@@ -40,7 +41,7 @@ const ProjectInfoSchema = z.object({
 
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const GOOGLE_CLOUDRESOURCEMANAGER_API = 'https://cloudresourcemanager.googleapis.com/v1/projects';
-const DEFAULT_CREDENTIALS_PATH = `${process.env.HOME}/.config/gcloud/application_default_credentials.json`;
+const DEFAULT_CREDENTIALS_PATH = `${homedir()}/.config/gcloud/application_default_credentials.json`;
 
 // ============================================================================
 // Public API

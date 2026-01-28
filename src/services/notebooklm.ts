@@ -122,35 +122,36 @@ export async function addSources(
   sources: NotebookSource[]
 ): Promise<string[]> {
   const validated = NotebookLMConfigSchema.parse(config);
-  const results: string[] = [];
 
-  for (const source of sources) {
-    const validatedSource = NotebookSourceSchema.parse(source);
-    const sourceBody = buildSourceBody(validatedSource);
+  const results = await Promise.all(
+    sources.map(async (source) => {
+      const validatedSource = NotebookSourceSchema.parse(source);
+      const sourceBody = buildSourceBody(validatedSource);
 
-    const response = await fetchWithTimeout(
-      `https://${validated.location}-discoveryengine.googleapis.com/v1alpha/${notebookName}/sources`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(sourceBody),
-      }
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-        `Failed to add source (${response.status}): ${errorText.substring(0, 300)}`
+      const response = await fetchWithTimeout(
+        `https://${validated.location}-discoveryengine.googleapis.com/v1alpha/${notebookName}/sources`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(sourceBody),
+        }
       );
-    }
 
-    const data = await response.json();
-    const { name } = AddSourceResponseSchema.parse(data);
-    results.push(name);
-  }
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(
+          `Failed to add source (${response.status}): ${errorText.substring(0, 300)}`
+        );
+      }
+
+      const data = await response.json();
+      const { name } = AddSourceResponseSchema.parse(data);
+      return name;
+    })
+  );
 
   return results;
 }
