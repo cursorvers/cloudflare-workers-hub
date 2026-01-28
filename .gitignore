@@ -11,6 +11,9 @@ dist/
 .env.local
 .env.*.local
 
+# Test coverage
+coverage/
+
 # Logs
 logs/
 *.log
