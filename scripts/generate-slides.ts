@@ -325,7 +325,6 @@ async function executeRouteB(
   const config = {
     projectNumber,
     location: 'us',
-    appId: 'default',
   };
 
   // Create notebook

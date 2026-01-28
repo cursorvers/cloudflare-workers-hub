@@ -5,8 +5,9 @@
  * Generates slide decks via `notebooklm-py` CLI (no REST endpoint yet).
  *
  * API: https://{location}-discoveryengine.googleapis.com/v1alpha/
- *       projects/{projectNumber}/locations/{location}/
- *       notebookLmApps/{appId}/notebooks
+ *       projects/{projectNumber}/locations/{location}/notebooks
+ *
+ * Docs: https://docs.cloud.google.com/gemini/enterprise/notebooklm-enterprise/docs/api-notebooks
  *
  * No npm deps — fetch-based, Zod validation.
  */
@@ -20,7 +21,6 @@ import { z } from 'zod';
 const NotebookLMConfigSchema = z.object({
   projectNumber: z.string().min(1, 'GCP project number is required'),
   location: z.string().min(1).default('us'),
-  appId: z.string().min(1).default('default'),
 });
 
 export type NotebookLMConfig = z.infer<typeof NotebookLMConfigSchema>;
@@ -45,10 +45,15 @@ export type NotebookSource = z.infer<typeof NotebookSourceSchema>;
 
 const CreateNotebookResponseSchema = z.object({
   name: z.string().min(1),
+  notebookId: z.string().optional(),
 });
 
-const AddSourceResponseSchema = z.object({
-  name: z.string().min(1),
+const BatchCreateSourcesResponseSchema = z.object({
+  sources: z.array(z.object({
+    name: z.string().min(1),
+    sourceId: z.object({ id: z.string() }).optional(),
+    title: z.string().optional(),
+  })).min(1),
 });
 
 const SlideDeckResultSchema = z.object({
@@ -107,7 +112,7 @@ export async function createNotebook(
 }
 
 /**
- * Add sources to an existing notebook.
+ * Add sources to an existing notebook via batchCreate.
  *
  * @param config - NotebookLM project config
  * @param accessToken - Google OAuth access token
@@ -122,38 +127,39 @@ export async function addSources(
   sources: NotebookSource[]
 ): Promise<string[]> {
   const validated = NotebookLMConfigSchema.parse(config);
+  const userContents = sources.map((source) => {
+    const validatedSource = NotebookSourceSchema.parse(source);
+    return buildSourceBody(validatedSource);
+  });
 
-  const results = await Promise.all(
-    sources.map(async (source) => {
-      const validatedSource = NotebookSourceSchema.parse(source);
-      const sourceBody = buildSourceBody(validatedSource);
+  // Extract notebook ID from full resource name
+  // e.g. "projects/123/locations/us/notebooks/abc" → "abc"
+  const notebookId = notebookName.split('/').pop();
 
-      const response = await fetchWithTimeout(
-        `https://${validated.location}-discoveryengine.googleapis.com/v1alpha/${notebookName}/sources`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(sourceBody),
-        }
-      );
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(
-          `Failed to add source (${response.status}): ${errorText.substring(0, 300)}`
-        );
-      }
-
-      const data = await response.json();
-      const { name } = AddSourceResponseSchema.parse(data);
-      return name;
-    })
+  const response = await fetchWithTimeout(
+    `https://${validated.location}-discoveryengine.googleapis.com/v1alpha/` +
+    `projects/${validated.projectNumber}/locations/${validated.location}/` +
+    `notebooks/${notebookId}/sources:batchCreate`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ userContents }),
+    }
   );
 
-  return results;
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Failed to add sources (${response.status}): ${errorText.substring(0, 300)}`
+    );
+  }
+
+  const data = await response.json();
+  const { sources: createdSources } = BatchCreateSourcesResponseSchema.parse(data);
+  return createdSources.map((s) => s.name);
 }
 
 // ============================================================================
@@ -242,8 +248,7 @@ export async function downloadSlideDeck(
 function buildBaseUrl(config: NotebookLMConfig): string {
   return (
     `https://${config.location}-discoveryengine.googleapis.com/v1alpha/` +
-    `projects/${config.projectNumber}/locations/${config.location}/` +
-    `notebookLmApps/${config.appId}`
+    `projects/${config.projectNumber}/locations/${config.location}`
   );
 }
 
@@ -251,21 +256,24 @@ function buildSourceBody(source: NotebookSource): Record<string, unknown> {
   switch (source.type) {
     case 'text':
       return {
-        inlineSource: {
-          title: source.title,
+        textContent: {
+          sourceName: source.title,
           content: source.content,
         },
       };
     case 'url':
       return {
-        urlSource: {
+        webContent: {
           url: source.url,
+          sourceName: source.url,
         },
       };
     case 'googleSlides':
       return {
-        driveSource: {
-          resourceId: source.resourceId,
+        googleDriveContent: {
+          documentId: source.resourceId,
+          mimeType: 'application/vnd.google-apps.presentation',
+          sourceName: `Slides: ${source.resourceId}`,
         },
       };
   }
