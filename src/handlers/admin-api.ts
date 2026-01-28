@@ -10,6 +10,8 @@ import { Env } from '../types';
 import { safeLog, maskUserId } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
 import { verifyAPIKey, hashAPIKey } from '../utils/api-auth';
+import { validateRequestBody } from '../schemas/validation-helper';
+import { CreateAPIKeyMappingSchema, DeleteAPIKeyMappingSchema, CreateAPIKeyMappingInput, DeleteAPIKeyMappingInput } from '../schemas/admin';
 
 export async function handleAdminAPI(request: Request, env: Env, path: string): Promise<Response> {
   // Verify API key with admin scope
@@ -30,24 +32,12 @@ export async function handleAdminAPI(request: Request, env: Env, path: string): 
   // POST /api/admin/apikey/mapping - Create API key -> userId mapping
   if (path === '/api/admin/apikey/mapping' && request.method === 'POST') {
     try {
-      const body = await request.json() as { apiKey: string; userId: string; role?: string };
-
-      if (!body.apiKey || !body.userId) {
-        return new Response(JSON.stringify({ error: 'Missing required fields: apiKey, userId' }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json' },
-        });
+      const validation = await validateRequestBody(request, CreateAPIKeyMappingSchema, '/api/admin/apikey/mapping');
+      if (!validation.success) {
+        return validation.response;
       }
 
-      // Validate role if provided
-      const validRoles = ['service', 'user'] as const;
-      const role = body.role || 'user';
-      if (!validRoles.includes(role as typeof validRoles[number])) {
-        return new Response(JSON.stringify({ error: 'Invalid role. Must be "service" or "user"' }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
+      const body = validation.data as CreateAPIKeyMappingInput;
 
       if (!env.CACHE) {
         return new Response(JSON.stringify({ error: 'CACHE KV namespace not available' }), {
@@ -59,20 +49,20 @@ export async function handleAdminAPI(request: Request, env: Env, path: string): 
       const keyHash = await hashAPIKey(body.apiKey);
       const mappingKey = `apikey:mapping:${keyHash}`;
 
-      const mappingValue = { userId: body.userId, role };
+      const mappingValue = { userId: body.userId, role: body.role };
       await env.CACHE.put(mappingKey, JSON.stringify(mappingValue));
 
       safeLog.log('[Admin API] Created API key mapping', {
         keyHash: keyHash.substring(0, 8),
         userId: maskUserId(body.userId),
-        role,
+        role: body.role,
       });
 
       return new Response(JSON.stringify({
         success: true,
         keyHash: keyHash.substring(0, 8),
         userId: body.userId,
-        role,
+        role: body.role,
       }), {
         status: 201,
         headers: { 'Content-Type': 'application/json' },
@@ -92,14 +82,12 @@ export async function handleAdminAPI(request: Request, env: Env, path: string): 
   // DELETE /api/admin/apikey/mapping - Delete API key mapping
   if (path === '/api/admin/apikey/mapping' && request.method === 'DELETE') {
     try {
-      const body = await request.json() as { apiKey: string };
-
-      if (!body.apiKey) {
-        return new Response(JSON.stringify({ error: 'Missing required field: apiKey' }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json' },
-        });
+      const validation = await validateRequestBody(request, DeleteAPIKeyMappingSchema, '/api/admin/apikey/mapping');
+      if (!validation.success) {
+        return validation.response;
       }
+
+      const body = validation.data as DeleteAPIKeyMappingInput;
 
       if (!env.CACHE) {
         return new Response(JSON.stringify({ error: 'CACHE KV namespace not available' }), {

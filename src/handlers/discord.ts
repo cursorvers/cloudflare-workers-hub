@@ -8,6 +8,7 @@
 import { NormalizedEvent, Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { handleGenericWebhook } from './generic-webhook';
+import { DiscordWebhookSchema } from '../schemas/discord';
 
 export interface DiscordInteraction {
   type: number; // 1=PING, 2=APPLICATION_COMMAND, 3=MESSAGE_COMPONENT
@@ -261,12 +262,30 @@ export async function handleDiscordWebhook(request: Request, env: Env, ctx?: Exe
     }
   }
 
-  let payload: DiscordInteraction;
+  let rawPayload: unknown;
   try {
-    payload = JSON.parse(body);
+    rawPayload = JSON.parse(body);
   } catch {
-    return new Response('Invalid JSON', { status: 400 });
+    return new Response(
+      JSON.stringify({ error: 'Invalid JSON in request body' }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
   }
+
+  // Validate payload with Zod
+  const validation = DiscordWebhookSchema.safeParse(rawPayload);
+  if (!validation.success) {
+    safeLog.warn('[Discord] Validation failed', { errors: validation.error.errors });
+    return new Response(
+      JSON.stringify({
+        error: 'Validation failed',
+        details: validation.error.errors,
+      }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  const payload = validation.data as DiscordInteraction;
 
   // Handle Discord PING for verification
   if (isPing(payload)) {

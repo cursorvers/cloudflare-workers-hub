@@ -17,6 +17,7 @@ import { safeLog } from '../utils/log-sanitizer';
 import { storeKnowledge, KnowledgeItem } from './knowledge';
 import { processLifelog, RawLifelogInput } from './lifelog-processor';
 import { supabaseUpsert, SupabaseConfig } from './supabase-client';
+import { CircuitBreaker } from '../utils/circuit-breaker';
 
 // ============================================================================
 // Zod Schemas
@@ -107,6 +108,13 @@ const MAX_RETRIES = 3;
 const INITIAL_RETRY_DELAY = 1000; // 1 second
 const MAX_AUDIO_DURATION = 7200; // 2 hours in seconds
 const REQUEST_TIMEOUT = 30000; // 30 seconds
+
+// Circuit breaker for Limitless API
+const limitlessCircuitBreaker = new CircuitBreaker('LimitlessAPI', {
+  failureThreshold: 5,
+  resetTimeoutMs: 60_000, // 1 minute
+  successThreshold: 2,
+});
 
 // ============================================================================
 // Public API Functions
@@ -622,61 +630,63 @@ export async function syncToSupabase(
 // ============================================================================
 
 /**
- * Fetch with automatic retry on failure
+ * Fetch with automatic retry on failure, wrapped in circuit breaker
  */
 async function fetchWithRetry(
   url: string,
   options: RequestInit,
   attempt = 1
 ): Promise<Response> {
-  try {
-    // Add timeout to fetch
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+  return limitlessCircuitBreaker.execute(async () => {
+    try {
+      // Add timeout to fetch
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
 
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
 
-    clearTimeout(timeoutId);
+      clearTimeout(timeoutId);
 
-    // Check for HTTP errors
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(
-        `HTTP ${response.status}: ${response.statusText}. Body: ${errorBody.substring(0, 200)}`
-      );
-    }
+      // Check for HTTP errors
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(
+          `HTTP ${response.status}: ${response.statusText}. Body: ${errorBody.substring(0, 200)}`
+        );
+      }
 
-    return response;
-  } catch (error) {
-    if (attempt >= MAX_RETRIES) {
-      safeLog.error('[Limitless] Max retries exceeded', {
+      return response;
+    } catch (error) {
+      if (attempt >= MAX_RETRIES) {
+        safeLog.error('[Limitless] Max retries exceeded', {
+          url,
+          attempt,
+          error: String(error),
+        });
+        throw error;
+      }
+
+      // Don't retry on 4xx errors (client errors)
+      if (error instanceof Error && error.message.includes('HTTP 4')) {
+        throw error;
+      }
+
+      // Exponential backoff
+      const delay = INITIAL_RETRY_DELAY * Math.pow(2, attempt - 1);
+      safeLog.warn('[Limitless] Retry attempt', {
         url,
         attempt,
+        nextDelay: delay,
         error: String(error),
       });
-      throw error;
+
+      await sleep(delay);
+      return fetchWithRetry(url, options, attempt + 1);
     }
-
-    // Don't retry on 4xx errors (client errors)
-    if (error instanceof Error && error.message.includes('HTTP 4')) {
-      throw error;
-    }
-
-    // Exponential backoff
-    const delay = INITIAL_RETRY_DELAY * Math.pow(2, attempt - 1);
-    safeLog.warn('[Limitless] Retry attempt', {
-      url,
-      attempt,
-      nextDelay: delay,
-      error: String(error),
-    });
-
-    await sleep(delay);
-    return fetchWithRetry(url, options, attempt + 1);
-  }
+  });
 }
 
 /**

@@ -161,6 +161,7 @@ export async function handleLimitlessWebhook(
       maxAgeHours: syncRequest.maxAgeHours,
       includeAudio: syncRequest.includeAudio,
       maxItems: 5, // Workers Free Tier: 50 subrequest limit (5 items × ~8 calls + overhead)
+      syncSource: 'webhook',
     });
 
     const duration = Date.now() - startTime;

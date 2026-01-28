@@ -13,6 +13,7 @@
  */
 
 import { z } from 'zod';
+import { CircuitBreaker } from '../utils/circuit-breaker';
 
 // ============================================================================
 // Schemas
@@ -70,6 +71,13 @@ export type SlideDeckResult = z.infer<typeof SlideDeckResultSchema>;
 const NOTEBOOKLM_PY_BIN = 'notebooklm';
 const REQUEST_TIMEOUT = 30_000;
 
+// Circuit breaker for NotebookLM API
+const notebooklmCircuitBreaker = new CircuitBreaker('NotebookLMAPI', {
+  failureThreshold: 5,
+  resetTimeoutMs: 60_000, // 1 minute
+  successThreshold: 2,
+});
+
 // ============================================================================
 // Public API — REST
 // ============================================================================
@@ -90,25 +98,27 @@ export async function createNotebook(
   const validated = NotebookLMConfigSchema.parse(config);
   const baseUrl = buildBaseUrl(validated);
 
-  const response = await fetchWithTimeout(`${baseUrl}/notebooks`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ title }),
+  return notebooklmCircuitBreaker.execute(async () => {
+    const response = await fetchWithTimeout(`${baseUrl}/notebooks`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ title }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `Failed to create notebook (${response.status}): ${errorText.substring(0, 300)}`
+      );
+    }
+
+    const data = await response.json();
+    const { name } = CreateNotebookResponseSchema.parse(data);
+    return name;
   });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(
-      `Failed to create notebook (${response.status}): ${errorText.substring(0, 300)}`
-    );
-  }
-
-  const data = await response.json();
-  const { name } = CreateNotebookResponseSchema.parse(data);
-  return name;
 }
 
 /**
@@ -136,30 +146,32 @@ export async function addSources(
   // e.g. "projects/123/locations/us/notebooks/abc" → "abc"
   const notebookId = notebookName.split('/').pop();
 
-  const response = await fetchWithTimeout(
-    `https://${validated.location}-discoveryengine.googleapis.com/v1alpha/` +
-    `projects/${validated.projectNumber}/locations/${validated.location}/` +
-    `notebooks/${notebookId}/sources:batchCreate`,
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ userContents }),
-    }
-  );
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(
-      `Failed to add sources (${response.status}): ${errorText.substring(0, 300)}`
+  return notebooklmCircuitBreaker.execute(async () => {
+    const response = await fetchWithTimeout(
+      `https://${validated.location}-discoveryengine.googleapis.com/v1alpha/` +
+      `projects/${validated.projectNumber}/locations/${validated.location}/` +
+      `notebooks/${notebookId}/sources:batchCreate`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ userContents }),
+      }
     );
-  }
 
-  const data = await response.json();
-  const { sources: createdSources } = BatchCreateSourcesResponseSchema.parse(data);
-  return createdSources.map((s) => s.name);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `Failed to add sources (${response.status}): ${errorText.substring(0, 300)}`
+      );
+    }
+
+    const data = await response.json();
+    const { sources: createdSources } = BatchCreateSourcesResponseSchema.parse(data);
+    return createdSources.map((s) => s.name);
+  });
 }
 
 // ============================================================================

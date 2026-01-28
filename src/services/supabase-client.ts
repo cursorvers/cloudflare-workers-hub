@@ -6,6 +6,7 @@
  */
 
 import { safeLog } from '../utils/log-sanitizer';
+import { CircuitBreaker } from '../utils/circuit-breaker';
 
 // ============================================================================
 // Types
@@ -142,6 +143,13 @@ const REQUEST_TIMEOUT_MS = 10_000;
 /** HTTP status codes that are safe to retry */
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 
+// Circuit breaker for Supabase API
+const supabaseCircuitBreaker = new CircuitBreaker('SupabaseAPI', {
+  failureThreshold: 5,
+  resetTimeoutMs: 60_000, // 1 minute
+  successThreshold: 2,
+});
+
 interface RequestOptions {
   method: string;
   headers?: Record<string, string>;
@@ -158,104 +166,106 @@ async function supabaseRequest<T>(
     ? `${config.url}/rest/v1/${table}?${options.queryParams}`
     : `${config.url}/rest/v1/${table}`;
 
-  let lastError: SupabaseError | null = null;
+  return supabaseCircuitBreaker.execute(async () => {
+    let lastError: SupabaseError | null = null;
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    if (attempt > 0) {
-      const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      safeLog.warn('[Supabase] Retrying request', {
-        table,
-        method: options.method,
-        attempt,
-      });
-    }
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        safeLog.warn('[Supabase] Retrying request', {
+          table,
+          method: options.method,
+          attempt,
+        });
+      }
 
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-      const response = await fetch(url, {
-        method: options.method,
-        headers: {
-          'Authorization': `Bearer ${config.serviceRoleKey}`,
-          'apikey': config.serviceRoleKey,
-          'Content-Type': 'application/json',
-          ...options.headers,
-        },
-        body: options.body,
-        signal: controller.signal,
-      });
+        const response = await fetch(url, {
+          method: options.method,
+          headers: {
+            'Authorization': `Bearer ${config.serviceRoleKey}`,
+            'apikey': config.serviceRoleKey,
+            'Content-Type': 'application/json',
+            ...options.headers,
+          },
+          body: options.body,
+          signal: controller.signal,
+        });
 
-      clearTimeout(timeoutId);
+        clearTimeout(timeoutId);
 
-      if (!response.ok) {
-        const errorBody = await response.text();
-        let errorData: SupabaseError;
-        try {
-          errorData = JSON.parse(errorBody);
-        } catch {
-          errorData = {
-            message: errorBody.substring(0, 200),
-            code: String(response.status),
-            details: '',
-          };
+        if (!response.ok) {
+          const errorBody = await response.text();
+          let errorData: SupabaseError;
+          try {
+            errorData = JSON.parse(errorBody);
+          } catch {
+            errorData = {
+              message: errorBody.substring(0, 200),
+              code: String(response.status),
+              details: '',
+            };
+          }
+
+          // Retry on transient errors
+          if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < MAX_RETRIES) {
+            lastError = errorData;
+            continue;
+          }
+
+          safeLog.error('[Supabase] Request failed', {
+            table,
+            method: options.method,
+            status: response.status,
+            error: errorData.message,
+            attempts: attempt + 1,
+          });
+
+          return { data: null, error: errorData };
         }
 
-        // Retry on transient errors
-        if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < MAX_RETRIES) {
-          lastError = errorData;
+        // Handle empty responses (204 No Content)
+        if (response.status === 204) {
+          return { data: null, error: null };
+        }
+
+        const data = await response.json() as T;
+        return { data, error: null };
+      } catch (error) {
+        const isTimeout = error instanceof DOMException && error.name === 'AbortError';
+        const errorMessage = isTimeout ? 'Request timeout' : String(error);
+
+        lastError = {
+          message: errorMessage,
+          code: isTimeout ? 'TIMEOUT' : 'NETWORK_ERROR',
+          details: '',
+        };
+
+        // Retry on network/timeout errors
+        if (attempt < MAX_RETRIES) {
           continue;
         }
 
-        safeLog.error('[Supabase] Request failed', {
+        safeLog.error('[Supabase] Network error', {
           table,
           method: options.method,
-          status: response.status,
-          error: errorData.message,
+          error: errorMessage,
           attempts: attempt + 1,
         });
-
-        return { data: null, error: errorData };
       }
-
-      // Handle empty responses (204 No Content)
-      if (response.status === 204) {
-        return { data: null, error: null };
-      }
-
-      const data = await response.json() as T;
-      return { data, error: null };
-    } catch (error) {
-      const isTimeout = error instanceof DOMException && error.name === 'AbortError';
-      const errorMessage = isTimeout ? 'Request timeout' : String(error);
-
-      lastError = {
-        message: errorMessage,
-        code: isTimeout ? 'TIMEOUT' : 'NETWORK_ERROR',
-        details: '',
-      };
-
-      // Retry on network/timeout errors
-      if (attempt < MAX_RETRIES) {
-        continue;
-      }
-
-      safeLog.error('[Supabase] Network error', {
-        table,
-        method: options.method,
-        error: errorMessage,
-        attempts: attempt + 1,
-      });
     }
-  }
 
-  return {
-    data: null,
-    error: lastError ?? {
-      message: 'Request failed after retries',
-      code: 'MAX_RETRIES_EXCEEDED',
-      details: '',
-    },
-  };
+    return {
+      data: null,
+      error: lastError ?? {
+        message: 'Request failed after retries',
+        code: 'MAX_RETRIES_EXCEEDED',
+        details: '',
+      },
+    };
+  });
 }

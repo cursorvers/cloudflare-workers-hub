@@ -33,7 +33,23 @@ export interface DaemonState extends DaemonRegistration {
 const DAEMON_TTL_SEC = 60; // Consider daemon stale if no heartbeat for 60 seconds
 
 /**
- * Register a new daemon
+ * Register a new daemon in the system
+ *
+ * @param env - Cloudflare Workers environment bindings
+ * @param registration - Daemon registration data including ID, version, and capabilities
+ * @returns Promise resolving to registration result with daemon ID and timestamp
+ * @throws Error if CACHE (KV) is not configured
+ *
+ * @example
+ * ```typescript
+ * const result = await registerDaemon(env, {
+ *   daemonId: 'daemon-1',
+ *   version: '1.0.0',
+ *   capabilities: ['process-webhooks'],
+ *   pollInterval: 5000,
+ *   registeredAt: new Date().toISOString()
+ * });
+ * ```
  */
 export async function registerDaemon(
   env: Env,
@@ -70,7 +86,12 @@ export async function registerDaemon(
 }
 
 /**
- * Update daemon heartbeat
+ * Update daemon heartbeat to indicate health status
+ *
+ * @param env - Cloudflare Workers environment bindings
+ * @param heartbeat - Heartbeat data including status and task processing info
+ * @returns Promise resolving to success status
+ * @throws Error if CACHE (KV) is not configured
  */
 export async function updateHeartbeat(
   env: Env,
@@ -105,7 +126,13 @@ export async function updateHeartbeat(
 /**
  * Get health status of all daemons
  *
- * OPTIMIZED: Uses Promise.all for parallel KV reads instead of sequential N+1
+ * @param env - Cloudflare Workers environment bindings
+ * @returns Promise resolving to daemon health metrics
+ * @throws Error if CACHE (KV) is not configured
+ *
+ * @remarks
+ * OPTIMIZED: Uses Promise.all for parallel KV reads instead of sequential N+1.
+ * Automatically cleans up expired and stale daemons.
  */
 export async function getDaemonHealth(env: Env): Promise<{
   activeDaemons: DaemonState[];

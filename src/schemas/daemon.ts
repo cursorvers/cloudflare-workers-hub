@@ -5,7 +5,11 @@
 import { z } from 'zod';
 
 /**
- * Schema for daemon registration
+ * Zod schema for daemon registration payload validation
+ *
+ * @remarks
+ * Validates daemon registration data including ID, version, capabilities,
+ * poll interval (1s-5min), and registration timestamp.
  */
 export const DaemonRegistrationSchema = z.object({
   daemonId: z.string().min(1, 'Daemon ID is required'),
@@ -18,7 +22,11 @@ export const DaemonRegistrationSchema = z.object({
 export type DaemonRegistrationInput = z.infer<typeof DaemonRegistrationSchema>;
 
 /**
- * Schema for daemon heartbeat
+ * Zod schema for daemon heartbeat payload validation
+ *
+ * @remarks
+ * Validates heartbeat data including status (healthy/degraded/unhealthy),
+ * task processing metrics, and timestamp.
  */
 export const DaemonHeartbeatSchema = z.object({
   daemonId: z.string().min(1, 'Daemon ID is required'),

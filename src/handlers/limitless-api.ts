@@ -19,6 +19,7 @@ const SyncRequestSchema = z.object({
   userId: z.string().min(1, 'User ID is required'),
   maxAgeHours: z.number().min(1).max(168).optional().default(24),
   includeAudio: z.boolean().optional().default(false),
+  syncSource: z.enum(['webhook', 'backup', 'manual']).optional(),
 });
 
 /**

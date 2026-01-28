@@ -9,6 +9,7 @@ import { NormalizedEvent, Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { handleGenericWebhook } from './generic-webhook';
 import { notifyDiscord, notifications } from './notifications';
+import { ClawdBotMessageSchema } from '../schemas/clawdbot';
 
 export interface ClawdBotMessage {
   id: string;
@@ -136,19 +137,11 @@ export function formatResponse(
 }
 
 /**
- * Validate incoming ClawdBot payload
+ * Validate incoming ClawdBot payload using Zod
  */
 export function validatePayload(payload: unknown): payload is ClawdBotMessage {
-  if (!payload || typeof payload !== 'object') return false;
-
-  const p = payload as Record<string, unknown>;
-  return (
-    typeof p.id === 'string' &&
-    typeof p.channel === 'string' &&
-    typeof p.message === 'string' &&
-    typeof p.user === 'object' &&
-    p.user !== null
-  );
+  const validation = ClawdBotMessageSchema.safeParse(payload);
+  return validation.success;
 }
 
 /**
@@ -156,20 +149,31 @@ export function validatePayload(payload: unknown): payload is ClawdBotMessage {
  * payload validation, FAQ offload via Workers AI, escalation, Orchestrator forwarding.
  */
 export async function handleClawdBotWebhook(request: Request, env: Env): Promise<Response> {
-  let payload: unknown;
+  let rawPayload: unknown;
 
   try {
-    payload = await request.json();
+    rawPayload = await request.json();
   } catch {
-    return new Response('Invalid JSON', { status: 400 });
+    return new Response(
+      JSON.stringify({ error: 'Invalid JSON in request body' }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
   }
 
-  // Validate payload
-  if (!validatePayload(payload)) {
-    return new Response('Invalid ClawdBot payload', { status: 400 });
+  // Validate payload with Zod
+  const validation = ClawdBotMessageSchema.safeParse(rawPayload);
+  if (!validation.success) {
+    safeLog.warn('[ClawdBot] Validation failed', { errors: validation.error.errors });
+    return new Response(
+      JSON.stringify({
+        error: 'Validation failed',
+        details: validation.error.errors,
+      }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
   }
 
-  const clawdPayload = payload as ClawdBotMessage;
+  const clawdPayload = validation.data;
   const event = normalizeClawdBotEvent(clawdPayload);
 
   // Check if FAQ can be handled by Workers AI

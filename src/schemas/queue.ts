@@ -5,7 +5,10 @@
 import { z } from 'zod';
 
 /**
- * Schema for claiming a task
+ * Zod schema for task claim request validation
+ *
+ * @remarks
+ * Validates task claim requests with optional worker ID and lease duration (1-600s).
  */
 export const ClaimTaskSchema = z.object({
   workerId: z.string().optional(),
@@ -15,7 +18,10 @@ export const ClaimTaskSchema = z.object({
 export type ClaimTaskInput = z.infer<typeof ClaimTaskSchema>;
 
 /**
- * Schema for releasing a task lease
+ * Zod schema for task lease release validation
+ *
+ * @remarks
+ * Validates task release requests with optional worker ID and release reason.
  */
 export const ReleaseTaskSchema = z.object({
   workerId: z.string().optional(),
@@ -25,7 +31,10 @@ export const ReleaseTaskSchema = z.object({
 export type ReleaseTaskInput = z.infer<typeof ReleaseTaskSchema>;
 
 /**
- * Schema for renewing a task lease
+ * Zod schema for task lease renewal validation
+ *
+ * @remarks
+ * Validates lease renewal requests with worker ID and optional extension duration (1-600s).
  */
 export const RenewTaskSchema = z.object({
   workerId: z.string().min(1, 'Worker ID is required'),
@@ -35,7 +44,10 @@ export const RenewTaskSchema = z.object({
 export type RenewTaskInput = z.infer<typeof RenewTaskSchema>;
 
 /**
- * Schema for updating task status
+ * Zod schema for task status update validation
+ *
+ * @remarks
+ * Validates task status update requests with required status field.
  */
 export const UpdateStatusSchema = z.object({
   status: z.string().min(1, 'Status is required'),
@@ -44,7 +56,11 @@ export const UpdateStatusSchema = z.object({
 export type UpdateStatusInput = z.infer<typeof UpdateStatusSchema>;
 
 /**
- * Schema for lease data validation
+ * Zod schema for task lease data validation
+ *
+ * @remarks
+ * Validates lease data structure including worker ID, claim nonce,
+ * and lease timing information.
  */
 export const LeaseSchema = z.object({
   workerId: z.string(),
@@ -56,7 +72,11 @@ export const LeaseSchema = z.object({
 export type LeaseData = z.infer<typeof LeaseSchema>;
 
 /**
- * Schema for task result
+ * Zod schema for task result validation
+ *
+ * @remarks
+ * Validates task execution results including success status,
+ * optional output data, and error messages.
  */
 export const ResultSchema = z.object({
   success: z.boolean(),

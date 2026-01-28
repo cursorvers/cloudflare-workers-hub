@@ -11,6 +11,7 @@ import { safeLog } from '../utils/log-sanitizer';
 import { handleGenericWebhook } from './generic-webhook';
 import { notifyDiscord, notifications } from './notifications';
 import { isSimpleQuery, handleWithWorkersAI } from '../ai';
+import { SlackWebhookSchema } from '../schemas/slack';
 
 export interface SlackEvent {
   token?: string;
@@ -242,13 +243,31 @@ export async function postMessage(
  */
 export async function handleSlackWebhook(request: Request, env: Env): Promise<Response> {
   const body = await request.text();
-  let payload: SlackEvent;
+  let rawPayload: unknown;
 
   try {
-    payload = JSON.parse(body);
+    rawPayload = JSON.parse(body);
   } catch {
-    return new Response('Invalid JSON', { status: 400 });
+    return new Response(
+      JSON.stringify({ error: 'Invalid JSON in request body' }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
   }
+
+  // Validate payload with Zod
+  const validation = SlackWebhookSchema.safeParse(rawPayload);
+  if (!validation.success) {
+    safeLog.warn('[Slack] Validation failed', { errors: validation.error.errors });
+    return new Response(
+      JSON.stringify({
+        error: 'Validation failed',
+        details: validation.error.errors,
+      }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  const payload = validation.data as SlackEvent;
 
   // Verify Slack signature FIRST (if signing secret is configured)
   // All Slack requests including url_verification are signed

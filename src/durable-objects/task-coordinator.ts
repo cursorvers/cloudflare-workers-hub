@@ -19,6 +19,7 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from '../types';
+import { safeLog } from '../utils/log-sanitizer';
 
 /**
  * Lease record stored in DO storage
@@ -163,12 +164,12 @@ export class TaskCoordinator extends DurableObject<Env> {
 
         if (expiresAt > now) {
           // Lease is still valid, skip this task
-          console.log('[TaskCoordinator] Task already leased', { taskId, workerId: existingLease.workerId });
+          safeLog.log('[TaskCoordinator] Task already leased', { taskId, workerId: existingLease.workerId });
           continue;
         }
 
         // Lease expired, we can claim it
-        console.log('[TaskCoordinator] Lease expired, reclaiming', { taskId, expiredWorkerId: existingLease.workerId });
+        safeLog.log('[TaskCoordinator] Lease expired, reclaiming', { taskId, expiredWorkerId: existingLease.workerId });
       }
 
       // Claim this task (atomic write)
@@ -182,7 +183,7 @@ export class TaskCoordinator extends DurableObject<Env> {
       };
 
       await this.ctx.storage.put(leaseKey, lease);
-      console.log('[TaskCoordinator] Task claimed', { taskId, workerId, leaseDurationSec });
+      safeLog.log('[TaskCoordinator] Task claimed', { taskId, workerId, leaseDurationSec });
 
       return new Response(JSON.stringify({
         claimed: true,
@@ -239,7 +240,7 @@ export class TaskCoordinator extends DurableObject<Env> {
 
     // Delete the lease
     await this.ctx.storage.delete(leaseKey);
-    console.log('[TaskCoordinator] Lease released', { taskId, workerId: existingLease.workerId });
+    safeLog.log('[TaskCoordinator] Lease released', { taskId, workerId: existingLease.workerId });
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { 'Content-Type': 'application/json' },
@@ -288,7 +289,7 @@ export class TaskCoordinator extends DurableObject<Env> {
     };
 
     await this.ctx.storage.put(leaseKey, updatedLease);
-    console.log('[TaskCoordinator] Lease renewed', { taskId, workerId, extendSec });
+    safeLog.log('[TaskCoordinator] Lease renewed', { taskId, workerId, extendSec });
 
     return new Response(JSON.stringify({
       success: true,
@@ -315,7 +316,7 @@ export class TaskCoordinator extends DurableObject<Env> {
       if (expiresAt <= now) {
         // Expired, mark for cleanup
         expiredKeys.push(key);
-        console.log('[TaskCoordinator] Expired lease found during listing', { taskId, workerId: lease.workerId });
+        safeLog.log('[TaskCoordinator] Expired lease found during listing', { taskId, workerId: lease.workerId });
       } else {
         // Still valid
         leases[taskId] = lease;
@@ -325,7 +326,7 @@ export class TaskCoordinator extends DurableObject<Env> {
     // Clean up expired leases
     if (expiredKeys.length > 0) {
       await this.ctx.storage.delete(expiredKeys);
-      console.log('[TaskCoordinator] Cleaned up expired leases', { count: expiredKeys.length });
+      safeLog.log('[TaskCoordinator] Cleaned up expired leases', { count: expiredKeys.length });
     }
 
     return new Response(JSON.stringify({
@@ -350,7 +351,7 @@ export class TaskCoordinator extends DurableObject<Env> {
 
     const leaseKey = `lease:${taskId}`;
     await this.ctx.storage.delete(leaseKey);
-    console.log('[TaskCoordinator] Task lease deleted', { taskId });
+    safeLog.log('[TaskCoordinator] Task lease deleted', { taskId });
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { 'Content-Type': 'application/json' },
@@ -362,7 +363,7 @@ export class TaskCoordinator extends DurableObject<Env> {
    * Fires every 60 seconds
    */
   async alarm(): Promise<void> {
-    console.log('[TaskCoordinator] Alarm triggered, cleaning up expired leases');
+    safeLog.log('[TaskCoordinator] Alarm triggered, cleaning up expired leases');
 
     const allEntries = await this.ctx.storage.list<LeaseRecord>({ prefix: 'lease:' });
     const now = Date.now();
@@ -373,15 +374,15 @@ export class TaskCoordinator extends DurableObject<Env> {
       if (expiresAt <= now) {
         expiredKeys.push(key);
         const taskId = key.replace('lease:', '');
-        console.log('[TaskCoordinator] Cleaning expired lease', { taskId, workerId: lease.workerId });
+        safeLog.log('[TaskCoordinator] Cleaning expired lease', { taskId, workerId: lease.workerId });
       }
     }
 
     if (expiredKeys.length > 0) {
       await this.ctx.storage.delete(expiredKeys);
-      console.log('[TaskCoordinator] Cleaned up expired leases via alarm', { count: expiredKeys.length });
+      safeLog.log('[TaskCoordinator] Cleaned up expired leases via alarm', { count: expiredKeys.length });
     } else {
-      console.log('[TaskCoordinator] No expired leases to clean');
+      safeLog.log('[TaskCoordinator] No expired leases to clean');
     }
 
     // Schedule next alarm in 60 seconds
