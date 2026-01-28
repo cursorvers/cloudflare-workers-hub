@@ -384,6 +384,24 @@ async function main(): Promise<void> {
   console.log(`  Content: ${markdown.length} chars`);
   console.log('');
 
+  // Send Mermaid diagrams to Excalidraw canvas (fire-and-forget)
+  const { extractMermaidBlocks, sendMermaidToExcalidraw } = await import('../src/services/google-slides');
+  const mermaidBlocks = extractMermaidBlocks(markdown);
+  if (mermaidBlocks.length > 0) {
+    console.log(`Excalidraw: sending ${mermaidBlocks.length} Mermaid diagram(s)...`);
+    const results = await Promise.all(
+      mermaidBlocks.map((code) => sendMermaidToExcalidraw(code))
+    );
+    const sent = results.filter(Boolean).length;
+    if (sent > 0) {
+      console.log(`  ${sent}/${mermaidBlocks.length} diagram(s) sent to Excalidraw canvas`);
+      console.log('  Open http://localhost:3001 to view/edit interactively');
+    } else {
+      console.log('  Excalidraw canvas not available (diagrams will still appear in Slides via mermaid.ink)');
+    }
+    console.log('');
+  }
+
   let slidesId: string | undefined;
 
   // Execute Route A
