@@ -22,41 +22,67 @@ export interface APIKeyMapping {
 }
 
 /**
+ * Constant-time string comparison to prevent timing attacks
+ */
+function constantTimeCompare(a: string, b: string): boolean {
+  let result = a.length === b.length ? 0 : 1;
+  const maxLen = Math.max(a.length, b.length);
+  for (let i = 0; i < maxLen; i++) {
+    const charA = i < a.length ? a.charCodeAt(i) : 0;
+    const charB = i < b.length ? b.charCodeAt(i) : 0;
+    result |= charA ^ charB;
+  }
+  return result === 0;
+}
+
+/**
  * Verify API Key with constant-time comparison
+ * Accepts BOTH scoped key AND ASSISTANT_API_KEY for backward compatibility
  */
 export function verifyAPIKey(request: Request, env: Env, scope: APIScope = 'queue'): boolean {
-  // Get scoped key or fall back to legacy ASSISTANT_API_KEY
-  const scopedKeys: Record<APIScope, string | undefined> = {
-    queue: env.QUEUE_API_KEY || env.ASSISTANT_API_KEY,
-    memory: env.MEMORY_API_KEY || env.ASSISTANT_API_KEY,
-    admin: env.ADMIN_API_KEY, // No fallback for admin - explicit key required
-  };
-
-  const expectedKey = scopedKeys[scope];
-
-  // SECURITY: Fail-closed - API Key is mandatory
-  if (!expectedKey) {
-    safeLog.error(`[API] ${scope.toUpperCase()}_API_KEY not configured - access denied`);
-    return false;
-  }
-
   const apiKey = request.headers.get('X-API-Key');
   if (!apiKey) {
     safeLog.warn(`[API] Missing API key for scope: ${scope}`);
     return false;
   }
 
-  // Constant-time comparison to prevent timing attacks
-  // Always execute full comparison regardless of length to prevent timing leaks
-  let result = apiKey.length === expectedKey.length ? 0 : 1;
-  const maxLen = Math.max(apiKey.length, expectedKey.length);
-  for (let i = 0; i < maxLen; i++) {
-    const a = i < apiKey.length ? apiKey.charCodeAt(i) : 0;
-    const b = i < expectedKey.length ? expectedKey.charCodeAt(i) : 0;
-    result |= a ^ b;
+  // Build list of valid keys for this scope
+  // SECURITY FIX: Accept BOTH scoped key AND ASSISTANT_API_KEY (not just first defined)
+  const validKeys: string[] = [];
+
+  // Add scoped key if defined
+  const scopedKeys: Record<APIScope, string | undefined> = {
+    queue: env.QUEUE_API_KEY,
+    memory: env.MEMORY_API_KEY,
+    admin: env.ADMIN_API_KEY,
+  };
+  const scopedKey = scopedKeys[scope];
+  if (scopedKey) {
+    validKeys.push(scopedKey);
   }
 
-  if (result !== 0) {
+  // Add ASSISTANT_API_KEY as fallback (except for admin scope)
+  if (scope !== 'admin' && env.ASSISTANT_API_KEY) {
+    validKeys.push(env.ASSISTANT_API_KEY);
+  }
+
+  // SECURITY: Fail-closed - at least one key must be configured
+  if (validKeys.length === 0) {
+    safeLog.error(`[API] No API keys configured for scope: ${scope} - access denied`);
+    return false;
+  }
+
+  // Check if provided key matches ANY valid key (constant-time for each comparison)
+  // Always compare against ALL keys to prevent timing attacks revealing which keys exist
+  let isValid = false;
+  for (const validKey of validKeys) {
+    if (constantTimeCompare(apiKey, validKey)) {
+      isValid = true;
+      // Continue comparing to prevent timing leaks
+    }
+  }
+
+  if (!isValid) {
     safeLog.warn(`[API] Invalid API key for scope: ${scope}`);
     return false;
   }
