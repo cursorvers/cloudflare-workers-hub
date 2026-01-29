@@ -1,6 +1,7 @@
 # Cloudflare Workers Hub - Plans
 
 ## 概要
+**MVP 完成: 82% (2026-01-29)** - 保守モード移行
 オーケストレーションレビュー結果: **8.35/10 READY** (2026-01-25)
 
 ## デプロイ情報
@@ -176,5 +177,6 @@ Cloudflare Worker   Mac Mini Daemon
 
 | 日付 | 内容 |
 |------|------|
+| 2026-01-29 | **MVP完成(82%)**, 認証境界監査PASS, 保守モード移行, cockpit-pwa初期化完了 |
 | 2026-01-29 | 401エラー根本修正(複数キー認証), KV最適化(WS間隔15秒), **KV put超過対応(rate-limiterインメモリ化)**, 課金判断(ハイブリッド案) |
 | 2026-01-25 | IDOR修正, index.ts分割, Daemon Health API, KV Prefix Scan移行, Critical/High/Medium問題修正 |
