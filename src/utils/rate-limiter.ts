@@ -145,6 +145,12 @@ function checkRateLimitInMemory(
 
 /**
  * レート制限をチェック
+ *
+ * KV FREE TIER OPTIMIZATION (2026-01-29):
+ * インメモリ優先に変更。KV put は 1000 ops/日の上限があり、
+ * rate-limiter が全リクエストで put するとすぐに超過する。
+ * トレードオフ: 複数 Workers インスタンス間で rate limit が共有されない。
+ * ただし、Workers Free プランでは通常1インスタンスなので影響は軽微。
  */
 export async function checkRateLimit(
   env: Env,
@@ -154,15 +160,7 @@ export async function checkRateLimit(
   const config = RATE_LIMITS[channel] || RATE_LIMITS.default;
   const key = `ratelimit:${channel}:${identifier}`;
 
-  if (env.CACHE) {
-    try {
-      return await checkRateLimitWithKV(env.CACHE, key, config);
-    } catch {
-      // KV failure (e.g., daily put limit exceeded) — fall back to in-memory
-      return checkRateLimitInMemory(key, config);
-    }
-  }
-
+  // KV FREE TIER: インメモリ優先（KV put 削減）
   return checkRateLimitInMemory(key, config);
 }
 

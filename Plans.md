@@ -5,7 +5,7 @@
 
 ## デプロイ情報
 - URL: https://orchestrator-hub.masa-stage1.workers.dev
-- Version ID: f033646c-74b6-4506-b0ac-c79472fca6b3
+- Version ID: 5a33bb54-aa97-48cf-a2da-4207b36b717c (2026-01-29)
 
 ---
 
@@ -68,12 +68,55 @@ npm run dev
 - [x] 401 エラー対応 ✅ (2026-01-29) - QUEUE_API_KEY 設定修正
 - [x] **Cloudflare Access 設定** ✅ (2026-01-29) - Google SSO, Cookie/Header JWT 対応
 - [x] **WebSocket Access 認証** ✅ (2026-01-29) - 3方式対応 (Access/API Key/JWT)
+- [x] **401 エラー根本修正** ✅ (2026-01-29) - 複数キー認証対応 (QUEUE_API_KEY + ASSISTANT_API_KEY 両方有効)
+- [x] **KV 最適化** ✅ (2026-01-29) - WebSocket 再接続間隔 5秒→15秒 (KV read 66%削減)
+- [x] **KV put 超過対応** ✅ (2026-01-29) - rate-limiter をインメモリ優先に変更 (KV put 99%削減)
 
 ### 未完了（オプション）
 - [ ] Cloudflare Tunnel 設定 - NAT 越え接続（外部ネットワークからアクセス時に必要）
 - [ ] PWA 機能拡張 - タスク一覧、Daemon 状態表示
 - [ ] Push 通知統合 - VAPID 設定済み、フロントエンド連携待ち
 - [ ] Observability ダッシュボード - コスト/レイテンシ表示
+- [ ] KV 使用量閾値通知 - 80%で Slack 通知（課金判断用）
+
+---
+
+## KV 最適化 (2026-01-29)
+
+> Cloudflare から警告を受けて実施
+
+### インシデント履歴
+
+| 日時 | 警告 | 原因 | 対応 |
+|------|------|------|------|
+| 21:25 JST | **KV read 50% 超過** | WebSocket 5秒間隔 | 15秒に延長 |
+| 22:08 JST | **KV put 1000 超過 (429)** | rate-limiter が毎リクエストで put | インメモリ優先に変更 |
+
+### 対応済み
+| 施策 | 効果 |
+|------|------|
+| WebSocket 再接続間隔 5秒→15秒 | KV read 66%削減 |
+| **rate-limiter インメモリ優先** | **KV put 99%削減** |
+
+### 課金判断
+**ハイブリッド案を採用**: 現状維持 + 閾値監視
+
+| 条件 | アクション |
+|------|-----------|
+| KV 使用 < 80% | Free プラン継続 |
+| KV 使用 ≥ 80% | Workers Paid ($5/月) へ移行 |
+
+### KV Free プラン制限
+
+| リソース | 上限/日 | 現状 |
+|---------|--------|------|
+| read | 100,000 | ~50% → 最適化済み |
+| put | 1,000 | **超過** → インメモリ化で解消 |
+| delete | 1,000 | 未使用 |
+| list | 1,000 | 未使用 |
+
+### 未対応（必要時に実施）
+- Daemon ポーリング間隔延長
 
 ---
 
@@ -133,4 +176,5 @@ Cloudflare Worker   Mac Mini Daemon
 
 | 日付 | 内容 |
 |------|------|
+| 2026-01-29 | 401エラー根本修正(複数キー認証), KV最適化(WS間隔15秒), **KV put超過対応(rate-limiterインメモリ化)**, 課金判断(ハイブリッド案) |
 | 2026-01-25 | IDOR修正, index.ts分割, Daemon Health API, KV Prefix Scan移行, Critical/High/Medium問題修正 |
