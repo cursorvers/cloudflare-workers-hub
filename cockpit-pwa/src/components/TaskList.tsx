@@ -36,7 +36,7 @@ export function TaskList({ tasks, isLoading, onTaskTap }: TaskListProps) {
   if (isLoading) {
     return (
       <div className="space-y-3">
-        <h2 className="text-sm font-medium text-zinc-600 dark:text-zinc-400 px-1">
+        <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 px-1">
           タスク一覧
         </h2>
         {/* Skeleton loading - 3 items */}
@@ -55,13 +55,26 @@ export function TaskList({ tasks, isLoading, onTaskTap }: TaskListProps) {
 
   return (
     <div className="space-y-3">
-      <h2 className="text-sm font-medium text-zinc-600 dark:text-zinc-400 px-1">
+      <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 px-1">
         タスク一覧 ({tasks.length})
       </h2>
 
       {tasks.length === 0 ? (
-        <div className="bg-white dark:bg-zinc-900 rounded-xl p-6 text-center">
-          <p className="text-zinc-500 text-sm">タスクがありません</p>
+        <div className="bg-white dark:bg-zinc-900 rounded-xl p-8 text-center border border-zinc-200 dark:border-zinc-800">
+          {/* Empty state icon */}
+          <div className="text-5xl mb-4 opacity-60" aria-hidden="true">
+            📋
+          </div>
+          {/* Main message - higher contrast */}
+          <p className="text-zinc-700 dark:text-zinc-200 font-medium mb-2">
+            タスクがありません
+          </p>
+          {/* Sub message - guidance text */}
+          <p className="text-zinc-500 dark:text-zinc-400 text-sm leading-relaxed">
+            オーケストレーターからタスクが配信されると
+            <br />
+            ここに表示されます
+          </p>
         </div>
       ) : (
         <ul className="space-y-2">
