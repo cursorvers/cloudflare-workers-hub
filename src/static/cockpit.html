@@ -134,7 +134,7 @@
       ws.onclose = () => {
         document.getElementById('statusDot').classList.remove('connected');
         document.getElementById('statusText').textContent = '切断';
-        setTimeout(connectWS, 5000);
+        setTimeout(connectWS, 15000); // KV最適化: 5秒→15秒
       };
 
       ws.onmessage = (e) => {
