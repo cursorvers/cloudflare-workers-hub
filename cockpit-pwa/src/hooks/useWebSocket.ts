@@ -40,7 +40,8 @@ export interface UseWebSocketReturn {
 // Constants
 // =============================================================================
 
-const INITIAL_RETRY_DELAY = 1000;
+// Increased from 1000ms to reduce flickering during auth failures
+const INITIAL_RETRY_DELAY = 3000;
 const MAX_RETRY_DELAY = 30000;
 const BACKOFF_MULTIPLIER = 2;
 

@@ -1,5 +1,6 @@
 'use client';
 
+import { useState, useEffect, useRef } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import type { ConnectionState } from '@/hooks/useWebSocket';
@@ -14,19 +15,54 @@ const stateConfig: Record<ConnectionState, {
   variant: 'default' | 'secondary' | 'destructive' | 'outline';
   dot: string;
 }> = {
-  connecting: { label: '接続中', variant: 'secondary', dot: 'bg-yellow-500 animate-pulse' },
+  // animate-pulse removed to reduce visual noise
+  connecting: { label: '接続中', variant: 'secondary', dot: 'bg-yellow-500' },
   connected: { label: '接続済み', variant: 'default', dot: 'bg-green-500' },
   disconnected: { label: '切断', variant: 'outline', dot: 'bg-zinc-400' },
   error: { label: 'エラー', variant: 'destructive', dot: 'bg-red-500' },
 };
 
+// Debounce delay: Only show state after it persists for this duration
+const STATE_DEBOUNCE_MS = 500;
+
 /**
  * Compact connection status indicator for mobile header
  * Gemini UI/UX Review: 省スペース化、メインコンテンツ表示領域を最大化
+ *
+ * Debouncing: Shows the last "stable" state to prevent flickering
+ * during rapid reconnection cycles (connecting → error → connecting...)
  */
 export function ConnectionStatus({ state, onReconnect }: ConnectionStatusProps) {
-  const config = stateConfig[state];
-  const showReconnect = (state === 'disconnected' || state === 'error') && onReconnect;
+  // Debounced state to prevent flickering during rapid state changes
+  const [displayState, setDisplayState] = useState<ConnectionState>(state);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    // Clear any pending state update
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+    }
+
+    // Immediately show 'connected' state (good news should be instant)
+    if (state === 'connected') {
+      setDisplayState(state);
+      return;
+    }
+
+    // Debounce other state changes to reduce flickering
+    timerRef.current = setTimeout(() => {
+      setDisplayState(state);
+    }, STATE_DEBOUNCE_MS);
+
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, [state]);
+
+  const config = stateConfig[displayState];
+  const showReconnect = (displayState === 'disconnected' || displayState === 'error') && onReconnect;
 
   return (
     <div className="flex items-center gap-2">
