@@ -20,9 +20,12 @@ import {
   getInsights,
   submitInsightFeedback,
   syncPlansContent,
+  getInsightById,
 } from '../services/strategic-context';
 import { safeLog } from '../utils/log-sanitizer';
 import { authenticateWithAccess, mapAccessUserToInternal } from '../utils/cloudflare-access';
+import { recordFeedback, getFeedbackAnalytics } from '../services/feedback-learning';
+import type { InsightType } from '../schemas/strategic-advisor';
 
 // =============================================================================
 // Constants (GLM 指摘対応: マジックナンバー排除)
@@ -186,7 +189,8 @@ export async function handleGetInsights(
 export async function handleSubmitFeedback(
   request: Request,
   env: Env,
-  insightId: string
+  insightId: string,
+  userId?: string
 ): Promise<Response> {
   try {
     const body = await request.json() as Record<string, unknown>;
@@ -200,6 +204,9 @@ export async function handleSubmitFeedback(
       return errorResponse(`Invalid request: ${parsed.error.message}`);
     }
 
+    // Get insight details for learning
+    const insight = await getInsightById(env, insightId);
+
     const success = await submitInsightFeedback(
       env,
       parsed.data.insightId,
@@ -209,6 +216,20 @@ export async function handleSubmitFeedback(
 
     if (!success) {
       return errorResponse('Failed to submit feedback', 500);
+    }
+
+    // Record feedback for learning (Phase 4)
+    if (insight && userId) {
+      await recordFeedback(env, userId, {
+        insightId,
+        insightType: insight.type as InsightType,
+        action: parsed.data.action,
+        confidence: insight.confidence,
+        timestamp: Date.now(),
+        // Optional fields - cast to access if present
+        goalId: (insight as { goalId?: string }).goalId,
+        ruleId: (insight as { ruleId?: string }).ruleId,
+      });
     }
 
     return jsonResponse({
@@ -300,6 +321,42 @@ export async function handleGetGoals(
   }
 }
 
+/**
+ * GET /api/advisor/analytics
+ * フィードバック分析を取得 (Phase 4)
+ */
+export async function handleGetAnalytics(
+  request: Request,
+  env: Env,
+  userId?: string
+): Promise<Response> {
+  try {
+    if (!userId) {
+      return errorResponse('User ID required for analytics', 400);
+    }
+
+    const analytics = await getFeedbackAnalytics(env, userId);
+
+    if (!analytics) {
+      return jsonResponse({
+        success: true,
+        data: null,
+        message: 'No feedback data yet',
+      });
+    }
+
+    return jsonResponse({
+      success: true,
+      data: analytics,
+    });
+  } catch (error) {
+    safeLog.error('[AdvisorAPI] Failed to get analytics', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return errorResponse('Failed to get analytics', 500);
+  }
+}
+
 // =============================================================================
 // Main Router (認証必須)
 // =============================================================================
@@ -347,7 +404,12 @@ export async function handleAdvisorAPI(
   // Feedback endpoint with ID
   const feedbackMatch = path.match(/^\/api\/advisor\/insights\/([^/]+)\/feedback$/);
   if (method === 'POST' && feedbackMatch) {
-    return handleSubmitFeedback(request, env, feedbackMatch[1]);
+    return handleSubmitFeedback(request, env, feedbackMatch[1], auth.userId);
+  }
+
+  // Analytics endpoint (Phase 4)
+  if (method === 'GET' && path === '/api/advisor/analytics') {
+    return handleGetAnalytics(request, env, auth.userId);
   }
 
   return errorResponse('Not found', 404);

@@ -315,6 +315,18 @@ export async function getStrategicContext(env: Env): Promise<StrategicContext> {
 }
 
 /**
+ * 特定の洞察を ID で取得 (Phase 4: Learning integration)
+ */
+export async function getInsightById(
+  env: Env,
+  insightId: string
+): Promise<Insight | null> {
+  // Get all insights and find by ID
+  const insights = await getInsights(env, { limit: 100, includeDismissed: true });
+  return insights.find(i => i.id === insightId) || null;
+}
+
+/**
  * 洞察を取得（ルールエンジン統合版）
  */
 export async function getInsights(
