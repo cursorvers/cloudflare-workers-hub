@@ -53,14 +53,36 @@ function verifyMonitoringKey(request: Request, env: Env): boolean {
 }
 
 export async function handleHealthCheck(request: Request, env: Env): Promise<Response> {
-  // Verify API key with fallback to public access if not configured
-  if (!verifyMonitoringKey(request, env)) {
+  const url = new URL(request.url);
+  const detailed = url.searchParams.get('detailed') === 'true';
+
+  // Basic health check is always public (for load balancers, monitoring)
+  // Detailed metrics require authentication
+  if (detailed && !verifyMonitoringKey(request, env)) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
       status: 401,
       headers: { 'Content-Type': 'application/json' },
     });
   }
+
   const metrics = metricsCollector.getSummary();
+
+  // Basic health check (public)
+  if (!detailed) {
+    return new Response(JSON.stringify({
+      status: metrics.errorRate > 0.1 ? 'degraded' : 'healthy',
+      timestamp: new Date().toISOString(),
+      services: {
+        ai: 'available',
+        db: env.DB ? 'available' : 'not_configured',
+        cache: env.CACHE ? 'available' : 'not_configured',
+      },
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  // Detailed health check (requires auth)
   const flags = featureFlags.getAllFlags();
 
   return new Response(JSON.stringify({

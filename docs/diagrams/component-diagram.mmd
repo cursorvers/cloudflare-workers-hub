@@ -1,0 +1,141 @@
+graph TB
+    subgraph PWA["📱 PWA Components"]
+        Dashboard["Task Dashboard<br/>- Task List<br/>- Real-time Updates<br/>- Filter/Search"]
+        GitMonitor["Git Monitor UI<br/>- Commit Log<br/>- Diff Viewer<br/>- Status Indicators"]
+        ApprovalUI["Approval Interface<br/>- 3-Party Vote Display<br/>- Override Controls<br/>- History"]
+        Settings["Settings Panel<br/>- Agent Config<br/>- Quality Gates<br/>- Notification Prefs"]
+    end
+
+    subgraph WorkersHub["⚡ Cloudflare Workers Hub"]
+        subgraph API["API Routes"]
+            TaskAPI["/api/tasks<br/>- POST: Create<br/>- GET: List<br/>- PATCH: Update"]
+            WebhookAPI["/api/webhooks<br/>- GitHub<br/>- Stripe<br/>- Custom"]
+            AuthAPI["/api/auth<br/>- JWT Validation<br/>- Session Management"]
+            HealthAPI["/api/health<br/>- System Status<br/>- Agent Heartbeat"]
+        end
+
+        subgraph Services["Services"]
+            TaskService["Task Service<br/>- Queue Management<br/>- Priority Scheduling<br/>- Retry Logic"]
+            AuthService["Auth Service<br/>- Token Validation<br/>- RBAC<br/>- Audit Log"]
+            NotificationService["Notification Service<br/>- Discord<br/>- Email<br/>- Webhook"]
+        end
+
+        subgraph Storage["Storage"]
+            D1DB["D1 Database<br/>- tasks<br/>- sessions<br/>- audit_logs<br/>- quality_gates"]
+            KVStore["KV Store<br/>- config<br/>- cache<br/>- rate_limits"]
+            QueueSystem["Queue<br/>- task_queue<br/>- retry_queue<br/>- dead_letter"]
+        end
+    end
+
+    subgraph LocalAgent["💻 Local Agent (Mac)"]
+        subgraph Daemon["Daemon (Port 3999)"]
+            GitWatcher["Git Watcher<br/>- File System Monitor<br/>- Diff Parser<br/>- Event Emitter"]
+            TaskExecutor["Task Executor<br/>- Subagent Launcher<br/>- MCP Connector<br/>- Result Collector"]
+            HealthCheck["Health Check<br/>- Heartbeat (30s)<br/>- Resource Monitor<br/>- Error Reporter"]
+        end
+
+        subgraph MCPServers["MCP Servers"]
+            CodexMCP["Codex MCP<br/>- GPT Pro API<br/>- 7-Section Format<br/>- Stateless"]
+            PencilMCP["Pencil MCP<br/>- .pen File Handler<br/>- batch_design<br/>- get_screenshot"]
+            ExcalidrawMCP["Excalidraw MCP<br/>- Mermaid Converter<br/>- Diagram Generator"]
+            GLMMCP["GLM MCP<br/>- delegate-glm.js<br/>- 7 Parallel Max<br/>- 4 Agents"]
+        end
+
+        subgraph FileSystem["File System"]
+            Workspace["Workspace<br/>- Git Repo<br/>- .claude/<br/>- Plans.md"]
+            Config["Config<br/>- .claude/CLAUDE.md<br/>- rules/<br/>- settings.json"]
+            Cache["Cache<br/>- codex-summaries/<br/>- memories/<br/>- artifacts/"]
+        end
+    end
+
+    subgraph ExecutionAgents["🚀 Execution Agents"]
+        ClaudeCode["Claude Code<br/>- Main Orchestrator<br/>- Context Manager<br/>- Delegation Router"]
+
+        CodexAgents["Codex Agents<br/>- architect<br/>- scope-analyst<br/>- plan-reviewer<br/>- security-analyst<br/>- code-reviewer"]
+
+        GLMAgents["GLM Agents<br/>- code-reviewer (7pt)<br/>- math-reasoning<br/>- refactor-advisor<br/>- general-reviewer"]
+
+        GeminiAgents["Gemini Agents<br/>- ui-reviewer<br/>- image-analyst"]
+
+        SubagentPool["Subagent Pool<br/>- Explore<br/>- Bash<br/>- Plan"]
+    end
+
+    subgraph EvaluationAgents["🔍 Evaluation Agents"]
+        GeminiEval["Gemini UI/UX<br/>- Design Evaluation<br/>- Screenshot Analysis<br/>- Brand Check"]
+
+        GLMEval["GLM Code Review<br/>- 7pt Quality<br/>- Readability<br/>- Performance"]
+
+        CodexEval["Codex Security<br/>- Vulnerability Scan<br/>- OWASP Top 10<br/>- 3pt Security"]
+    end
+
+    %% PWA Connections
+    Dashboard --> TaskAPI
+    GitMonitor --> HealthAPI
+    ApprovalUI --> TaskAPI
+    Settings --> AuthAPI
+
+    %% Workers Hub Internal
+    TaskAPI --> TaskService
+    WebhookAPI --> TaskService
+    AuthAPI --> AuthService
+    HealthAPI --> TaskService
+
+    TaskService --> D1DB
+    TaskService --> QueueSystem
+    AuthService --> D1DB
+    NotificationService --> KVStore
+
+    %% Workers to Local Agent
+    QueueSystem -->|Task Event| TaskExecutor
+    HealthAPI <-->|Heartbeat| HealthCheck
+
+    %% Local Agent Internal
+    GitWatcher --> Workspace
+    GitWatcher -->|Change Event| TaskExecutor
+    TaskExecutor --> Workspace
+    TaskExecutor --> Config
+    TaskExecutor --> Cache
+
+    TaskExecutor --> CodexMCP
+    TaskExecutor --> PencilMCP
+    TaskExecutor --> ExcalidrawMCP
+    TaskExecutor --> GLMMCP
+
+    %% Execution Flow
+    TaskExecutor -->|Orchestrate| ClaudeCode
+    ClaudeCode -->|Delegate Design| CodexAgents
+    ClaudeCode -->|Delegate Review| GLMAgents
+    ClaudeCode -->|Delegate UI| GeminiAgents
+    ClaudeCode -->|Delegate Research| SubagentPool
+
+    CodexMCP -->|API| CodexAgents
+    GLMMCP -->|API| GLMAgents
+    PencilMCP -->|Local| ClaudeCode
+
+    %% Evaluation Flow
+    CodexAgents -->|Artifact| CodexEval
+    GLMAgents -->|Artifact| GLMEval
+    ClaudeCode -->|Artifact| GLMEval
+    PencilMCP -->|Screenshot| GeminiEval
+
+    %% Result Flow
+    GeminiEval -->|Feedback| ClaudeCode
+    GLMEval -->|Feedback| ClaudeCode
+    CodexEval -->|Feedback| ClaudeCode
+    ClaudeCode -->|Report| TaskExecutor
+    TaskExecutor -->|Update| QueueSystem
+
+    %% Styling
+    classDef pwaClass fill:#e1f5ff,stroke:#0288d1,stroke-width:2px
+    classDef workersClass fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef localClass fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef execClass fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+    classDef evalClass fill:#fff9c4,stroke:#f9a825,stroke-width:2px
+    classDef storageClass fill:#e0f2f1,stroke:#00897b,stroke-width:2px
+
+    class Dashboard,GitMonitor,ApprovalUI,Settings pwaClass
+    class TaskAPI,WebhookAPI,AuthAPI,HealthAPI,TaskService,AuthService,NotificationService workersClass
+    class D1DB,KVStore,QueueSystem storageClass
+    class GitWatcher,TaskExecutor,HealthCheck,CodexMCP,PencilMCP,ExcalidrawMCP,GLMMCP,Workspace,Config,Cache localClass
+    class ClaudeCode,CodexAgents,GLMAgents,GeminiAgents,SubagentPool execClass
+    class GeminiEval,GLMEval,CodexEval evalClass

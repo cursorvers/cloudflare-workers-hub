@@ -1,0 +1,133 @@
+graph TB
+    Start([Execution Layer<br/>Completes Artifact])
+
+    Start --> ArtifactType{Artifact Type<br/>Detection}
+
+    %% UI/Design Path
+    ArtifactType -->|UI/Design<br/>(.pen, .tsx, .vue)| UIPath["UI/UX Artifact<br/>- Design File<br/>- Component<br/>- Screenshot"]
+
+    UIPath --> PencilCheck{Pencil<br/>Artifact?}
+    PencilCheck -->|Yes| GetScreenshot["Pencil MCP<br/>get_screenshot<br/>(Convert to Image)"]
+    PencilCheck -->|No| DirectImage["Direct Image/Code<br/>(Already Visual)"]
+
+    GetScreenshot --> GeminiUI["Gemini UI Reviewer<br/>━━━━━━━━━━━━━━━━"]
+    DirectImage --> GeminiUI
+
+    subgraph GeminiEval["Gemini Evaluation Criteria"]
+        GeminiUI --> G1["Visual Consistency<br/>- Color Harmony<br/>- Typography<br/>- Layout Balance"]
+        GeminiUI --> G2["UX Quality<br/>- Navigation Flow<br/>- Accessibility<br/>- Responsiveness"]
+        GeminiUI --> G3["Brand Alignment<br/>- Design System<br/>- Component Reuse<br/>- Style Guide"]
+    end
+
+    G1 --> GeminiFeedback["Gemini Feedback<br/>- Score: 1-10<br/>- Issues List<br/>- Suggestions"]
+    G2 --> GeminiFeedback
+    G3 --> GeminiFeedback
+
+    %% Code Path
+    ArtifactType -->|Code<br/>(.ts, .js, .py)| CodePath["Code Artifact<br/>- Implementation<br/>- API<br/>- Logic"]
+
+    CodePath --> LineCount{Lines<br/>Changed?}
+    LineCount -->|< 10 lines| SkipCode["Skip Review<br/>(Minor Change)"]
+    LineCount -->|≥ 10 lines| GLMCode["GLM Code Reviewer<br/>━━━━━━━━━━━━━━━━"]
+
+    subgraph GLMEval["GLM Evaluation Criteria (7pt)"]
+        GLMCode --> L1["Readability (2pt)<br/>- Naming<br/>- Structure<br/>- Comments"]
+        GLMCode --> L2["Maintainability (2pt)<br/>- Modularity<br/>- Coupling<br/>- Complexity"]
+        GLMCode --> L3["Performance (2pt)<br/>- Efficiency<br/>- Resource Usage<br/>- Optimization"]
+        GLMCode --> L4["Correctness (1pt)<br/>- Logic<br/>- Edge Cases<br/>- Error Handling"]
+    end
+
+    L1 --> GLMFeedback["GLM Feedback<br/>- Score: 0-7<br/>- Issues List<br/>- Refactor Suggestions"]
+    L2 --> GLMFeedback
+    L3 --> GLMFeedback
+    L4 --> GLMFeedback
+
+    SkipCode --> Integration
+
+    %% Security Path
+    ArtifactType -->|Security-Critical<br/>(auth/, api/, payment/)| SecPath["Security Artifact<br/>- Authentication<br/>- Authorization<br/>- Data Protection"]
+
+    SecPath --> CodexSec["Codex Security Analyst<br/>━━━━━━━━━━━━━━━━━━━━━"]
+
+    subgraph CodexEval["Codex Security Evaluation (3pt)"]
+        CodexSec --> S1["Vulnerability Scan (1pt)<br/>- SQL Injection<br/>- XSS<br/>- CSRF"]
+        CodexSec --> S2["OWASP Top 10 (1pt)<br/>- Broken Access<br/>- Crypto Failures<br/>- Insecure Design"]
+        CodexSec --> S3["Auth Security (1pt)<br/>- Session Mgmt<br/>- Token Validation<br/>- Rate Limiting"]
+    end
+
+    S1 --> CodexFeedback["Codex Feedback<br/>- Score: 0-3<br/>- Vulnerabilities<br/>- Remediation Steps"]
+    S2 --> CodexFeedback
+    S3 --> CodexFeedback
+
+    %% Research/Exploration Path
+    ArtifactType -->|Research<br/>(Investigation)| ResearchPath["Research Artifact<br/>- Analysis<br/>- Documentation<br/>- No Code"]
+    ResearchPath --> SkipEval["Skip Evaluation<br/>(No Quality Criteria)"]
+    SkipEval --> Integration
+
+    %% Integration
+    GeminiFeedback --> Integration["Claude Integration Layer<br/>━━━━━━━━━━━━━━━━━━━━━━"]
+    GLMFeedback --> Integration
+    CodexFeedback --> Integration
+
+    Integration --> Consolidate["Consolidate Feedback<br/>- Merge Scores<br/>- Prioritize Issues<br/>- De-duplicate"]
+
+    Consolidate --> QualityGate{Quality Gate<br/>Check}
+
+    subgraph QualityGates["Quality Gate Thresholds<br/>(quality-gates.json)"]
+        QualityGate --> Gate1["Code Quality<br/>Min: 5/7<br/>Recommended: 6/7"]
+        QualityGate --> Gate2["Security<br/>Min: 2/3<br/>Recommended: 3/3"]
+        QualityGate --> Gate3["UI/UX<br/>Min: 6/10<br/>Recommended: 8/10"]
+    end
+
+    Gate1 --> GateResult{Pass All<br/>Required?}
+    Gate2 --> GateResult
+    Gate3 --> GateResult
+
+    GateResult -->|Yes| Verdict["Verdict Generation"]
+    GateResult -->|No| FailAction["Fail Action"]
+
+    Verdict --> V1{Total Score?}
+    V1 -->|≥ 90%| ApproveRec["APPROVE_RECOMMENDED<br/>✅ 承認推奨"]
+    V1 -->|70-89%| ApproveAllow["APPROVE_ALLOWED<br/>✓ 承認可"]
+    V1 -->|50-69%| FixRec["FIX_RECOMMENDED<br/>⚠️ 修正推奨"]
+    V1 -->|< 50%| FixReq["FIX_REQUIRED<br/>❌ 修正必須"]
+
+    FailAction --> FixReq
+
+    ApproveRec --> Report["Report to User<br/>- Verdict<br/>- Scores<br/>- Feedback<br/>- Next Actions"]
+    ApproveAllow --> Report
+    FixRec --> Report
+    FixReq --> Report
+
+    Report --> UserAction{User Decision}
+
+    UserAction -->|Accept| Complete([Task Complete])
+    UserAction -->|Iterate| Rework["Return to<br/>Execution Layer"]
+    UserAction -->|Override| Override["Manual Override<br/>(Logged)"]
+
+    Rework -.->|Feedback Loop| Start
+    Override --> Complete
+
+    %% Parallel Evaluation Note
+    GeminiUI -.->|Parallel| GLMCode
+    GLMCode -.->|Parallel| CodexSec
+
+    %% Styling
+    classDef startClass fill:#e1f5ff,stroke:#0288d1,stroke-width:3px
+    classDef artifactClass fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef geminiClass fill:#fbbc04,stroke:#e37400,stroke-width:2px
+    classDef glmClass fill:#34a853,stroke:#188038,stroke-width:2px
+    classDef codexClass fill:#ea4335,stroke:#a50e0e,stroke-width:2px
+    classDef integrationClass fill:#4285f4,stroke:#1967d2,stroke-width:2px
+    classDef verdictClass fill:#fff9c4,stroke:#f9a825,stroke-width:2px
+    classDef endClass fill:#fce4ec,stroke:#c2185b,stroke-width:3px
+
+    class Start startClass
+    class UIPath,CodePath,SecPath,ResearchPath artifactClass
+    class GeminiUI,G1,G2,G3,GeminiFeedback geminiClass
+    class GLMCode,L1,L2,L3,L4,GLMFeedback glmClass
+    class CodexSec,S1,S2,S3,CodexFeedback codexClass
+    class Integration,Consolidate integrationClass
+    class QualityGate,Gate1,Gate2,Gate3,GateResult,Verdict,V1 verdictClass
+    class ApproveRec,ApproveAllow,FixRec,FixReq verdictClass
+    class Report,Complete,Override endClass

@@ -1,0 +1,116 @@
+graph TB
+    subgraph TaskExecutionFlow["📋 Task Execution Flow"]
+        Start([User Instruction])
+        Start --> TaskType{Task Type?}
+
+        TaskType -->|Code Review| GLMPath["GLM-4.7<br/>(Lightweight)"]
+        TaskType -->|Design/Architecture| CodexPath["Codex<br/>(Precision)"]
+        TaskType -->|UI/UX| GeminiPath["Gemini<br/>(Design)"]
+        TaskType -->|Implementation| ClaudePath["Claude Code<br/>(Main)"]
+        TaskType -->|Research| SubagentPath["Subagent<br/>(Parallel)"]
+
+        GLMPath --> GLMExec["Execute Review<br/>(7pt Quality Check)"]
+        CodexPath --> CodexExec["Execute Design<br/>(Architecture)"]
+        GeminiPath --> GeminiExec["Execute UI Review<br/>(UX Quality)"]
+        ClaudePath --> ClaudeExec["Execute Implementation<br/>(Code Generation)"]
+        SubagentPath --> SubagentExec["Execute Research<br/>(Exploration)"]
+
+        GLMExec --> ArtifactType{Artifact Type?}
+        CodexExec --> ArtifactType
+        GeminiExec --> ArtifactType
+        ClaudeExec --> ArtifactType
+        SubagentExec --> ArtifactType
+
+        ArtifactType -->|UI/Design| EvalUI["Gemini UI Reviewer<br/>- Visual Consistency<br/>- UX Quality<br/>- Brand Alignment"]
+        ArtifactType -->|Code| EvalCode["GLM Code Reviewer<br/>- Readability (7pt)<br/>- Maintainability<br/>- Performance"]
+        ArtifactType -->|Security| EvalSec["Codex Security Analyst<br/>- Vulnerability Scan<br/>- OWASP Top 10<br/>- Auth Check"]
+        ArtifactType -->|Research| SkipEval["Skip Evaluation<br/>(No Artifact)"]
+
+        EvalUI --> Feedback["Feedback Consolidation"]
+        EvalCode --> Feedback
+        EvalSec --> Feedback
+        SkipEval --> Feedback
+
+        Feedback --> QualityGate{Quality Gate?}
+        QualityGate -->|Pass| Complete([Report to User])
+        QualityGate -->|Fail| Iterate["Iterate with<br/>Feedback"]
+        Iterate --> ClaudeExec
+    end
+
+    subgraph GitMonitorFlow["🔍 Git Monitor Flow"]
+        GitWatch([Git Watcher Daemon<br/>Port 3999])
+        GitWatch -->|Poll 5s| DetectChange{Change Detected?}
+        DetectChange -->|No| GitWatch
+        DetectChange -->|Yes| ParseChange["Parse Git Diff<br/>- Files Changed<br/>- Lines Added/Removed"]
+
+        ParseChange --> CommitCheck{Commit Event?}
+        CommitCheck -->|Yes| PreCommit["Pre-Commit Gate<br/>- Security Check<br/>- Code Quality<br/>- Test Coverage"]
+        CommitCheck -->|No| FileChange["File Change Event<br/>- Auto-review (10+ lines)<br/>- Syntax Check"]
+
+        PreCommit --> ParallelCheck["Parallel Check<br/>(parallel-codex.js)"]
+        ParallelCheck --> CodeReview["GLM Code Reviewer<br/>(7pt)"]
+        ParallelCheck --> SecAnalyst["Codex Security Analyst<br/>(3pt)"]
+
+        CodeReview --> Verdict{Verdict?}
+        SecAnalyst --> Verdict
+
+        Verdict -->|9-10: APPROVE_RECOMMENDED| AllowCommit([Allow Commit])
+        Verdict -->|7-8: APPROVE_ALLOWED| AllowCommit
+        Verdict -->|5-6: FIX_RECOMMENDED| NotifyUser([Notify User<br/>Fix Recommended])
+        Verdict -->|0-4: FIX_REQUIRED| BlockCommit([Block Commit<br/>Fix Required])
+
+        FileChange --> AutoReview{10+ lines?}
+        AutoReview -->|Yes| GLMReviewAuto["GLM Auto-Review"]
+        AutoReview -->|No| LogOnly["Log Only"]
+
+        GLMReviewAuto --> NotifyChange([Notify User])
+        LogOnly --> NotifyChange
+    end
+
+    subgraph DangerousOperationFlow["⚠️ Dangerous Operation Flow"]
+        DangerOp([Dangerous Operation<br/>Detected])
+        DangerOp --> Level{Risk Level?}
+
+        Level -->|Level 1<br/>System Destructive| AskUser["Ask User<br/>(Must Confirm)"]
+        Level -->|Level 2<br/>Other Dangerous| Consensus["3-Party Consensus"]
+
+        Consensus --> Vote1["Claude<br/>(Self-Eval)"]
+        Consensus --> Vote2["Codex Security<br/>(Always Required)"]
+        Consensus --> Vote3{UI/UX Related?}
+
+        Vote3 -->|Yes| VoteGemini["Gemini<br/>(UI Review)"]
+        Vote3 -->|No| VoteGLM["GLM-4.7<br/>(Default)"]
+
+        Vote1 --> Tally["Vote Tally"]
+        Vote2 --> Tally
+        VoteGemini --> Tally
+        VoteGLM --> Tally
+
+        Tally --> Result{Result?}
+        Result -->|3 Approve| Execute([Execute])
+        Result -->|2 Approve| ExecuteLog([Execute with Log])
+        Result -->|1 Approve| Reject([Reject + Alternative])
+        Result -->|0 Approve| RejectFull([Full Reject])
+
+        AskUser -->|Approve| Execute
+        AskUser -->|Reject| RejectFull
+    end
+
+    %% Cross-flow connections
+    Complete -.->|Git Commit| GitWatch
+    AllowCommit -.->|Commit Allowed| GitWatch
+
+    %% Styling
+    classDef startClass fill:#e1f5ff,stroke:#0288d1,stroke-width:3px
+    classDef execClass fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+    classDef evalClass fill:#fff9c4,stroke:#f9a825,stroke-width:2px
+    classDef decisionClass fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef endClass fill:#fce4ec,stroke:#c2185b,stroke-width:3px
+    classDef dangerClass fill:#ffebee,stroke:#c62828,stroke-width:2px
+
+    class Start,GitWatch,DangerOp startClass
+    class GLMExec,CodexExec,GeminiExec,ClaudeExec,SubagentExec execClass
+    class EvalUI,EvalCode,EvalSec evalClass
+    class TaskType,ArtifactType,DetectChange,CommitCheck,AutoReview,Verdict,Level,Vote3,Result decisionClass
+    class Complete,AllowCommit,NotifyUser,NotifyChange,Execute,ExecuteLog,Reject,RejectFull endClass
+    class PreCommit,ParallelCheck,Consensus,Vote1,Vote2,VoteGemini,VoteGLM dangerClass

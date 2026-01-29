@@ -1,0 +1,90 @@
+graph TB
+    subgraph UserLayer["👤 User Layer"]
+        PWA["PWA (Progressive Web App)<br/>- Task Dashboard<br/>- Git Monitor<br/>- Approval UI"]
+    end
+
+    subgraph EdgeLayer["⚡ Edge Layer (Cloudflare Workers Hub)"]
+        Workers["Workers Hub<br/>- Webhook Router<br/>- Task Queue<br/>- Auth Gateway"]
+        D1["D1 Database<br/>- Tasks<br/>- Sessions<br/>- Audit Logs"]
+        KV["KV Store<br/>- Cache<br/>- Config"]
+        Queue["Queue<br/>- Task Processing<br/>- Retry Logic"]
+    end
+
+    subgraph LocalLayer["💻 Local Layer (Mac)"]
+        Agent["Local Agent<br/>- Daemon (3999)<br/>- Git Watcher<br/>- File System Access"]
+        GitRepo["Git Repository<br/>- Workspace<br/>- Commit Detection"]
+    end
+
+    subgraph ExecutionLayer["🚀 Execution Layer"]
+        Orchestrator["Claude Orchestrator<br/>- Task Routing<br/>- Delegation Logic<br/>- Context Management"]
+
+        subgraph Executors["Executors"]
+            Claude["Claude Code<br/>- Main Implementation<br/>- Code Generation"]
+            Codex["Codex (GPT Pro)<br/>- Architecture Design<br/>- Scope Analysis"]
+            GLM["GLM-4.7<br/>- Code Review<br/>- Math Reasoning<br/>(7 parallel max)"]
+            Pencil["Pencil MCP<br/>- .pen Design<br/>- Component Creation"]
+            Excalidraw["Excalidraw<br/>- Diagrams<br/>- Flow Charts"]
+            Subagent["Subagents<br/>- Explore<br/>- Parallel Tasks"]
+        end
+    end
+
+    subgraph EvaluationLayer["🔍 Evaluation Layer"]
+        GeminiUI["Gemini UI/UX Reviewer<br/>- Design Evaluation<br/>- Brand Consistency<br/>- UX Quality"]
+        GLMReview["GLM Code Reviewer<br/>- Code Quality (7pt)<br/>- Readability<br/>- Performance"]
+        CodexSec["Codex Security Analyst<br/>- Vulnerability Scan<br/>- OWASP Top 10<br/>- Auth Security"]
+    end
+
+    subgraph ReportingLayer["📊 Reporting Layer"]
+        Integration["Claude Integration<br/>- Feedback Consolidation<br/>- User Notification<br/>- Quality Gates"]
+    end
+
+    %% User Flow
+    PWA -->|Task Request| Workers
+    PWA -->|Monitor| Agent
+
+    %% Edge Layer
+    Workers --> D1
+    Workers --> KV
+    Workers --> Queue
+    Queue -->|Task Event| Agent
+
+    %% Local Layer
+    Agent -->|File Operations| GitRepo
+    GitRepo -->|Commit Detected| Agent
+    Agent -->|Execute| Orchestrator
+
+    %% Execution Flow
+    Orchestrator -->|Route by Type| Claude
+    Orchestrator -->|Design/Architecture| Codex
+    Orchestrator -->|Lightweight Review| GLM
+    Orchestrator -->|UI Design| Pencil
+    Orchestrator -->|Diagrams| Excalidraw
+    Orchestrator -->|Research| Subagent
+
+    %% Evaluation Flow
+    Claude -->|Implementation Done| GeminiUI
+    Claude -->|Code Done| GLMReview
+    Codex -->|Security Check| CodexSec
+    GLM -->|Implementation Done| GLMReview
+    Pencil -->|Design Done| GeminiUI
+
+    %% Reporting Flow
+    GeminiUI -->|UI Feedback| Integration
+    GLMReview -->|Code Feedback| Integration
+    CodexSec -->|Security Feedback| Integration
+    Integration -->|Report| PWA
+
+    %% Styling
+    classDef userClass fill:#e1f5ff,stroke:#0288d1,stroke-width:2px
+    classDef edgeClass fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef localClass fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef execClass fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+    classDef evalClass fill:#fff9c4,stroke:#f9a825,stroke-width:2px
+    classDef reportClass fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+
+    class PWA userClass
+    class Workers,D1,KV,Queue edgeClass
+    class Agent,GitRepo localClass
+    class Orchestrator,Claude,Codex,GLM,Pencil,Excalidraw,Subagent execClass
+    class GeminiUI,GLMReview,CodexSec evalClass
+    class Integration reportClass
