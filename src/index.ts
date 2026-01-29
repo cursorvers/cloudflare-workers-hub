@@ -36,8 +36,8 @@ import { handleAdvisorAPI } from './handlers/strategic-advisor-api';
 
 export type { Env };
 
-// Cockpit PWA HTML (inline for Workers) - Gemini UI/UX Design v2.0
-// Linear-style high-density list with keyboard navigation (J/K/Enter)
+// Cockpit PWA HTML (inline for Workers) - Gemini UI/UX Design v3.0
+// Phase 3: Swipe gestures, ARIA, Dynamic Type, Coach marks
 const COCKPIT_HTML = `<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -46,12 +46,14 @@ const COCKPIT_HTML = `<!DOCTYPE html>
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#121212">
+  <meta name="description" content="FUGUE Strategic Advisor - AI-powered development insights">
   <title>FUGUE Cockpit</title>
   <style>
-    :root{--bg:#121212;--surface:#1e1e1e;--border:#333;--primary:#5e6ad2;--text-high:#f3f4f6;--text-low:#9ca3af;--confidence-high:#10b981;--confidence-mid:#f59e0b;--danger:#ef4444;--safe-top:env(safe-area-inset-top);--safe-bottom:env(safe-area-inset-bottom)}
+    :root{--bg:#121212;--surface:#1e1e1e;--border:#333;--primary:#5e6ad2;--text-high:#f3f4f6;--text-low:#9ca3af;--confidence-high:#10b981;--confidence-mid:#f59e0b;--danger:#ef4444;--accept:#22c55e;--safe-top:env(safe-area-inset-top);--safe-bottom:env(safe-area-inset-bottom);--base-font:clamp(0.875rem,2.5vw,1rem)}
     *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-    html{font-size:14px}
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text-high);min-height:100vh;padding:calc(16px + var(--safe-top)) 12px calc(80px + var(--safe-bottom)) 12px}
+    html{font-size:var(--base-font);-webkit-text-size-adjust:100%}
+    @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text-high);min-height:100vh;min-height:100dvh;padding:calc(1rem + var(--safe-top)) 0.75rem calc(5rem + var(--safe-bottom)) 0.75rem}
     .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;padding:4px 0}
     h1{font-size:1.25rem;font-weight:600;letter-spacing:-0.02em}
     .status{display:flex;align-items:center;gap:6px;font-size:0.75rem;color:var(--text-low)}
@@ -62,10 +64,17 @@ const COCKPIT_HTML = `<!DOCTYPE html>
     .section-badge{background:var(--primary);color:#fff;padding:1px 6px;border-radius:8px;font-size:0.65rem}
     .kbd{font-size:0.6rem;color:var(--text-low);border:1px solid var(--border);padding:1px 4px;border-radius:3px;font-family:monospace}
     .insight-list{background:var(--surface);border-radius:10px;overflow:hidden;border:1px solid var(--border)}
-    .insight-item{display:flex;align-items:center;gap:10px;padding:14px 12px;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.15s;min-height:52px;outline:none}
+    .insight-item{position:relative;display:flex;align-items:center;gap:0.625rem;padding:0.875rem 0.75rem;border-bottom:1px solid var(--border);cursor:pointer;transition:transform 0.15s,background 0.15s;min-height:3.25rem;outline:none;touch-action:pan-y;overflow:hidden}
     .insight-item:last-child{border-bottom:none}
-    .insight-item:hover,.insight-item:focus{background:rgba(255,255,255,0.03)}
+    .insight-item:hover,.insight-item:focus-visible{background:rgba(255,255,255,0.03)}
+    .insight-item:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
     .insight-item.selected{background:rgba(94,106,210,0.15);border-left:2px solid var(--primary)}
+    .insight-item.swiping-right{background:linear-gradient(90deg,rgba(34,197,94,0.2) 0%,transparent 50%)}
+    .insight-item.swiping-left{background:linear-gradient(270deg,rgba(239,68,68,0.2) 0%,transparent 50%)}
+    .swipe-hint{position:absolute;top:50%;transform:translateY(-50%);font-size:1.25rem;opacity:0;transition:opacity 0.15s}
+    .swipe-hint.left{right:0.75rem}
+    .swipe-hint.right{left:0.75rem}
+    .insight-item.swiping-right .swipe-hint.right,.insight-item.swiping-left .swipe-hint.left{opacity:1}
     .insight-icon{flex-shrink:0;width:20px;height:20px;display:flex;align-items:center;justify-content:center}
     .insight-icon.strategic{color:#8b5cf6}
     .insight-icon.tactical{color:#3b82f6}
@@ -170,15 +179,19 @@ const COCKPIT_HTML = `<!DOCTYPE html>
 
   <script>
     let ws=null,token=new URLSearchParams(location.search).get('token'),insights=[],selectedIdx=-1;
+    // XSS prevention: escape HTML entities
+    function escapeHtml(str){if(!str)return '';return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
     function connectWS(){const u=\`\${location.protocol==='https:'?'wss:':'ws:'}/\${location.host}/api/ws\`+(token?\`?token=\${token}\`:'');ws=new WebSocket(u);ws.onopen=()=>{document.getElementById('statusDot').classList.add('connected');document.getElementById('statusText').textContent='Online'};ws.onclose=()=>{document.getElementById('statusDot').classList.remove('connected');document.getElementById('statusText').textContent='Offline';setTimeout(connectWS,5000)};ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==='git-status')renderRepos(m.repos)}}
 
     function renderInsights(data){insights=data;const c=document.getElementById('insights');const b=document.getElementById('insightBadge');b.textContent=data.length;b.style.display=data.length>0?'inline':'none';if(!data.length){c.innerHTML='<div class="no-data">No insights</div>';return}
     c.innerHTML=data.map((i,idx)=>{const conf=i.confidence||75;const confClass=conf>=80?'high':conf>=50?'mid':'low';const typeIcon={strategic:'⚡',tactical:'🎯',reflective:'💭',questioning:'❓'}[i.type]||'💡';const ago=i.createdAt?formatAgo(i.createdAt):'';
-    return \`<article class="insight-item\${idx===selectedIdx?' selected':''}" tabindex="0" data-idx="\${idx}" onclick="openInsight(\${idx})" onkeydown="handleInsightKey(event,\${idx})" aria-label="\${i.title}, confidence \${conf}%">
-      <div class="insight-icon \${i.type}">\${typeIcon}</div>
-      <div class="insight-content"><div class="insight-header"><span class="insight-title">\${i.title}</span><span class="insight-time">\${ago}</span></div><p class="insight-desc">\${i.description||''}</p></div>
+    return \`<article class="insight-item\${idx===selectedIdx?' selected':''}" tabindex="0" data-idx="\${idx}" onclick="openInsight(\${idx})" onkeydown="handleInsightKey(event,\${idx})" aria-label="\${escapeHtml(i.title)}, confidence \${conf}%">
+      <span class="swipe-hint right" aria-hidden="true">✓</span>
+      <div class="insight-icon \${escapeHtml(i.type)}">\${typeIcon}</div>
+      <div class="insight-content"><div class="insight-header"><span class="insight-title">\${escapeHtml(i.title)}</span><span class="insight-time">\${ago}</span></div><p class="insight-desc">\${escapeHtml(i.description)||''}</p></div>
       <div class="insight-confidence" title="Confidence: \${conf}%"><span class="confidence-value \${confClass}">\${conf}%</span><div class="confidence-bar"><div class="confidence-bar-fill \${confClass}" style="height:\${conf}%"></div></div></div>
-    </article>\`}).join('')}
+      <span class="swipe-hint left" aria-hidden="true">✗</span>
+    </article>\`}).join('');initSwipeGestures()}
 
     function handleInsightKey(e,idx){if(e.key==='Enter'||e.key===' '){e.preventDefault();openInsight(idx)}}
     document.addEventListener('keydown',e=>{if(document.getElementById('sheet').classList.contains('open')){if(e.key==='Escape')closeSheet();if(e.key==='a')handleAction('accepted');if(e.key==='x')handleAction('dismissed');if(e.key==='s')handleAction('snoozed');return}
@@ -188,23 +201,42 @@ const COCKPIT_HTML = `<!DOCTYPE html>
     if(e.key==='r'){e.preventDefault();refresh()}})
     function focusInsight(){const item=document.querySelector(\`.insight-item[data-idx="\${selectedIdx}"]\`);if(item)item.focus()}
 
-    function openInsight(idx){const i=insights[idx];if(!i)return;selectedIdx=idx;renderInsights(insights);const typeLabel={strategic:'Strategic',tactical:'Tactical',reflective:'Reflective',questioning:'Questioning'}[i.type]||i.type;
-    document.getElementById('sheetBody').innerHTML=\`<span class="sheet-tag">\${typeLabel}</span><h2 class="sheet-title">\${i.title}</h2><p class="sheet-desc">\${i.description||''}</p>\${i.suggestedAction?\`<div class="sheet-code">\${i.suggestedAction}</div>\`:''}\`;
+    function openInsight(idx){const i=insights[idx];if(!i)return;selectedIdx=idx;renderInsights(insights);const typeLabel={strategic:'Strategic',tactical:'Tactical',reflective:'Reflective',questioning:'Questioning'}[i.type]||escapeHtml(i.type);
+    document.getElementById('sheetBody').innerHTML=\`<span class="sheet-tag">\${escapeHtml(typeLabel)}</span><h2 class="sheet-title">\${escapeHtml(i.title)}</h2><p class="sheet-desc">\${escapeHtml(i.description)||''}</p>\${i.suggestedAction?\`<div class="sheet-code">\${escapeHtml(i.suggestedAction)}</div>\`:''}\`;
     document.getElementById('sheetActions').innerHTML=\`<button class="sheet-btn secondary" onclick="handleAction('snoozed')">Snooze (S)</button><button class="sheet-btn danger" onclick="handleAction('dismissed')">Dismiss (X)</button><button class="sheet-btn primary" onclick="handleAction('accepted')">Accept (A)</button>\`;
     document.getElementById('sheet').classList.add('open')}
     function closeSheet(){document.getElementById('sheet').classList.remove('open')}
     async function handleAction(action){const i=insights[selectedIdx];if(!i)return;closeSheet();try{await fetch('/api/advisor/insights/'+i.id+'/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});fetchData()}catch(e){console.error(e)}}
 
-    function renderRepos(repos){const c=document.getElementById('repos');if(!repos||!repos.length){c.innerHTML='<div class="no-data">No repositories</div>';return}c.innerHTML=repos.map(r=>{const cnt=r.uncommitted_count||r.uncommittedCount||0;const ahead=r.ahead_count||r.aheadCount||0;let status='clean',badge='Clean';if(cnt>0){status='dirty';badge=cnt+' changes'}else if(ahead>0){status='ahead';badge=ahead+' ahead'}return \`<div class="repo-item"><div><div class="repo-name">\${r.name}</div><div class="repo-branch">\${r.branch||'main'}</div></div><span class="badge \${status}">\${badge}</span></div>\`}).join('')}
+    function renderRepos(repos){const c=document.getElementById('repos');if(!repos||!repos.length){c.innerHTML='<div class="no-data">No repositories</div>';return}c.innerHTML=repos.map(r=>{const cnt=r.uncommitted_count||r.uncommittedCount||0;const ahead=r.ahead_count||r.aheadCount||0;let status='clean',badge='Clean';if(cnt>0){status='dirty';badge=cnt+' changes'}else if(ahead>0){status='ahead';badge=ahead+' ahead'}return \`<div class="repo-item"><div><div class="repo-name">\${escapeHtml(r.name)}</div><div class="repo-branch">\${escapeHtml(r.branch||'main')}</div></div><span class="badge \${status}">\${badge}</span></div>\`}).join('')}
 
-    function renderTasks(tasks){const c=document.getElementById('tasks');const b=document.getElementById('taskBadge');const active=tasks.filter(t=>t.status!=='completed');b.textContent=active.length;b.style.display=active.length>0?'inline':'none';if(!tasks||!tasks.length){c.innerHTML='<div class="no-data">No tasks</div>';return}c.innerHTML=tasks.slice(0,5).map(t=>{const statusLabel={pending:'Pending',in_progress:'Running',completed:'Done'}[t.status]||t.status;return \`<div class="task-item"><div><div class="task-name">\${t.task_type||t.taskType||'Task'}</div><div class="task-meta">\${t.id?.slice(0,8)||''}</div></div><span class="badge \${t.status}">\${statusLabel}</span></div>\`}).join('')}
+    function renderTasks(tasks){const c=document.getElementById('tasks');const b=document.getElementById('taskBadge');const active=tasks.filter(t=>t.status!=='completed');b.textContent=active.length;b.style.display=active.length>0?'inline':'none';if(!tasks||!tasks.length){c.innerHTML='<div class="no-data">No tasks</div>';return}c.innerHTML=tasks.slice(0,5).map(t=>{const statusLabel={pending:'Pending',in_progress:'Running',completed:'Done'}[t.status]||escapeHtml(t.status);return \`<div class="task-item"><div><div class="task-name">\${escapeHtml(t.task_type||t.taskType||'Task')}</div><div class="task-meta">\${escapeHtml(t.id?.slice(0,8)||'')}</div></div><span class="badge \${escapeHtml(t.status)}">\${statusLabel}</span></div>\`}).join('')}
 
-    function renderDaemons(daemons){const c=document.getElementById('daemons');if(!daemons||!daemons.length){c.innerHTML='<div class="no-data">No daemons</div>';return}c.innerHTML=daemons.map(d=>{const online=d.status==='healthy'||d.is_healthy;const ago=d.last_heartbeat?formatAgo(d.last_heartbeat):'Unknown';return \`<div class="daemon-item"><div style="display:flex;align-items:center"><div class="daemon-dot \${online?'online':'offline'}"></div><div><div class="daemon-name">\${d.daemon_id||d.daemonId||'Local Agent'}</div><div class="daemon-time">Last: \${ago}</div></div></div></div>\`}).join('')}
+    function renderDaemons(daemons){const c=document.getElementById('daemons');if(!daemons||!daemons.length){c.innerHTML='<div class="no-data">No daemons</div>';return}c.innerHTML=daemons.map(d=>{const online=d.status==='healthy'||d.is_healthy;const ago=d.last_heartbeat?formatAgo(d.last_heartbeat):'Unknown';return \`<div class="daemon-item"><div style="display:flex;align-items:center"><div class="daemon-dot \${online?'online':'offline'}"></div><div><div class="daemon-name">\${escapeHtml(d.daemon_id||d.daemonId||'Local Agent')}</div><div class="daemon-time">Last: \${ago}</div></div></div></div>\`}).join('')}
 
     function formatAgo(ts){const s=Math.floor((Date.now()/1000)-(typeof ts==='number'?ts:new Date(ts).getTime()/1000));if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';return Math.floor(s/3600)+'h'}
     function toggleDarkMode(){document.body.style.filter=document.body.style.filter?'':'invert(0.9) hue-rotate(180deg)'}
 
-    async function fetchData(){try{const opts={credentials:'include',headers:token?{Authorization:'Bearer '+token}:{}};const[rr,tr,dr,ir]=await Promise.all([fetch('/api/cockpit/repos',opts),fetch('/api/cockpit/tasks',opts),fetch('/api/daemon/health',opts),fetch('/api/advisor/insights?limit=5',opts)]);if(rr.ok){const d=await rr.json();renderRepos(d.repos||d.data||d)}if(tr.ok){const d=await tr.json();renderTasks(d.tasks||d.data||[])}if(dr.ok){const d=await dr.json();renderDaemons(d.daemons||d.data||[])}if(ir.ok){const d=await ir.json();renderInsights(d.data||[])}document.getElementById('updated').textContent='Updated: '+new Date().toLocaleTimeString('ja-JP')}catch(e){console.error(e)}}
+    // Phase 3: Swipe gesture support (vanilla JS, no Hammer.js)
+    const SWIPE_THRESHOLD=80,SWIPE_VELOCITY=0.3;
+    function initSwipeGestures(){document.querySelectorAll('.insight-item').forEach((el,idx)=>{let startX=0,startY=0,currentX=0,isDragging=false,startTime=0;
+    el.addEventListener('touchstart',e=>{if(e.touches.length!==1)return;startX=e.touches[0].clientX;startY=e.touches[0].clientY;currentX=startX;isDragging=true;startTime=Date.now();el.style.transition='none'},{passive:true});
+    el.addEventListener('touchmove',e=>{if(!isDragging)return;const dx=e.touches[0].clientX-startX,dy=e.touches[0].clientY-startY;if(Math.abs(dy)>Math.abs(dx)*1.5){isDragging=false;resetSwipe(el);return}currentX=e.touches[0].clientX;const clampedDx=Math.max(-100,Math.min(100,dx));el.style.transform=\`translateX(\${clampedDx}px)\`;el.classList.toggle('swiping-right',dx>30);el.classList.toggle('swiping-left',dx<-30)},{passive:true});
+    el.addEventListener('touchend',e=>{if(!isDragging){resetSwipe(el);return}const dx=currentX-startX,dt=(Date.now()-startTime)/1000,v=Math.abs(dx)/dt/1000;if(Math.abs(dx)>SWIPE_THRESHOLD||v>SWIPE_VELOCITY){if(dx>0){selectedIdx=idx;handleAction('accepted')}else{selectedIdx=idx;handleAction('dismissed')}}resetSwipe(el);isDragging=false},{passive:true});
+    el.addEventListener('touchcancel',()=>{resetSwipe(el);isDragging=false},{passive:true})})}
+    function resetSwipe(el){el.style.transition='transform 0.2s';el.style.transform='';el.classList.remove('swiping-right','swiping-left')}
+
+    // Phase 3: Coach marks for first-time users
+    function showCoachMark(){if(localStorage.getItem('fugue_coach_seen'))return;if(!insights.length)return;const cm=document.createElement('div');cm.id='coachMark';cm.innerHTML=\`<div style="position:fixed;inset:0;z-index:100;background:rgba(0,0,0,0.7);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;text-align:center">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:300px">
+        <div style="font-size:2rem;margin-bottom:12px">👆</div>
+        <h3 style="font-size:1rem;margin-bottom:8px">Swipe Gestures</h3>
+        <p style="font-size:0.875rem;color:var(--text-low);margin-bottom:16px;line-height:1.5">Swipe right to <span style="color:var(--accept)">Accept</span>, left to <span style="color:var(--danger)">Dismiss</span>. Or use keyboard: <span class="kbd">J</span>/<span class="kbd">K</span> to navigate, <span class="kbd">Enter</span> for details.</p>
+        <button onclick="dismissCoachMark()" style="background:var(--primary);color:#fff;border:none;padding:10px 20px;border-radius:6px;font-size:0.875rem;cursor:pointer">Got it</button>
+      </div></div>\`;document.body.appendChild(cm)}
+    function dismissCoachMark(){localStorage.setItem('fugue_coach_seen','1');const cm=document.getElementById('coachMark');if(cm)cm.remove()}
+
+    async function fetchData(){try{const opts={credentials:'include',headers:token?{Authorization:'Bearer '+token}:{}};const[rr,tr,dr,ir]=await Promise.all([fetch('/api/cockpit/repos',opts),fetch('/api/cockpit/tasks',opts),fetch('/api/daemon/health',opts),fetch('/api/advisor/insights?limit=5',opts)]);if(rr.ok){const d=await rr.json();renderRepos(d.repos||d.data||d)}if(tr.ok){const d=await tr.json();renderTasks(d.tasks||d.data||[])}if(dr.ok){const d=await dr.json();renderDaemons(d.daemons||d.data||[])}if(ir.ok){const d=await ir.json();renderInsights(d.data||[]);showCoachMark()}document.getElementById('updated').textContent='Updated: '+new Date().toLocaleTimeString('ja-JP')}catch(e){console.error(e)}}
     function refresh(){fetchData()}
     connectWS();fetchData();setInterval(fetchData,30000);
   </script>
@@ -316,15 +348,28 @@ export default {
 
     // Strategic Advisor API endpoints (for FUGUE insights) - with CORS
     if (path.startsWith('/api/advisor')) {
+      // CSRF protection: restrict CORS to same origin or trusted domains
+      const origin = request.headers.get('Origin') || '';
+      const allowedOrigins = ['https://orchestrator-hub.masa-stage1.workers.dev', 'http://localhost:8787'];
+      const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
       const corsHeaders = {
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': allowOrigin,
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Allow-Credentials': 'true',
       };
 
       // Handle CORS preflight
       if (request.method === 'OPTIONS') {
         return new Response(null, { status: 204, headers: corsHeaders });
+      }
+
+      // CSRF protection: Reject cross-origin POST requests without valid origin
+      if (request.method === 'POST' && origin && !allowedOrigins.includes(origin)) {
+        safeLog.warn('[Advisor API] CSRF: rejected cross-origin POST', { origin });
+        return new Response(JSON.stringify({ error: 'Forbidden: Invalid origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
       }
 
       const response = await handleAdvisorAPI(request, env, path);
@@ -339,15 +384,28 @@ export default {
 
     // Cockpit API endpoints (for FUGUE monitoring) - with CORS
     if (path.startsWith('/api/cockpit')) {
+      // CSRF protection: restrict CORS to same origin or trusted domains
+      const origin = request.headers.get('Origin') || '';
+      const allowedOrigins = ['https://orchestrator-hub.masa-stage1.workers.dev', 'http://localhost:8787'];
+      const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
       const corsHeaders = {
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': allowOrigin,
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Allow-Credentials': 'true',
       };
 
       // Handle CORS preflight
       if (request.method === 'OPTIONS') {
         return new Response(null, { status: 204, headers: corsHeaders });
+      }
+
+      // CSRF protection: Reject cross-origin POST requests without valid origin
+      if (request.method === 'POST' && origin && !allowedOrigins.includes(origin)) {
+        safeLog.warn('[Cockpit API] CSRF: rejected cross-origin POST', { origin });
+        return new Response(JSON.stringify({ error: 'Forbidden: Invalid origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
       }
 
       const response = await handleCockpitAPI(request, env, path);
@@ -377,6 +435,18 @@ export default {
         hasCookie: request.headers.get('Cookie')?.includes('CF_Authorization') || false,
       });
 
+      // Check for token-based auth as fallback (for PWA)
+      const tokenParam = url.searchParams.get('token');
+      let isTokenAuth = false;
+      if (tokenParam && env.QUEUE_API_KEY && tokenParam === env.QUEUE_API_KEY) {
+        isTokenAuth = true;
+        authHeaders = {
+          'X-Access-User-Id': 'system',
+          'X-Access-User-Role': 'admin',
+        };
+        safeLog.log('[WebSocket] Token auth passed');
+      }
+
       if (accessResult.verified && accessResult.email) {
         // Map Access user to internal user for RBAC
         const internalUser = await mapAccessUserToInternal(accessResult.email, env);
@@ -392,6 +462,12 @@ export default {
             role: internalUser.role,
           });
         }
+      }
+
+      // SECURITY: Require authentication for WebSocket connections
+      if (!accessResult.verified && !isTokenAuth) {
+        safeLog.warn('[WebSocket] Unauthorized connection attempt blocked');
+        return new Response('Unauthorized: Authentication required for WebSocket', { status: 401 });
       }
 
       const doId = env.COCKPIT_WS.idFromName('cockpit');
