@@ -5,7 +5,12 @@ import { useWebSocket, type WebSocketMessage } from '@/hooks/useWebSocket';
 import { ConnectionStatus } from '@/components/ConnectionStatus';
 import { TaskList, type Task } from '@/components/TaskList';
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'wss://orchestrator-hub.masa-stage1.workers.dev/ws/cockpit';
+// WebSocket URL with API key fallback for authentication
+const WS_BASE = process.env.NEXT_PUBLIC_WS_URL || 'wss://orchestrator-hub.masa-stage1.workers.dev/api/ws';
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY;
+
+// Build WebSocket URL with optional token parameter for fallback auth
+const WS_URL = API_KEY ? `${WS_BASE}?token=${API_KEY}` : WS_BASE;
 
 /**
  * FUGUE Cockpit - Mobile-First Dashboard
