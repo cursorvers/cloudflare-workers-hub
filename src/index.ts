@@ -437,14 +437,19 @@ export default {
 
       // Check for token-based auth as fallback (for PWA)
       const tokenParam = url.searchParams.get('token');
+      const apiKeyHeader = request.headers.get('X-API-Key');
       let isTokenAuth = false;
-      if (tokenParam && env.QUEUE_API_KEY && tokenParam === env.QUEUE_API_KEY) {
+
+      // Support both query param and X-API-Key header
+      if (env.QUEUE_API_KEY && (tokenParam === env.QUEUE_API_KEY || apiKeyHeader === env.QUEUE_API_KEY)) {
         isTokenAuth = true;
         authHeaders = {
-          'X-Access-User-Id': 'system',
-          'X-Access-User-Role': 'admin',
+          'X-Access-User-Id': apiKeyHeader ? 'local-agent' : 'system',
+          'X-Access-User-Role': 'operator',
         };
-        safeLog.log('[WebSocket] Token auth passed');
+        safeLog.log('[WebSocket] API key auth passed', {
+          method: apiKeyHeader ? 'header' : 'query',
+        });
       }
 
       if (accessResult.verified && accessResult.email) {
