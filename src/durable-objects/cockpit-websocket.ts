@@ -28,6 +28,7 @@ import { DurableObject } from 'cloudflare:workers';
 import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { z } from 'zod';
+import { verifyAccessToken, hasPermission, type UserRole } from '../utils/jwt-auth';
 
 // =============================================================================
 // Message Schemas (Zod validation)
@@ -150,6 +151,8 @@ type GitStatus = z.infer<typeof GitStatusSchema>;
 
 interface AgentConnection {
   agentId: string;
+  userId: string;      // JWT sub claim
+  role: UserRole;      // JWT role claim
   connectedAt: string;
   lastPingAt?: string;
   status: 'online' | 'offline' | 'busy' | 'idle';
@@ -210,28 +213,136 @@ export class CockpitWebSocket extends DurableObject<Env> {
   }
 
   /**
-   * Handle WebSocket upgrade request with authentication
+   * Handle WebSocket upgrade request with multiple authentication methods
+   *
+   * Supports three authentication methods (in priority order):
+   * 1. Cloudflare Access (for PWA via Access-protected routes) - via X-Access-User-* headers from main router
+   * 2. API Key (for Local Agent/service accounts) - via X-API-Key header or Bearer token matching QUEUE_API_KEY
+   * 3. JWT token (for direct access) - via query param or Authorization header
    */
   private async handleWebSocketUpgrade(request: Request): Promise<Response> {
-    // Verify API key
-    const apiKey = this.env.QUEUE_API_KEY || this.env.ASSISTANT_API_KEY;
-    if (apiKey) {
-      const authHeader = request.headers.get('Authorization');
-      const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
-      if (token !== apiKey) {
-        safeLog.warn('[CockpitWebSocket] Unauthorized upgrade attempt');
-        return new Response('Unauthorized', { status: 401 });
+    // Extract credentials from various sources
+    const url = new URL(request.url);
+    const queryToken = url.searchParams.get('token');
+    const authHeader = request.headers.get('Authorization');
+    const headerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    const apiKeyHeader = request.headers.get('X-API-Key');
+    const agentIdHeader = request.headers.get('X-Agent-Id');
+
+    // Check for pre-verified Cloudflare Access user (from main router)
+    const accessUserId = request.headers.get('X-Access-User-Id');
+    const accessUserRole = request.headers.get('X-Access-User-Role');
+    const accessUserEmail = request.headers.get('X-Access-User-Email');
+
+    // Method 1: Cloudflare Access (pre-verified by main router)
+    if (accessUserId && accessUserRole) {
+      safeLog.log('[CockpitWebSocket] Cloudflare Access authentication', {
+        userId: accessUserId,
+        role: accessUserRole,
+        email: accessUserEmail,
+      });
+
+      // Check WebSocket permission
+      if (!hasPermission('WS', '/ws', accessUserRole as UserRole)) {
+        safeLog.warn('[CockpitWebSocket] Insufficient permissions for WebSocket', {
+          role: accessUserRole,
+        });
+        return new Response('Forbidden: Insufficient permissions', { status: 403 });
       }
+
+      // Upgrade to WebSocket
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+
+      const sessionData = {
+        userId: accessUserId,
+        role: accessUserRole as UserRole,
+        email: accessUserEmail,
+        authMethod: 'cloudflare-access',
+      };
+
+      this.ctx.acceptWebSocket(server, [JSON.stringify(sessionData)]);
+
+      safeLog.log('[CockpitWebSocket] WebSocket upgraded (Cloudflare Access)', {
+        userId: accessUserId,
+        role: accessUserRole,
+      });
+
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+      });
+    }
+
+    // Method 2: API Key authentication (for Local Agent)
+    if (this.env.QUEUE_API_KEY && (apiKeyHeader === this.env.QUEUE_API_KEY || headerToken === this.env.QUEUE_API_KEY)) {
+      safeLog.log('[CockpitWebSocket] API Key authentication for Local Agent', { agentId: agentIdHeader });
+
+      // Upgrade to WebSocket with service account credentials
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+
+      const sessionData = {
+        userId: agentIdHeader || 'local-agent',
+        role: 'operator' as UserRole,
+        isServiceAccount: true,
+        authMethod: 'api-key',
+      };
+
+      this.ctx.acceptWebSocket(server, [JSON.stringify(sessionData)]);
+
+      safeLog.log('[CockpitWebSocket] WebSocket upgraded (Service Account)', {
+        agentId: agentIdHeader,
+      });
+
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+      });
+    }
+
+    // Method 3: JWT token (legacy/direct access)
+    const token = queryToken || headerToken;
+
+    if (!token) {
+      safeLog.warn('[CockpitWebSocket] Missing authentication (Access, JWT, or API Key)');
+      return new Response('Unauthorized: Missing token or API key', { status: 401 });
+    }
+
+    // Verify JWT token
+    const payload = await verifyAccessToken(token, this.env);
+    if (!payload) {
+      safeLog.warn('[CockpitWebSocket] Invalid JWT token');
+      return new Response('Unauthorized: Invalid token', { status: 401 });
+    }
+
+    // Check WebSocket permission (admin + operator only)
+    if (!hasPermission('WS', '/ws', payload.role)) {
+      safeLog.warn('[CockpitWebSocket] Insufficient permissions for WebSocket', {
+        role: payload.role,
+      });
+      return new Response('Forbidden: Insufficient permissions', { status: 403 });
     }
 
     // Upgrade to WebSocket
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
-    // Accept the WebSocket connection
-    this.ctx.acceptWebSocket(server);
+    // Store user info in session (will be set in agent-status message)
+    // For now, we'll pass it via tag
+    const sessionData = {
+      userId: payload.sub,
+      role: payload.role,
+      authMethod: 'jwt',
+    };
 
-    safeLog.log('[CockpitWebSocket] WebSocket upgraded');
+    // Accept the WebSocket connection with tags
+    this.ctx.acceptWebSocket(server, [JSON.stringify(sessionData)]);
+
+    safeLog.log('[CockpitWebSocket] WebSocket upgraded', {
+      userId: payload.sub,
+      role: payload.role,
+    });
 
     return new Response(null, {
       status: 101,
@@ -335,8 +446,25 @@ export class CockpitWebSocket extends DurableObject<Env> {
   ): Promise<void> {
     const { agentId, status, capabilities, metadata } = message;
 
+    // Extract user info from WebSocket tags (set during upgrade)
+    const tags = this.ctx.getTags(ws);
+    let userId = 'unknown';
+    let role: UserRole = 'viewer';
+
+    if (tags.length > 0) {
+      try {
+        const sessionData = JSON.parse(tags[0]);
+        userId = sessionData.userId;
+        role = sessionData.role;
+      } catch (error) {
+        safeLog.warn('[CockpitWebSocket] Failed to parse session data from tags');
+      }
+    }
+
     const agent: AgentConnection = {
       agentId,
+      userId,
+      role,
       connectedAt: new Date().toISOString(),
       status,
       capabilities,
@@ -352,6 +480,8 @@ export class CockpitWebSocket extends DurableObject<Env> {
 
     safeLog.log('[CockpitWebSocket] Agent status updated', {
       agentId,
+      userId,
+      role,
       status,
       capabilities,
     });

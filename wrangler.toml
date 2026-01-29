@@ -58,6 +58,9 @@ ENVIRONMENT = "development"
 LIMITLESS_AUTO_SYNC_ENABLED = "true"
 LIMITLESS_USER_ID = "masayuki"
 LIMITLESS_SYNC_INTERVAL_HOURS = "1"
+# Cloudflare Access (Zero Trust)
+CF_ACCESS_TEAM = "masa-stage1"
+# CF_ACCESS_AUD is set via wrangler secret
 
 # Development settings
 [dev]
@@ -66,7 +69,8 @@ local_protocol = "http"
 
 # Production environment
 [env.production]
-vars = { ENVIRONMENT = "production" }
+vars = { ENVIRONMENT = "production", CF_ACCESS_TEAM = "masa-stage1" }
+# CF_ACCESS_AUD should be set via wrangler secret or dashboard after Access app creation
 
 [env.production.ai]
 binding = "AI"

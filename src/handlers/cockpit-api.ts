@@ -15,6 +15,20 @@
 import { z } from 'zod';
 import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
+import {
+  authenticateRequest,
+  authorizeRequest,
+  generateAccessToken,
+  generateRefreshToken,
+  verifyRefreshToken,
+  rotateRefreshToken,
+  getUserRole,
+  type UserRole,
+} from '../utils/jwt-auth';
+import {
+  authenticateWithAccess,
+  mapAccessUserToInternal,
+} from '../utils/cloudflare-access';
 
 // =============================================================================
 // Request Schemas
@@ -27,22 +41,179 @@ const CreateTaskSchema = z.object({
   payload: z.unknown().optional(),
 });
 
+const LoginSchema = z.object({
+  email: z.string().email(),
+  // In production, add password field and implement proper authentication
+  // For now, this is a simplified login for JWT token issuance
+});
+
+const RefreshTokenSchema = z.object({
+  refreshToken: z.string().min(1),
+});
+
+const PushSubscriptionSchema = z.object({
+  subscription: z.object({
+    endpoint: z.string().url(),
+    keys: z.object({
+      p256dh: z.string(),
+      auth: z.string(),
+    }),
+  }),
+  userId: z.string().optional(),
+});
+
+const UnsubscribeSchema = z.object({
+  endpoint: z.string().url(),
+});
+
 // =============================================================================
 // Helper Functions
 // =============================================================================
 
 /**
- * Verify API key
+ * Authentication & Authorization Middleware
+ *
+ * Authentication priority:
+ * 1. Cloudflare Access JWT (Cf-Access-Jwt-Assertion header) - Zero Trust authentication
+ * 2. Standard JWT (Authorization: Bearer) - Fallback for API clients and migration period
+ *
+ * This dual-auth approach allows:
+ * - PWA users to authenticate via Google SSO through Cloudflare Access
+ * - API clients to continue using existing JWT authentication
+ * - Gradual migration without breaking existing integrations
  */
-function verifyApiKey(request: Request, env: Env): boolean {
-  const apiKey = env.QUEUE_API_KEY || env.ASSISTANT_API_KEY;
-  if (!apiKey) {
-    return true; // No key configured, allow access
+async function authenticateAndAuthorize(
+  request: Request,
+  env: Env
+): Promise<{ success: boolean; userId?: string; role?: UserRole; response?: Response }> {
+  let userId: string | undefined;
+  let role: UserRole | undefined;
+  let authMethod: 'access' | 'jwt' | undefined;
+
+  // Try Cloudflare Access authentication first (Zero Trust)
+  const accessResult = await authenticateWithAccess(request, env);
+  if (accessResult.verified && accessResult.email) {
+    // Map Access user to internal user for RBAC
+    const internalUser = await mapAccessUserToInternal(accessResult.email, env);
+    if (internalUser) {
+      userId = internalUser.userId;
+      role = internalUser.role as UserRole;
+      authMethod = 'access';
+      safeLog.log('[Auth] Authenticated via Cloudflare Access', {
+        email: accessResult.email,
+        userId,
+        role,
+        roleType: typeof role,
+        roleLength: role?.length,
+      });
+    } else {
+      // User authenticated with Access but not found in our system
+      safeLog.warn('[Auth] Access user not found in system', {
+        email: accessResult.email,
+      });
+      return {
+        success: false,
+        response: new Response(
+          JSON.stringify({
+            error: 'User not registered',
+            message: 'Your account is authenticated but not registered in the system.',
+          }),
+          {
+            status: 403,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        ),
+      };
+    }
   }
 
-  const authHeader = request.headers.get('Authorization');
-  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
-  return token === apiKey;
+  // Fallback to standard JWT authentication if Access didn't succeed
+  if (!userId || !role) {
+    const authResult = await authenticateRequest(request, env);
+    if (!authResult.authenticated) {
+      return {
+        success: false,
+        response: new Response(JSON.stringify({ error: authResult.error || 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      };
+    }
+    userId = authResult.userId;
+    role = authResult.role;
+    authMethod = 'jwt';
+    safeLog.log('[Auth] Authenticated via JWT', { userId, role });
+  }
+
+  // Authorize (check RBAC)
+  safeLog.log('[Auth] Calling authorizeRequest', { userId, role, method: request.method, url: request.url });
+  const authzResult = await authorizeRequest(request, userId!, role!);
+  safeLog.log('[Auth] authorizeRequest result', { authzResult });
+  if (!authzResult.authorized) {
+    // Log to audit trail
+    await logAuditEvent(env, {
+      userId: userId!,
+      action: 'access_denied',
+      endpoint: new URL(request.url).pathname,
+      method: request.method,
+      status: 'denied',
+      errorMessage: authzResult.error,
+    });
+
+    return {
+      success: false,
+      response: new Response(JSON.stringify({ error: authzResult.error || 'Forbidden' }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    };
+  }
+
+  // Log successful access with auth method
+  await logAuditEvent(env, {
+    userId: userId!,
+    action: `access_granted_via_${authMethod}`,
+    endpoint: new URL(request.url).pathname,
+    method: request.method,
+    status: 'success',
+  });
+
+  return { success: true, userId, role };
+}
+
+/**
+ * Log audit event
+ */
+async function logAuditEvent(
+  env: Env,
+  event: {
+    userId: string;
+    action: string;
+    endpoint: string;
+    method: string;
+    status: 'success' | 'denied' | 'error';
+    errorMessage?: string;
+  }
+): Promise<void> {
+  if (!env.DB) return;
+
+  try {
+    await env.DB.prepare(`
+      INSERT INTO cockpit_audit_log (user_id, action, endpoint, method, status, error_message)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      event.userId,
+      event.action,
+      event.endpoint,
+      event.method,
+      event.status,
+      event.errorMessage || null
+    ).run();
+  } catch (error) {
+    safeLog.error('[Audit] Failed to log event', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**
@@ -53,7 +224,152 @@ function generateTaskId(): string {
 }
 
 // =============================================================================
-// Route Handlers
+// Authentication Route Handlers
+// =============================================================================
+
+/**
+ * POST /api/cockpit/auth/login
+ * Issue JWT tokens (simplified - add proper password auth in production)
+ */
+async function handleLogin(request: Request, env: Env): Promise<Response> {
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: 'Database not available' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  try {
+    const body = await request.json();
+    const validated = LoginSchema.parse(body);
+
+    // Look up user by email
+    const user = await env.DB.prepare(`
+      SELECT user_id, role, is_active FROM cockpit_users WHERE email = ?
+    `).bind(validated.email).first<{ user_id: string; role: UserRole; is_active: number }>();
+
+    if (!user || !user.is_active) {
+      return new Response(JSON.stringify({ error: 'Invalid credentials' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Generate tokens
+    const accessToken = await generateAccessToken(user.user_id, user.role, env);
+    const refreshToken = await generateRefreshToken(user.user_id, env);
+
+    safeLog.log('[Auth] User logged in', { userId: user.user_id });
+
+    return new Response(JSON.stringify({
+      accessToken,
+      refreshToken,
+      expiresIn: 900, // 15 minutes in seconds
+      user: {
+        id: user.user_id,
+        role: user.role,
+      },
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return new Response(JSON.stringify({
+        error: 'Validation failed',
+        details: error.errors,
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    safeLog.error('[Auth] Login failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return new Response(JSON.stringify({ error: 'Internal error' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+}
+
+/**
+ * POST /api/cockpit/auth/refresh
+ * Rotate refresh token and issue new access token
+ */
+async function handleRefreshToken(request: Request, env: Env): Promise<Response> {
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: 'Database not available' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  try {
+    const body = await request.json();
+    const validated = RefreshTokenSchema.parse(body);
+
+    // Verify and rotate refresh token
+    const newRefreshToken = await rotateRefreshToken(validated.refreshToken, env);
+    if (!newRefreshToken) {
+      return new Response(JSON.stringify({ error: 'Invalid refresh token' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Get user role
+    const userId = await verifyRefreshToken(newRefreshToken, env);
+    if (!userId) {
+      return new Response(JSON.stringify({ error: 'Invalid refresh token' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const role = await getUserRole(userId, env);
+    if (!role) {
+      return new Response(JSON.stringify({ error: 'User not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Generate new access token
+    const accessToken = await generateAccessToken(userId, role, env);
+
+    safeLog.log('[Auth] Token refreshed', { userId });
+
+    return new Response(JSON.stringify({
+      accessToken,
+      refreshToken: newRefreshToken,
+      expiresIn: 900, // 15 minutes in seconds
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return new Response(JSON.stringify({
+        error: 'Validation failed',
+        details: error.errors,
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    safeLog.error('[Auth] Token refresh failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return new Response(JSON.stringify({ error: 'Internal error' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+}
+
+// =============================================================================
+// Resource Route Handlers
 // =============================================================================
 
 /**
@@ -371,15 +687,22 @@ async function handleAckAlert(request: Request, env: Env, alertId: string): Prom
 // =============================================================================
 
 export async function handleCockpitAPI(request: Request, env: Env, path: string): Promise<Response> {
-  // Verify API key
-  if (!verifyApiKey(request, env)) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' },
-    });
+  // Auth endpoints (no JWT required)
+  if (path === '/api/cockpit/auth/login' && request.method === 'POST') {
+    return handleLogin(request, env);
   }
 
-  // Route requests
+  if (path === '/api/cockpit/auth/refresh' && request.method === 'POST') {
+    return handleRefreshToken(request, env);
+  }
+
+  // All other endpoints require JWT authentication
+  const authResult = await authenticateAndAuthorize(request, env);
+  if (!authResult.success) {
+    return authResult.response!;
+  }
+
+  // Route requests (all protected by JWT + RBAC)
   if (path === '/api/cockpit/tasks' && request.method === 'GET') {
     return handleGetTasks(request, env);
   }

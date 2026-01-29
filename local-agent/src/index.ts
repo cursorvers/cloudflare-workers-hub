@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import 'dotenv/config';
 import WebSocket from 'ws';
 import { loadConfig, type Config } from './config.js';
 import { MultiRepoMonitor, type GitStatus } from './git-monitor.js';
@@ -29,6 +30,11 @@ class LocalAgent {
     console.log('✅ FUGUE Cockpit Local Agent 初期化完了');
     console.log(`📁 監視対象リポジトリ: ${this.config.repositories.length}件`);
     console.log(`🔄 チェック間隔: ${this.config.checkInterval / 1000}秒`);
+    if (this.config.tunnelEnabled) {
+      console.log(`🚇 Cloudflare Tunnel: ${this.config.tunnelHostname || 'Not configured'}`);
+    } else {
+      console.log('🔗 接続モード: Direct');
+    }
     if (this.observability.isAvailable()) {
       console.log('📊 Observability 同期: 有効');
     }
@@ -52,23 +58,39 @@ class LocalAgent {
   }
 
   /**
+   * 接続先 URL を決定
+   * Tunnel が有効な場合は Tunnel 経由、そうでなければ直接接続
+   */
+  private getConnectionUrl(): string {
+    if (this.config.tunnelEnabled && this.config.tunnelHostname) {
+      // Cloudflare Tunnel 経由 (wss://)
+      return `wss://${this.config.tunnelHostname}/ws`;
+    }
+    // 直接接続 (workersHubUrl から)
+    return this.config.workersHubUrl.replace(/^http/, 'ws') + '/ws';
+  }
+
+  /**
    * Workers Hub に接続
    */
   private async connectToHub(): Promise<void> {
-    const wsUrl = this.config.workersHubUrl.replace(/^http/, 'ws') + '/ws';
+    const wsUrl = this.getConnectionUrl();
+    const connectionMode = this.config.tunnelEnabled ? 'Tunnel' : 'Direct';
 
-    console.log(`🔌 Workers Hub に接続中: ${wsUrl}`);
+    console.log(`🔌 Workers Hub に接続中 (${connectionMode}): ${wsUrl}`);
 
     this.ws = new WebSocket(wsUrl, {
       headers: {
-        'Authorization': `Bearer ${this.config.authentication.apiKey}`,
+        'X-API-Key': this.config.authentication.apiKey,
         'X-Agent-Id': this.config.agent.id,
       },
     });
 
-    this.ws.on('open', () => {
+    this.ws.on('open', async () => {
       console.log('✅ Workers Hub に接続しました');
       this.sendAgentStatus('online');
+      // 接続後すぐに Git ステータスを送信
+      await this.sendGitStatuses();
     });
 
     this.ws.on('message', (data) => {
@@ -214,27 +236,65 @@ class LocalAgent {
 
   /**
    * エージェントステータスを送信
+   * CockpitWebSocket が期待する形式に合わせる
    */
   private sendAgentStatus(status: 'online' | 'offline'): void {
     this.send({
       type: 'agent-status',
-      agent: this.config.agent,
+      agentId: this.config.agent.id,
       status,
-      timestamp: new Date().toISOString(),
+      capabilities: this.config.agent.capabilities,
+      metadata: { name: this.config.agent.name },
     });
   }
 
   /**
    * Git ステータスを送信
+   * CockpitWebSocket DO が期待する形式に変換
    */
   private async sendGitStatuses(statuses?: GitStatus[]): Promise<void> {
     const statusesToSend = statuses || (await this.monitor.getAllStatuses());
 
+    // Transform to CockpitWebSocket expected format
+    const repos = statusesToSend.map((status) => {
+      // Extract repo name from path
+      const pathParts = status.path.split('/');
+      const name = pathParts[pathParts.length - 1] || status.path;
+
+      // Determine status based on dirty flag and ahead/behind counts
+      let repoStatus: 'clean' | 'dirty' | 'ahead' | 'behind' | 'diverged' = 'clean';
+      if (status.isDirty) {
+        repoStatus = 'dirty';
+      } else if (status.ahead > 0 && status.behind > 0) {
+        repoStatus = 'diverged';
+      } else if (status.ahead > 0) {
+        repoStatus = 'ahead';
+      } else if (status.behind > 0) {
+        repoStatus = 'behind';
+      }
+
+      // Generate stable ID from path
+      const id = status.path
+        .replace(/[^a-zA-Z0-9]/g, '_')
+        .toLowerCase()
+        .slice(0, 64);
+
+      return {
+        id,
+        path: status.path,
+        name,
+        branch: status.branch,
+        status: repoStatus,
+        uncommittedCount: status.modified + status.created + status.deleted,
+        aheadCount: status.ahead,
+        behindCount: status.behind,
+        modifiedFiles: [], // Could be populated with actual file names if needed
+      };
+    });
+
     this.send({
       type: 'git-status',
-      agentId: this.config.agent.id,
-      statuses: statusesToSend,
-      timestamp: new Date().toISOString(),
+      repos,
     });
   }
 

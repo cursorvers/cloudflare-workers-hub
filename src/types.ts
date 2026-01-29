@@ -69,4 +69,11 @@ export interface Env {
   GOOGLE_SHARE_EMAIL?: string;     // Email to share generated slides with
   GCP_PROJECT_ID?: string;         // GCP project ID (for quota attribution)
   SLIDES_AUTO_GENERATE?: string;   // Enable/disable auto slide generation (default: false)
+  // JWT Authentication (Cockpit API)
+  JWT_SECRET?: string;             // HS256 secret for development
+  JWT_PRIVATE_KEY?: string;        // RS256 private key for production
+  JWT_PUBLIC_KEY?: string;         // RS256 public key for production
+  // Cloudflare Access (Zero Trust)
+  CF_ACCESS_TEAM?: string;         // Cloudflare Access team domain (e.g., "masa-stage1")
+  CF_ACCESS_AUD?: string;          // Application AUD tag from Access dashboard
 }
