@@ -17,6 +17,8 @@ import type {
 } from '../schemas/strategic-advisor';
 import { parsePlans, getCompletionRate, getPendingTaskCount } from './plans-parser';
 import { safeLog } from '../utils/log-sanitizer';
+import { getRuleEngine } from './insight-rules';
+import { analyzeWithAI } from './ai-provider';
 
 // =============================================================================
 // Constants
@@ -313,7 +315,7 @@ export async function getStrategicContext(env: Env): Promise<StrategicContext> {
 }
 
 /**
- * 洞察を取得
+ * 洞察を取得（ルールエンジン統合版）
  */
 export async function getInsights(
   env: Env,
@@ -321,10 +323,32 @@ export async function getInsights(
     limit?: number;
     types?: InsightType[];
     includeDismissed?: boolean;
+    useRuleEngine?: boolean;
   }
 ): Promise<Insight[]> {
   const context = await getStrategicContext(env);
-  let insights = generateInsights(context);
+
+  // ルールエンジンとレガシー生成を併用
+  const ruleEngine = getRuleEngine();
+  const ruleInsights = ruleEngine.generateInsights(context);
+  const legacyInsights = generateInsights(context);
+
+  // 重複を除去してマージ（ルールエンジンを優先）
+  const insightMap = new Map<string, Insight>();
+  for (const insight of legacyInsights) {
+    insightMap.set(insight.id, insight);
+  }
+  for (const insight of ruleInsights) {
+    insightMap.set(insight.id, insight);
+  }
+
+  let insights = Array.from(insightMap.values());
+
+  safeLog.log('[StrategicContext] Insights generated', {
+    ruleEngineCount: ruleInsights.length,
+    legacyCount: legacyInsights.length,
+    mergedCount: insights.length,
+  });
 
   // フィルタリング
   if (options?.types && options.types.length > 0) {
@@ -346,6 +370,75 @@ export async function getInsights(
   // 件数制限
   const limit = options?.limit || 3;
   return insights.slice(0, limit);
+}
+
+/**
+ * AI を使用してコンテキストから高度な洞察を生成
+ */
+export async function generateAIInsights(
+  env: Env,
+  context: StrategicContext
+): Promise<Insight[]> {
+  const prompt = `以下の開発コンテキストを分析し、戦略的な洞察を3つ生成してください。
+
+## コンテキスト
+- 現在のフェーズ: ${context.currentPhase}
+- アクティブなゴール数: ${context.goals.filter(g => g.status === 'active').length}
+- 完了済みゴール数: ${context.goals.filter(g => g.status === 'completed').length}
+- 最近の意思決定: ${context.decisions.slice(0, 3).map(d => d.title).join(', ') || 'なし'}
+- 開発速度: ${context.velocity ? `${context.velocity.tasksCompletedPerWeek / 7} tasks/day` : '不明'}
+
+## 出力形式（JSON）
+[
+  {
+    "type": "strategic" | "tactical" | "reflective" | "questioning",
+    "title": "短いタイトル",
+    "description": "詳細な説明",
+    "suggestedAction": "推奨アクション",
+    "confidence": 0.0-1.0,
+    "priority": "high" | "medium" | "low"
+  }
+]`;
+
+  try {
+    const result = await analyzeWithAI(prompt, '', env, { preferredProvider: 'auto' });
+
+    // JSON を抽出してパース
+    const jsonMatch = result.content.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      safeLog.warn('[StrategicContext] AI did not return valid JSON');
+      return [];
+    }
+
+    const rawInsights = JSON.parse(jsonMatch[0]) as Array<{
+      type: InsightType;
+      title: string;
+      description: string;
+      suggestedAction?: string;
+      confidence: number;
+      priority: 'high' | 'medium' | 'low';
+    }>;
+
+    const now = Date.now();
+    return rawInsights.map((raw, idx) => ({
+      id: `ai-insight-${now}-${idx}`,
+      type: raw.type,
+      title: raw.title,
+      description: raw.description,
+      rationale: `AI analysis by ${result.provider}`,
+      suggestedAction: raw.suggestedAction,
+      confidence: raw.confidence,
+      priority: raw.priority,
+      actionable: !!raw.suggestedAction,
+      source: 'ai-analysis',
+      createdAt: now,
+    }));
+  } catch (error) {
+    safeLog.error('[StrategicContext] AI insight generation failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
 }
 
 /**

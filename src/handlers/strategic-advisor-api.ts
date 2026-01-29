@@ -189,7 +189,7 @@ export async function handleSubmitFeedback(
   insightId: string
 ): Promise<Response> {
   try {
-    const body = await request.json();
+    const body = await request.json() as Record<string, unknown>;
     const parsed = SubmitFeedbackRequestSchema.safeParse({
       ...body,
       insightId,
