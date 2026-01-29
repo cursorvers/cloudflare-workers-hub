@@ -32,77 +32,179 @@ import { handleLimitlessAPI } from './handlers/limitless-api';
 import { handleLimitlessWebhook } from './handlers/limitless-webhook';
 import { handleScheduled } from './handlers/scheduled';
 import { handleCockpitAPI } from './handlers/cockpit-api';
+import { handleAdvisorAPI } from './handlers/strategic-advisor-api';
 
 export type { Env };
 
-// Cockpit PWA HTML (inline for Workers)
+// Cockpit PWA HTML (inline for Workers) - Gemini UI/UX Design v2.0
+// Linear-style high-density list with keyboard navigation (J/K/Enter)
 const COCKPIT_HTML = `<!DOCTYPE html>
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#121212">
   <title>FUGUE Cockpit</title>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%); color: #f8fafc; min-height: 100vh; padding: 16px; }
-    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; padding: 8px 0; }
-    h1 { font-size: 24px; font-weight: 600; color: #fff; }
-    .status { display: flex; align-items: center; gap: 8px; font-size: 14px; background: rgba(255,255,255,0.1); padding: 6px 12px; border-radius: 20px; }
-    .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 8px #ef4444; }
-    .status-dot.connected { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
-    .card { background: rgba(255,255,255,0.95); border: none; border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.15); color: #1e293b; }
-    .card-title { font-size: 13px; color: #64748b; margin-bottom: 16px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
-    .card-badge { background: #3b82f6; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
-    .repo { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid #e2e8f0; }
-    .repo:last-child { border-bottom: none; }
-    .repo-name { font-weight: 600; color: #0f172a; font-size: 15px; }
-    .repo-branch { font-size: 12px; color: #64748b; margin-top: 2px; }
-    .repo-status { padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; }
-    .repo-status.clean { background: #dcfce7; color: #166534; }
-    .repo-status.dirty { background: #fee2e2; color: #dc2626; }
-    .repo-status.ahead { background: #dbeafe; color: #1d4ed8; }
-    .task { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #e2e8f0; }
-    .task:last-child { border-bottom: none; }
-    .task-name { font-weight: 500; color: #0f172a; font-size: 14px; }
-    .task-meta { font-size: 11px; color: #64748b; margin-top: 2px; }
-    .task-status { padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; }
-    .task-status.pending { background: #fef3c7; color: #92400e; }
-    .task-status.in_progress { background: #dbeafe; color: #1d4ed8; }
-    .task-status.completed { background: #dcfce7; color: #166534; }
-    .daemon { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
-    .daemon-dot { width: 8px; height: 8px; border-radius: 50%; }
-    .daemon-dot.online { background: #22c55e; }
-    .daemon-dot.offline { background: #ef4444; }
-    .daemon-info { flex: 1; }
-    .daemon-name { font-weight: 500; color: #0f172a; font-size: 14px; }
-    .daemon-time { font-size: 11px; color: #64748b; }
-    .no-data { color: #94a3b8; text-align: center; padding: 24px; font-size: 14px; }
-    .btn { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: white; border: none; padding: 14px 24px; border-radius: 12px; font-size: 15px; font-weight: 600; cursor: pointer; width: 100%; box-shadow: 0 4px 12px rgba(37,99,235,0.3); transition: transform 0.2s, box-shadow 0.2s; }
-    .btn:active { transform: scale(0.98); }
-    .updated { font-size: 11px; color: rgba(255,255,255,0.6); text-align: center; margin-top: 12px; }
+    :root{--bg:#121212;--surface:#1e1e1e;--border:#333;--primary:#5e6ad2;--text-high:#f3f4f6;--text-low:#9ca3af;--confidence-high:#10b981;--confidence-mid:#f59e0b;--danger:#ef4444;--safe-top:env(safe-area-inset-top);--safe-bottom:env(safe-area-inset-bottom)}
+    *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+    html{font-size:14px}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text-high);min-height:100vh;padding:calc(16px + var(--safe-top)) 12px calc(80px + var(--safe-bottom)) 12px}
+    .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;padding:4px 0}
+    h1{font-size:1.25rem;font-weight:600;letter-spacing:-0.02em}
+    .status{display:flex;align-items:center;gap:6px;font-size:0.75rem;color:var(--text-low)}
+    .status-dot{width:8px;height:8px;border-radius:50%;background:var(--danger)}
+    .status-dot.connected{background:var(--confidence-high);box-shadow:0 0 6px var(--confidence-high)}
+    .section{margin-bottom:20px}
+    .section-title{display:flex;justify-content:space-between;align-items:center;font-size:0.7rem;color:var(--text-low);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;padding:0 4px}
+    .section-badge{background:var(--primary);color:#fff;padding:1px 6px;border-radius:8px;font-size:0.65rem}
+    .kbd{font-size:0.6rem;color:var(--text-low);border:1px solid var(--border);padding:1px 4px;border-radius:3px;font-family:monospace}
+    .insight-list{background:var(--surface);border-radius:10px;overflow:hidden;border:1px solid var(--border)}
+    .insight-item{display:flex;align-items:center;gap:10px;padding:14px 12px;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.15s;min-height:52px;outline:none}
+    .insight-item:last-child{border-bottom:none}
+    .insight-item:hover,.insight-item:focus{background:rgba(255,255,255,0.03)}
+    .insight-item.selected{background:rgba(94,106,210,0.15);border-left:2px solid var(--primary)}
+    .insight-icon{flex-shrink:0;width:20px;height:20px;display:flex;align-items:center;justify-content:center}
+    .insight-icon.strategic{color:#8b5cf6}
+    .insight-icon.tactical{color:#3b82f6}
+    .insight-icon.reflective{color:#22c55e}
+    .insight-icon.questioning{color:#f59e0b}
+    .insight-content{flex:1;min-width:0}
+    .insight-header{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+    .insight-title{font-size:0.875rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .insight-time{font-size:0.7rem;font-family:monospace;color:var(--text-low);flex-shrink:0}
+    .insight-desc{font-size:0.75rem;color:var(--text-low);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+    .insight-confidence{flex-shrink:0;display:flex;align-items:center;gap:4px}
+    .confidence-value{font-size:0.75rem;font-family:monospace}
+    .confidence-value.high{color:var(--confidence-high)}
+    .confidence-value.mid{color:var(--confidence-mid)}
+    .confidence-value.low{color:var(--danger)}
+    .confidence-bar{width:3px;height:14px;background:var(--border);border-radius:2px;overflow:hidden;display:flex;flex-direction:column-reverse}
+    .confidence-bar-fill{width:100%;background:var(--confidence-high);transition:height 0.3s}
+    .confidence-bar-fill.mid{background:var(--confidence-mid)}
+    .confidence-bar-fill.low{background:var(--danger)}
+    .no-data{color:var(--text-low);text-align:center;padding:20px;font-size:0.8rem}
+    .repo-list,.task-list,.daemon-list{background:var(--surface);border-radius:10px;overflow:hidden;border:1px solid var(--border)}
+    .repo-item,.task-item,.daemon-item{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid var(--border)}
+    .repo-item:last-child,.task-item:last-child,.daemon-item:last-child{border-bottom:none}
+    .repo-name,.task-name,.daemon-name{font-size:0.875rem;font-weight:500}
+    .repo-branch,.task-meta,.daemon-time{font-size:0.7rem;color:var(--text-low);margin-top:1px}
+    .badge{padding:3px 8px;border-radius:4px;font-size:0.65rem;font-weight:600}
+    .badge.clean{background:rgba(34,197,94,0.15);color:#22c55e}
+    .badge.dirty{background:rgba(239,68,68,0.15);color:#ef4444}
+    .badge.ahead{background:rgba(59,130,246,0.15);color:#3b82f6}
+    .badge.pending{background:rgba(245,158,11,0.15);color:#f59e0b}
+    .badge.in_progress{background:rgba(59,130,246,0.15);color:#3b82f6}
+    .badge.completed{background:rgba(34,197,94,0.15);color:#22c55e}
+    .daemon-dot{width:6px;height:6px;border-radius:50%;margin-right:8px}
+    .daemon-dot.online{background:#22c55e}
+    .daemon-dot.offline{background:#ef4444}
+    .bottom-sheet{position:fixed;inset:0;z-index:50;display:flex;align-items:flex-end;justify-content:center;pointer-events:none;opacity:0;transition:opacity 0.2s}
+    .bottom-sheet.open{opacity:1;pointer-events:auto}
+    .sheet-backdrop{position:absolute;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px)}
+    .sheet-content{position:relative;width:100%;max-width:420px;background:var(--bg);border:1px solid var(--border);border-bottom:none;border-radius:16px 16px 0 0;max-height:85vh;display:flex;flex-direction:column;transform:translateY(100%);transition:transform 0.25s ease-out}
+    .bottom-sheet.open .sheet-content{transform:translateY(0)}
+    .sheet-handle{width:100%;display:flex;justify-content:center;padding:10px 0 6px}
+    .sheet-handle-bar{width:36px;height:4px;background:var(--border);border-radius:2px}
+    .sheet-body{flex:1;overflow-y:auto;padding:0 16px 16px}
+    .sheet-tag{display:inline-block;padding:3px 8px;border-radius:4px;font-size:0.7rem;font-weight:500;background:rgba(94,106,210,0.2);color:var(--primary);margin-bottom:10px}
+    .sheet-title{font-size:1.25rem;font-weight:700;margin-bottom:12px;line-height:1.3}
+    .sheet-desc{font-size:0.875rem;color:var(--text-low);line-height:1.5;margin-bottom:16px}
+    .sheet-code{background:#0a0a0a;border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.75rem;font-family:'SF Mono',Menlo,monospace;overflow-x:auto;color:var(--text-low);white-space:pre;margin-bottom:16px}
+    .sheet-actions{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--border);padding:12px 16px calc(12px + var(--safe-bottom));display:flex;gap:8px}
+    .sheet-btn{flex:1;padding:12px;border-radius:8px;font-size:0.875rem;font-weight:600;border:none;cursor:pointer;transition:transform 0.1s,opacity 0.1s}
+    .sheet-btn:active{transform:scale(0.97)}
+    .sheet-btn.secondary{background:var(--surface);color:var(--text-low);border:1px solid var(--border)}
+    .sheet-btn.danger{background:rgba(239,68,68,0.15);color:var(--danger);border:1px solid rgba(239,68,68,0.3)}
+    .sheet-btn.primary{background:var(--primary);color:#fff}
+    .bottom-bar{position:fixed;bottom:0;left:0;right:0;background:var(--bg);border-top:1px solid var(--border);padding:10px 12px calc(10px + var(--safe-bottom));display:flex;gap:8px}
+    .bottom-bar-btn{flex:1;padding:10px;border-radius:8px;font-size:0.8rem;font-weight:500;border:none;cursor:pointer;background:var(--surface);color:var(--text-low);transition:background 0.15s}
+    .bottom-bar-btn:active{background:var(--border)}
+    .bottom-bar-btn.active{background:var(--primary);color:#fff}
+    .updated{font-size:0.65rem;color:var(--text-low);text-align:center;margin-top:8px}
   </style>
 </head>
 <body>
   <div class="header">
-    <h1>FUGUE Cockpit</h1>
-    <div class="status"><div id="statusDot" class="status-dot"></div><span id="statusText">切断</span></div>
+    <h1>FUGUE</h1>
+    <div class="status"><div id="statusDot" class="status-dot"></div><span id="statusText">Offline</span></div>
   </div>
-  <div class="card"><div class="card-title"><span>GIT リポジトリ</span></div><div id="repos"><div class="no-data">読み込み中...</div></div></div>
-  <div class="card"><div class="card-title"><span>タスク</span><span id="taskBadge" class="card-badge" style="display:none">0</span></div><div id="tasks"><div class="no-data">タスクなし</div></div></div>
-  <div class="card"><div class="card-title"><span>DAEMON 状態</span></div><div id="daemons"><div class="no-data">読み込み中...</div></div></div>
-  <div class="card"><div class="card-title"><span>アラート</span></div><div id="alerts"><div class="no-data">アラートなし</div></div></div>
-  <button class="btn" onclick="refresh()">更新</button>
+
+  <div class="section">
+    <div class="section-title"><span>💡 Insights</span><div style="display:flex;gap:6px;align-items:center"><span id="insightBadge" class="section-badge" style="display:none">0</span><span class="kbd">J/K</span></div></div>
+    <div id="insights" class="insight-list"><div class="no-data">Loading...</div></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title"><span>Repositories</span></div>
+    <div id="repos" class="repo-list"><div class="no-data">Loading...</div></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title"><span>Tasks</span><span id="taskBadge" class="section-badge" style="display:none">0</span></div>
+    <div id="tasks" class="task-list"><div class="no-data">No tasks</div></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title"><span>Daemons</span></div>
+    <div id="daemons" class="daemon-list"><div class="no-data">Loading...</div></div>
+  </div>
+
   <div id="updated" class="updated"></div>
+
+  <div id="sheet" class="bottom-sheet">
+    <div class="sheet-backdrop" onclick="closeSheet()"></div>
+    <div class="sheet-content" role="dialog" aria-modal="true">
+      <div class="sheet-handle"><div class="sheet-handle-bar"></div></div>
+      <div class="sheet-body" id="sheetBody"></div>
+      <div class="sheet-actions" id="sheetActions"></div>
+    </div>
+  </div>
+
+  <div class="bottom-bar">
+    <button class="bottom-bar-btn" onclick="refresh()">↻ Refresh</button>
+    <button class="bottom-bar-btn" onclick="toggleDarkMode()">◐ Mode</button>
+  </div>
+
   <script>
-    let ws=null,token=new URLSearchParams(location.search).get('token');
-    function connectWS(){const u=\`\${location.protocol==='https:'?'wss:':'ws:'}/\${location.host}/api/ws\`+(token?\`?token=\${token}\`:'');ws=new WebSocket(u);ws.onopen=()=>{document.getElementById('statusDot').classList.add('connected');document.getElementById('statusText').textContent='接続中'};ws.onclose=()=>{document.getElementById('statusDot').classList.remove('connected');document.getElementById('statusText').textContent='切断';setTimeout(connectWS,5000)};ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==='git-status')renderRepos(m.repos)}}
-    function renderRepos(repos){const c=document.getElementById('repos');if(!repos||!repos.length){c.innerHTML='<div class="no-data">リポジトリなし</div>';return}c.innerHTML=repos.map(r=>{const cnt=r.uncommitted_count||r.uncommittedCount||0;const ahead=r.ahead_count||r.aheadCount||0;const behind=r.behind_count||r.behindCount||0;let status=r.status||'clean';let badge='';if(cnt>0){badge=cnt+' 変更';status='dirty';}else if(ahead>0){badge=ahead+' ahead';status='ahead';}else if(behind>0){badge=behind+' behind';status='behind';}else{badge='Clean';status='clean';}return \`<div class="repo"><div><div class="repo-name">\${r.name}</div><div class="repo-branch">\${r.branch||'main'}</div></div><div class="repo-status \${status}">\${badge}</div></div>\`}).join('')}
-    function renderTasks(tasks){const c=document.getElementById('tasks');const b=document.getElementById('taskBadge');const active=tasks.filter(t=>t.status!=='completed');b.textContent=active.length;b.style.display=active.length>0?'inline':'none';if(!tasks||!tasks.length){c.innerHTML='<div class="no-data">タスクなし</div>';return}c.innerHTML=tasks.slice(0,5).map(t=>\`<div class="task"><div><div class="task-name">\${t.task_type||t.taskType||'Task'}</div><div class="task-meta">\${t.id?.slice(0,8)||''}</div></div><div class="task-status \${t.status}">\${t.status==='pending'?'待機':t.status==='in_progress'?'実行中':'完了'}</div></div>\`).join('')}
-    function renderDaemons(daemons){const c=document.getElementById('daemons');if(!daemons||!daemons.length){c.innerHTML='<div class="no-data">Daemon なし</div>';return}c.innerHTML=daemons.map(d=>{const online=d.status==='healthy'||d.is_healthy;const ago=d.last_heartbeat?formatAgo(d.last_heartbeat):'不明';return \`<div class="daemon"><div class="daemon-dot \${online?'online':'offline'}"></div><div class="daemon-info"><div class="daemon-name">\${d.daemon_id||d.daemonId||'Local Agent'}</div><div class="daemon-time">最終: \${ago}</div></div></div>\`}).join('')}
-    function formatAgo(ts){const s=Math.floor((Date.now()/1000)-(typeof ts==='number'?ts:new Date(ts).getTime()/1000));if(s<60)return s+'秒前';if(s<3600)return Math.floor(s/60)+'分前';return Math.floor(s/3600)+'時間前';}
-    async function fetchData(){try{const opts={credentials:'include',headers:token?{Authorization:'Bearer '+token}:{}};const[rr,tr,dr,ar]=await Promise.all([fetch('/api/cockpit/repos',opts),fetch('/api/cockpit/tasks',opts),fetch('/api/daemon/health',opts),fetch('/api/cockpit/alerts',opts)]);if(rr.ok){const d=await rr.json();renderRepos(d.repos||d.data||d)}if(tr.ok){const d=await tr.json();renderTasks(d.tasks||d.data||[])}if(dr.ok){const d=await dr.json();renderDaemons(d.daemons||d.data||[])}if(ar.ok){const d=await ar.json();const c=document.getElementById('alerts');c.innerHTML=(!d.alerts&&!d.data)||(d.alerts||d.data).length===0?'<div class="no-data">アラートなし</div>':(d.alerts||d.data).map(a=>\`<div style="background:#7f1d1d;border:1px solid #991b1b;padding:12px;border-radius:8px;margin-bottom:8px;color:#fecaca"><div style="font-weight:500">\${a.message}</div></div>\`).join('')}document.getElementById('updated').textContent='更新: '+new Date().toLocaleTimeString('ja-JP');}catch(e){console.error(e)}}
+    let ws=null,token=new URLSearchParams(location.search).get('token'),insights=[],selectedIdx=-1;
+    function connectWS(){const u=\`\${location.protocol==='https:'?'wss:':'ws:'}/\${location.host}/api/ws\`+(token?\`?token=\${token}\`:'');ws=new WebSocket(u);ws.onopen=()=>{document.getElementById('statusDot').classList.add('connected');document.getElementById('statusText').textContent='Online'};ws.onclose=()=>{document.getElementById('statusDot').classList.remove('connected');document.getElementById('statusText').textContent='Offline';setTimeout(connectWS,5000)};ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==='git-status')renderRepos(m.repos)}}
+
+    function renderInsights(data){insights=data;const c=document.getElementById('insights');const b=document.getElementById('insightBadge');b.textContent=data.length;b.style.display=data.length>0?'inline':'none';if(!data.length){c.innerHTML='<div class="no-data">No insights</div>';return}
+    c.innerHTML=data.map((i,idx)=>{const conf=i.confidence||75;const confClass=conf>=80?'high':conf>=50?'mid':'low';const typeIcon={strategic:'⚡',tactical:'🎯',reflective:'💭',questioning:'❓'}[i.type]||'💡';const ago=i.createdAt?formatAgo(i.createdAt):'';
+    return \`<article class="insight-item\${idx===selectedIdx?' selected':''}" tabindex="0" data-idx="\${idx}" onclick="openInsight(\${idx})" onkeydown="handleInsightKey(event,\${idx})" aria-label="\${i.title}, confidence \${conf}%">
+      <div class="insight-icon \${i.type}">\${typeIcon}</div>
+      <div class="insight-content"><div class="insight-header"><span class="insight-title">\${i.title}</span><span class="insight-time">\${ago}</span></div><p class="insight-desc">\${i.description||''}</p></div>
+      <div class="insight-confidence" title="Confidence: \${conf}%"><span class="confidence-value \${confClass}">\${conf}%</span><div class="confidence-bar"><div class="confidence-bar-fill \${confClass}" style="height:\${conf}%"></div></div></div>
+    </article>\`}).join('')}
+
+    function handleInsightKey(e,idx){if(e.key==='Enter'||e.key===' '){e.preventDefault();openInsight(idx)}}
+    document.addEventListener('keydown',e=>{if(document.getElementById('sheet').classList.contains('open')){if(e.key==='Escape')closeSheet();if(e.key==='a')handleAction('accepted');if(e.key==='x')handleAction('dismissed');if(e.key==='s')handleAction('snoozed');return}
+    if(e.key==='j'||e.key==='ArrowDown'){e.preventDefault();selectedIdx=Math.min(selectedIdx+1,insights.length-1);renderInsights(insights);focusInsight()}
+    if(e.key==='k'||e.key==='ArrowUp'){e.preventDefault();selectedIdx=Math.max(selectedIdx-1,0);renderInsights(insights);focusInsight()}
+    if((e.key==='Enter'||e.key===' ')&&selectedIdx>=0){e.preventDefault();openInsight(selectedIdx)}
+    if(e.key==='r'){e.preventDefault();refresh()}})
+    function focusInsight(){const item=document.querySelector(\`.insight-item[data-idx="\${selectedIdx}"]\`);if(item)item.focus()}
+
+    function openInsight(idx){const i=insights[idx];if(!i)return;selectedIdx=idx;renderInsights(insights);const typeLabel={strategic:'Strategic',tactical:'Tactical',reflective:'Reflective',questioning:'Questioning'}[i.type]||i.type;
+    document.getElementById('sheetBody').innerHTML=\`<span class="sheet-tag">\${typeLabel}</span><h2 class="sheet-title">\${i.title}</h2><p class="sheet-desc">\${i.description||''}</p>\${i.suggestedAction?\`<div class="sheet-code">\${i.suggestedAction}</div>\`:''}\`;
+    document.getElementById('sheetActions').innerHTML=\`<button class="sheet-btn secondary" onclick="handleAction('snoozed')">Snooze (S)</button><button class="sheet-btn danger" onclick="handleAction('dismissed')">Dismiss (X)</button><button class="sheet-btn primary" onclick="handleAction('accepted')">Accept (A)</button>\`;
+    document.getElementById('sheet').classList.add('open')}
+    function closeSheet(){document.getElementById('sheet').classList.remove('open')}
+    async function handleAction(action){const i=insights[selectedIdx];if(!i)return;closeSheet();try{await fetch('/api/advisor/insights/'+i.id+'/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});fetchData()}catch(e){console.error(e)}}
+
+    function renderRepos(repos){const c=document.getElementById('repos');if(!repos||!repos.length){c.innerHTML='<div class="no-data">No repositories</div>';return}c.innerHTML=repos.map(r=>{const cnt=r.uncommitted_count||r.uncommittedCount||0;const ahead=r.ahead_count||r.aheadCount||0;let status='clean',badge='Clean';if(cnt>0){status='dirty';badge=cnt+' changes'}else if(ahead>0){status='ahead';badge=ahead+' ahead'}return \`<div class="repo-item"><div><div class="repo-name">\${r.name}</div><div class="repo-branch">\${r.branch||'main'}</div></div><span class="badge \${status}">\${badge}</span></div>\`}).join('')}
+
+    function renderTasks(tasks){const c=document.getElementById('tasks');const b=document.getElementById('taskBadge');const active=tasks.filter(t=>t.status!=='completed');b.textContent=active.length;b.style.display=active.length>0?'inline':'none';if(!tasks||!tasks.length){c.innerHTML='<div class="no-data">No tasks</div>';return}c.innerHTML=tasks.slice(0,5).map(t=>{const statusLabel={pending:'Pending',in_progress:'Running',completed:'Done'}[t.status]||t.status;return \`<div class="task-item"><div><div class="task-name">\${t.task_type||t.taskType||'Task'}</div><div class="task-meta">\${t.id?.slice(0,8)||''}</div></div><span class="badge \${t.status}">\${statusLabel}</span></div>\`}).join('')}
+
+    function renderDaemons(daemons){const c=document.getElementById('daemons');if(!daemons||!daemons.length){c.innerHTML='<div class="no-data">No daemons</div>';return}c.innerHTML=daemons.map(d=>{const online=d.status==='healthy'||d.is_healthy;const ago=d.last_heartbeat?formatAgo(d.last_heartbeat):'Unknown';return \`<div class="daemon-item"><div style="display:flex;align-items:center"><div class="daemon-dot \${online?'online':'offline'}"></div><div><div class="daemon-name">\${d.daemon_id||d.daemonId||'Local Agent'}</div><div class="daemon-time">Last: \${ago}</div></div></div></div>\`}).join('')}
+
+    function formatAgo(ts){const s=Math.floor((Date.now()/1000)-(typeof ts==='number'?ts:new Date(ts).getTime()/1000));if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';return Math.floor(s/3600)+'h'}
+    function toggleDarkMode(){document.body.style.filter=document.body.style.filter?'':'invert(0.9) hue-rotate(180deg)'}
+
+    async function fetchData(){try{const opts={credentials:'include',headers:token?{Authorization:'Bearer '+token}:{}};const[rr,tr,dr,ir]=await Promise.all([fetch('/api/cockpit/repos',opts),fetch('/api/cockpit/tasks',opts),fetch('/api/daemon/health',opts),fetch('/api/advisor/insights?limit=5',opts)]);if(rr.ok){const d=await rr.json();renderRepos(d.repos||d.data||d)}if(tr.ok){const d=await tr.json();renderTasks(d.tasks||d.data||[])}if(dr.ok){const d=await dr.json();renderDaemons(d.daemons||d.data||[])}if(ir.ok){const d=await ir.json();renderInsights(d.data||[])}document.getElementById('updated').textContent='Updated: '+new Date().toLocaleTimeString('ja-JP')}catch(e){console.error(e)}}
     function refresh(){fetchData()}
     connectWS();fetchData();setInterval(fetchData,30000);
   </script>
@@ -210,6 +312,29 @@ export default {
       }
       // Other Limitless API endpoints
       return handleLimitlessAPI(request, env, path);
+    }
+
+    // Strategic Advisor API endpoints (for FUGUE insights) - with CORS
+    if (path.startsWith('/api/advisor')) {
+      const corsHeaders = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      };
+
+      // Handle CORS preflight
+      if (request.method === 'OPTIONS') {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+
+      const response = await handleAdvisorAPI(request, env, path);
+
+      // Add CORS headers to response
+      const newResponse = new Response(response.body, response);
+      Object.entries(corsHeaders).forEach(([key, value]) => {
+        newResponse.headers.set(key, value);
+      });
+      return newResponse;
     }
 
     // Cockpit API endpoints (for FUGUE monitoring) - with CORS
