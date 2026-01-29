@@ -30,7 +30,7 @@ Local Agent (Mac)
 └── Log Streamer
 ```
 
-## 実装状況 (2026-01-28)
+## 実装状況 (2026-01-29)
 
 | Phase | 状態 | 主要ファイル |
 |-------|------|-------------|
@@ -39,7 +39,9 @@ Local Agent (Mac)
 | 3. Kanban MVP | ✅ DONE | `task-kanban.tsx` |
 | 4. Command Center | ✅ DONE | `command-center.tsx` |
 | 5. リアルタイム | ✅ DONE | `CockpitWebSocket` DO |
-| PWA Frontend | ✅ DONE | `/Users/masayuki/cockpit-pwa/` |
+| PWA Frontend | ✅ DONE | インライン HTML (`/cockpit`) |
+| **6. Cloudflare Access** | ✅ DONE | `cloudflare-access.ts`, Google SSO |
+| **7. Tunnel 設定** | ⏳ Optional | `local-agent/src/config.ts` (設定済み、cloudflared 未セットアップ) |
 
 ## 次のステップ: Local Agent 起動
 
@@ -55,6 +57,7 @@ npm run dev
 
 ## 残タスク
 
+### 完了済み
 - [x] Local Agent の API キー設定 ✅ (2026-01-29)
 - [x] WebSocket 認証修正 ✅ (2026-01-29) - クエリパラメータ方式
 - [x] タスク実行機能 (Commit/Push/Pull) ✅ (2026-01-29)
@@ -63,8 +66,14 @@ npm run dev
 - [x] JWT 詳細検証 ✅ (2026-01-29) - jwt-auth.ts, jose library
 - [x] RBAC 導入 ✅ (2026-01-29) - 3ロール (admin/operator/viewer)
 - [x] 401 エラー対応 ✅ (2026-01-29) - QUEUE_API_KEY 設定修正
-- [ ] Cloudflare Access 設定 (オプション)
-- [ ] Cloudflare Tunnel 設定 (オプション)
+- [x] **Cloudflare Access 設定** ✅ (2026-01-29) - Google SSO, Cookie/Header JWT 対応
+- [x] **WebSocket Access 認証** ✅ (2026-01-29) - 3方式対応 (Access/API Key/JWT)
+
+### 未完了（オプション）
+- [ ] Cloudflare Tunnel 設定 - NAT 越え接続（外部ネットワークからアクセス時に必要）
+- [ ] PWA 機能拡張 - タスク一覧、Daemon 状態表示
+- [ ] Push 通知統合 - VAPID 設定済み、フロントエンド連携待ち
+- [ ] Observability ダッシュボード - コスト/レイテンシ表示
 
 ---
 

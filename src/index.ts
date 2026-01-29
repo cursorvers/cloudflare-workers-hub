@@ -53,7 +53,8 @@ const COCKPIT_HTML = `<!DOCTYPE html>
     .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 8px #ef4444; }
     .status-dot.connected { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
     .card { background: rgba(255,255,255,0.95); border: none; border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.15); color: #1e293b; }
-    .card-title { font-size: 13px; color: #64748b; margin-bottom: 16px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+    .card-title { font-size: 13px; color: #64748b; margin-bottom: 16px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+    .card-badge { background: #3b82f6; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
     .repo { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid #e2e8f0; }
     .repo:last-child { border-bottom: none; }
     .repo-name { font-weight: 600; color: #0f172a; font-size: 15px; }
@@ -62,9 +63,25 @@ const COCKPIT_HTML = `<!DOCTYPE html>
     .repo-status.clean { background: #dcfce7; color: #166534; }
     .repo-status.dirty { background: #fee2e2; color: #dc2626; }
     .repo-status.ahead { background: #dbeafe; color: #1d4ed8; }
-    .no-data { color: #94a3b8; text-align: center; padding: 32px; font-size: 14px; }
+    .task { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #e2e8f0; }
+    .task:last-child { border-bottom: none; }
+    .task-name { font-weight: 500; color: #0f172a; font-size: 14px; }
+    .task-meta { font-size: 11px; color: #64748b; margin-top: 2px; }
+    .task-status { padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+    .task-status.pending { background: #fef3c7; color: #92400e; }
+    .task-status.in_progress { background: #dbeafe; color: #1d4ed8; }
+    .task-status.completed { background: #dcfce7; color: #166534; }
+    .daemon { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+    .daemon-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .daemon-dot.online { background: #22c55e; }
+    .daemon-dot.offline { background: #ef4444; }
+    .daemon-info { flex: 1; }
+    .daemon-name { font-weight: 500; color: #0f172a; font-size: 14px; }
+    .daemon-time { font-size: 11px; color: #64748b; }
+    .no-data { color: #94a3b8; text-align: center; padding: 24px; font-size: 14px; }
     .btn { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: white; border: none; padding: 14px 24px; border-radius: 12px; font-size: 15px; font-weight: 600; cursor: pointer; width: 100%; box-shadow: 0 4px 12px rgba(37,99,235,0.3); transition: transform 0.2s, box-shadow 0.2s; }
     .btn:active { transform: scale(0.98); }
+    .updated { font-size: 11px; color: rgba(255,255,255,0.6); text-align: center; margin-top: 12px; }
   </style>
 </head>
 <body>
@@ -72,16 +89,22 @@ const COCKPIT_HTML = `<!DOCTYPE html>
     <h1>FUGUE Cockpit</h1>
     <div class="status"><div id="statusDot" class="status-dot"></div><span id="statusText">切断</span></div>
   </div>
-  <div class="card"><div class="card-title">Git リポジトリ</div><div id="repos"><div class="no-data">読み込み中...</div></div></div>
-  <div class="card"><div class="card-title">アラート</div><div id="alerts"><div class="no-data">アラートなし</div></div></div>
+  <div class="card"><div class="card-title"><span>GIT リポジトリ</span></div><div id="repos"><div class="no-data">読み込み中...</div></div></div>
+  <div class="card"><div class="card-title"><span>タスク</span><span id="taskBadge" class="card-badge" style="display:none">0</span></div><div id="tasks"><div class="no-data">タスクなし</div></div></div>
+  <div class="card"><div class="card-title"><span>DAEMON 状態</span></div><div id="daemons"><div class="no-data">読み込み中...</div></div></div>
+  <div class="card"><div class="card-title"><span>アラート</span></div><div id="alerts"><div class="no-data">アラートなし</div></div></div>
   <button class="btn" onclick="refresh()">更新</button>
+  <div id="updated" class="updated"></div>
   <script>
     let ws=null,token=new URLSearchParams(location.search).get('token');
     function connectWS(){const u=\`\${location.protocol==='https:'?'wss:':'ws:'}/\${location.host}/api/ws\`+(token?\`?token=\${token}\`:'');ws=new WebSocket(u);ws.onopen=()=>{document.getElementById('statusDot').classList.add('connected');document.getElementById('statusText').textContent='接続中'};ws.onclose=()=>{document.getElementById('statusDot').classList.remove('connected');document.getElementById('statusText').textContent='切断';setTimeout(connectWS,5000)};ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==='git-status')renderRepos(m.repos)}}
     function renderRepos(repos){const c=document.getElementById('repos');if(!repos||!repos.length){c.innerHTML='<div class="no-data">リポジトリなし</div>';return}c.innerHTML=repos.map(r=>{const cnt=r.uncommitted_count||r.uncommittedCount||0;const ahead=r.ahead_count||r.aheadCount||0;const behind=r.behind_count||r.behindCount||0;let status=r.status||'clean';let badge='';if(cnt>0){badge=cnt+' 変更';status='dirty';}else if(ahead>0){badge=ahead+' ahead';status='ahead';}else if(behind>0){badge=behind+' behind';status='behind';}else{badge='Clean';status='clean';}return \`<div class="repo"><div><div class="repo-name">\${r.name}</div><div class="repo-branch">\${r.branch||'main'}</div></div><div class="repo-status \${status}">\${badge}</div></div>\`}).join('')}
-    async function fetchData(){try{const opts={credentials:'include',headers:token?{Authorization:'Bearer '+token}:{}};const[rr,ar]=await Promise.all([fetch('/api/cockpit/repos',opts),fetch('/api/cockpit/alerts',opts)]);if(rr.ok){const d=await rr.json();renderRepos(d.repos||d.data||d)}if(ar.ok){const d=await ar.json();const c=document.getElementById('alerts');c.innerHTML=(!d.alerts&&!d.data)||(d.alerts||d.data).length===0?'<div class="no-data">アラートなし</div>':(d.alerts||d.data).map(a=>\`<div style="background:#7f1d1d;border:1px solid #991b1b;padding:12px;border-radius:8px;margin-bottom:8px"><div style="font-weight:500">\${a.message}</div></div>\`).join('')}}catch(e){console.error(e)}}
+    function renderTasks(tasks){const c=document.getElementById('tasks');const b=document.getElementById('taskBadge');const active=tasks.filter(t=>t.status!=='completed');b.textContent=active.length;b.style.display=active.length>0?'inline':'none';if(!tasks||!tasks.length){c.innerHTML='<div class="no-data">タスクなし</div>';return}c.innerHTML=tasks.slice(0,5).map(t=>\`<div class="task"><div><div class="task-name">\${t.task_type||t.taskType||'Task'}</div><div class="task-meta">\${t.id?.slice(0,8)||''}</div></div><div class="task-status \${t.status}">\${t.status==='pending'?'待機':t.status==='in_progress'?'実行中':'完了'}</div></div>\`).join('')}
+    function renderDaemons(daemons){const c=document.getElementById('daemons');if(!daemons||!daemons.length){c.innerHTML='<div class="no-data">Daemon なし</div>';return}c.innerHTML=daemons.map(d=>{const online=d.status==='healthy'||d.is_healthy;const ago=d.last_heartbeat?formatAgo(d.last_heartbeat):'不明';return \`<div class="daemon"><div class="daemon-dot \${online?'online':'offline'}"></div><div class="daemon-info"><div class="daemon-name">\${d.daemon_id||d.daemonId||'Local Agent'}</div><div class="daemon-time">最終: \${ago}</div></div></div>\`}).join('')}
+    function formatAgo(ts){const s=Math.floor((Date.now()/1000)-(typeof ts==='number'?ts:new Date(ts).getTime()/1000));if(s<60)return s+'秒前';if(s<3600)return Math.floor(s/60)+'分前';return Math.floor(s/3600)+'時間前';}
+    async function fetchData(){try{const opts={credentials:'include',headers:token?{Authorization:'Bearer '+token}:{}};const[rr,tr,dr,ar]=await Promise.all([fetch('/api/cockpit/repos',opts),fetch('/api/cockpit/tasks',opts),fetch('/api/daemon/health',opts),fetch('/api/cockpit/alerts',opts)]);if(rr.ok){const d=await rr.json();renderRepos(d.repos||d.data||d)}if(tr.ok){const d=await tr.json();renderTasks(d.tasks||d.data||[])}if(dr.ok){const d=await dr.json();renderDaemons(d.daemons||d.data||[])}if(ar.ok){const d=await ar.json();const c=document.getElementById('alerts');c.innerHTML=(!d.alerts&&!d.data)||(d.alerts||d.data).length===0?'<div class="no-data">アラートなし</div>':(d.alerts||d.data).map(a=>\`<div style="background:#7f1d1d;border:1px solid #991b1b;padding:12px;border-radius:8px;margin-bottom:8px;color:#fecaca"><div style="font-weight:500">\${a.message}</div></div>\`).join('')}document.getElementById('updated').textContent='更新: '+new Date().toLocaleTimeString('ja-JP');}catch(e){console.error(e)}}
     function refresh(){fetchData()}
-    connectWS();fetchData();
+    connectWS();fetchData();setInterval(fetchData,30000);
   </script>
 </body>
 </html>`;
