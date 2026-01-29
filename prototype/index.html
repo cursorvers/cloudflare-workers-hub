@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>FUGUE Cockpit - Prototype</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --void-black: #030304;
+      --deep-space: #0A0A0B;
+      --glass-bg: rgba(20, 20, 22, 0.4);
+      --glass-border: rgba(255, 255, 255, 0.08);
+      --text-primary: #F8FAFC;
+      --text-secondary: #94A3B8;
+      --accent: #38BDF8;
+      --brand: #6366F1;
+      --brand-glow: rgba(99, 102, 241, 0.3);
+      --thinking: #A855F7;
+      --active: #22D3EE;
+      --critical: #F43F5E;
+      --success: #10B981;
+      --warning: #F59E0B;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--void-black);
+      color: var(--text-primary);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* Cursor Spotlight Effect */
+    .spotlight {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 1;
+      background: radial-gradient(600px circle at var(--x, 50%) var(--y, 50%), rgba(99, 102, 241, 0.06), transparent 40%);
+    }
+
+    /* App Container */
+    .app {
+      position: relative;
+      z-index: 2;
+      max-width: 430px;
+      margin: 0 auto;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      padding-bottom: 100px;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      margin-bottom: 24px;
+    }
+
+    .header-title {
+      font-size: 20px;
+      font-weight: 600;
+      background: linear-gradient(135deg, var(--text-primary) 0%, var(--accent) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .system-status {
+      font-size: 12px;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--success);
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    /* Agent Status Pill */
+    .agent-pill {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 12px 20px;
+      margin: 0 auto 24px;
+      border-radius: 9999px;
+      background: rgba(168, 85, 247, 0.1);
+      border: 1px solid rgba(168, 85, 247, 0.3);
+      animation: breathing 2s ease-in-out infinite;
+      max-width: fit-content;
+    }
+
+    @keyframes breathing {
+      0%, 100% {
+        opacity: 0.9;
+        box-shadow: 0 0 20px rgba(168, 85, 247, 0.1);
+      }
+      50% {
+        opacity: 1;
+        box-shadow: 0 0 30px rgba(168, 85, 247, 0.3);
+      }
+    }
+
+    .agent-icon {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--thinking) 0%, var(--brand) 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+    }
+
+    .agent-text {
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .agent-status {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    /* Glass Card */
+    .glass-card {
+      backdrop-filter: blur(16px) saturate(180%);
+      -webkit-backdrop-filter: blur(16px) saturate(180%);
+      background: linear-gradient(180deg, rgba(30, 30, 35, 0.4) 0%, rgba(20, 20, 22, 0.2) 100%);
+      border: 1px solid var(--glass-border);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 16px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .glass-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 16px;
+    }
+
+    .card-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .card-subtitle {
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .card-badge {
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-weight: 500;
+    }
+
+    .badge-running {
+      background: rgba(34, 211, 238, 0.15);
+      color: var(--active);
+      border: 1px solid rgba(34, 211, 238, 0.3);
+    }
+
+    /* Progress Bar */
+    .progress-container {
+      margin-bottom: 12px;
+    }
+
+    .progress-bar {
+      height: 4px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--brand) 0%, var(--thinking) 100%);
+      border-radius: 2px;
+      transition: width 0.5s ease;
+      animation: shimmer 2s infinite;
+    }
+
+    @keyframes shimmer {
+      0% { opacity: 0.8; }
+      50% { opacity: 1; }
+      100% { opacity: 0.8; }
+    }
+
+    .progress-text {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-top: 8px;
+    }
+
+    /* Log Line */
+    .log-line {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      color: var(--text-secondary);
+      padding: 8px 12px;
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .log-icon {
+      color: var(--accent);
+    }
+
+    /* Floating Alerts */
+    .floating-cards {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .float-card {
+      flex: 1;
+      backdrop-filter: blur(12px);
+      background: rgba(20, 20, 22, 0.6);
+      border: 1px solid var(--glass-border);
+      border-radius: 12px;
+      padding: 14px;
+      text-align: center;
+      transition: all 0.2s ease;
+    }
+
+    .float-card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+
+    .float-card.warning {
+      border-color: rgba(245, 158, 11, 0.3);
+    }
+
+    .float-card.alert {
+      border-color: rgba(244, 63, 94, 0.3);
+    }
+
+    .float-icon {
+      font-size: 20px;
+      margin-bottom: 6px;
+    }
+
+    .float-label {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .float-value {
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    /* Input Bar */
+    .input-container {
+      position: fixed;
+      bottom: 80px;
+      left: 16px;
+      right: 16px;
+      max-width: 398px;
+      margin: 0 auto;
+    }
+
+    .input-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      backdrop-filter: blur(20px);
+      background: rgba(30, 30, 35, 0.8);
+      border: 1px solid var(--glass-border);
+      border-radius: 16px;
+      transition: all 0.2s ease;
+    }
+
+    .input-bar:focus-within {
+      border-color: var(--brand);
+      box-shadow: 0 0 20px var(--brand-glow);
+    }
+
+    .mic-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      border: none;
+      background: rgba(99, 102, 241, 0.2);
+      color: var(--brand);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+    }
+
+    .mic-btn:hover {
+      background: rgba(99, 102, 241, 0.3);
+    }
+
+    .input-field {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text-primary);
+      font-size: 14px;
+      font-family: inherit;
+    }
+
+    .input-field::placeholder {
+      color: var(--text-secondary);
+    }
+
+    .send-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      border: none;
+      background: linear-gradient(135deg, var(--brand) 0%, var(--thinking) 100%);
+      color: white;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+    }
+
+    .send-btn:hover {
+      transform: scale(1.05);
+    }
+
+    .send-btn:active {
+      transform: scale(0.95);
+    }
+
+    /* Bottom Navigation */
+    .bottom-nav {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      padding: 12px 16px;
+      padding-bottom: calc(12px + env(safe-area-inset-bottom));
+      backdrop-filter: blur(20px);
+      background: rgba(10, 10, 11, 0.9);
+      border-top: 1px solid var(--glass-border);
+    }
+
+    .nav-items {
+      display: flex;
+      justify-content: space-around;
+      max-width: 400px;
+      margin: 0 auto;
+    }
+
+    .nav-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: 8px 16px;
+      border-radius: 12px;
+      color: var(--text-secondary);
+      text-decoration: none;
+      transition: all 0.2s ease;
+      cursor: pointer;
+    }
+
+    .nav-item:hover {
+      color: var(--text-primary);
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .nav-item.active {
+      color: var(--brand);
+    }
+
+    .nav-icon {
+      font-size: 20px;
+    }
+
+    .nav-label {
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    /* Git Card Specific */
+    .git-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .git-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+
+    .git-dot.clean { background: var(--success); }
+    .git-dot.dirty { background: var(--warning); }
+    .git-dot.behind { background: var(--critical); }
+
+    .git-branch {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .git-files {
+      margin: 12px 0;
+      padding: 10px 12px;
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 8px;
+    }
+
+    .git-file {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      color: var(--text-secondary);
+      padding: 4px 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .file-status {
+      width: 16px;
+      text-align: center;
+      font-weight: 600;
+    }
+
+    .file-status.modified { color: var(--warning); }
+    .file-status.added { color: var(--success); }
+
+    /* Action Buttons */
+    .action-buttons {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .action-btn {
+      flex: 1;
+      padding: 10px 16px;
+      border-radius: 10px;
+      border: 1px solid var(--glass-border);
+      background: linear-gradient(180deg, rgba(255,255,255,0.05) 0%, transparent 100%);
+      color: var(--text-primary);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .action-btn:hover {
+      border-color: rgba(255, 255, 255, 0.2);
+      box-shadow: 0 0 20px rgba(99, 102, 241, 0.15);
+    }
+
+    .action-btn:active {
+      transform: scale(0.98);
+    }
+
+    .action-btn.primary {
+      background: linear-gradient(135deg, var(--brand) 0%, var(--thinking) 100%);
+      border-color: transparent;
+    }
+
+    /* Page indicator */
+    .page-indicator {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+
+    .page-dots {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .page-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.2);
+      transition: all 0.2s ease;
+    }
+
+    .page-dot.active {
+      width: 20px;
+      border-radius: 3px;
+      background: var(--brand);
+    }
+
+    /* Swipe hint */
+    .swipe-hint {
+      text-align: center;
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-top: 8px;
+      opacity: 0.6;
+    }
+  </style>
+</head>
+<body>
+  <div class="spotlight" id="spotlight"></div>
+
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <h1 class="header-title">FUGUE Cockpit</h1>
+      <div class="system-status">
+        <span class="status-dot"></span>
+        <span>System OK</span>
+      </div>
+    </header>
+
+    <!-- Page Indicator -->
+    <div class="page-indicator">
+      <div class="page-dots">
+        <div class="page-dot"></div>
+        <div class="page-dot active"></div>
+        <div class="page-dot"></div>
+        <div class="page-dot"></div>
+      </div>
+      <div class="swipe-hint">← swipe to navigate →</div>
+    </div>
+
+    <!-- Agent Status -->
+    <div class="agent-pill">
+      <div class="agent-icon">🤖</div>
+      <div>
+        <div class="agent-text">Claude Code</div>
+        <div class="agent-status">Reviewing PR #42...</div>
+      </div>
+    </div>
+
+    <!-- Main Task Card -->
+    <div class="glass-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">PR #42 Security Review</div>
+          <div class="card-subtitle">cloudflare-workers-hub</div>
+        </div>
+        <span class="card-badge badge-running">Running</span>
+      </div>
+
+      <div class="progress-container">
+        <div class="progress-bar">
+          <div class="progress-fill" style="width: 72%"></div>
+        </div>
+        <div class="progress-text">
+          <span>Analyzing...</span>
+          <span>72%</span>
+        </div>
+      </div>
+
+      <div class="log-line">
+        <span class="log-icon">→</span>
+        <span>Checking authentication flow...</span>
+      </div>
+    </div>
+
+    <!-- Floating Alert Cards -->
+    <div class="floating-cards">
+      <div class="float-card warning">
+        <div class="float-icon">⚠️</div>
+        <div class="float-value">3</div>
+        <div class="float-label">dirty repos</div>
+      </div>
+      <div class="float-card alert">
+        <div class="float-icon">🚨</div>
+        <div class="float-value">1</div>
+        <div class="float-label">new alert</div>
+      </div>
+    </div>
+
+    <!-- Git Card -->
+    <div class="glass-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">ai-assistant-daemon</div>
+          <div class="git-status">
+            <span class="git-dot dirty"></span>
+            <span class="git-branch">main (+2 ahead)</span>
+          </div>
+        </div>
+        <span class="card-badge" style="background: rgba(245, 158, 11, 0.15); color: var(--warning); border: 1px solid rgba(245, 158, 11, 0.3);">3 changes</span>
+      </div>
+
+      <div class="git-files">
+        <div class="git-file">
+          <span class="file-status modified">M</span>
+          <span>src/index.ts</span>
+        </div>
+        <div class="git-file">
+          <span class="file-status modified">M</span>
+          <span>package.json</span>
+        </div>
+        <div class="git-file">
+          <span class="file-status added">A</span>
+          <span>src/new-feature.ts</span>
+        </div>
+      </div>
+
+      <div class="action-buttons">
+        <button class="action-btn">Diff</button>
+        <button class="action-btn">Commit</button>
+        <button class="action-btn primary">Push</button>
+      </div>
+    </div>
+
+    <!-- Input Bar -->
+    <div class="input-container">
+      <div class="input-bar">
+        <button class="mic-btn">🎤</button>
+        <input type="text" class="input-field" placeholder="What would you like to do?">
+        <button class="send-btn">▶</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Navigation -->
+  <nav class="bottom-nav">
+    <div class="nav-items">
+      <a class="nav-item" href="#">
+        <span class="nav-icon">🔀</span>
+        <span class="nav-label">Git</span>
+      </a>
+      <a class="nav-item active" href="#">
+        <span class="nav-icon">📋</span>
+        <span class="nav-label">Tasks</span>
+      </a>
+      <a class="nav-item" href="#">
+        <span class="nav-icon">⌘</span>
+        <span class="nav-label">Cmd</span>
+      </a>
+      <a class="nav-item" href="#">
+        <span class="nav-icon">🔔</span>
+        <span class="nav-label">Alerts</span>
+      </a>
+    </div>
+  </nav>
+
+  <script>
+    // Cursor Spotlight Effect
+    const spotlight = document.getElementById('spotlight');
+
+    document.addEventListener('mousemove', (e) => {
+      spotlight.style.setProperty('--x', e.clientX + 'px');
+      spotlight.style.setProperty('--y', e.clientY + 'px');
+    });
+
+    // Simulate progress
+    let progress = 72;
+    const progressFill = document.querySelector('.progress-fill');
+    const progressText = document.querySelector('.progress-text span:last-child');
+
+    setInterval(() => {
+      if (progress < 100) {
+        progress += Math.random() * 2;
+        if (progress > 100) progress = 100;
+        progressFill.style.width = progress + '%';
+        progressText.textContent = Math.round(progress) + '%';
+      }
+    }, 1000);
+
+    // Button click effects
+    document.querySelectorAll('.action-btn, .send-btn').forEach(btn => {
+      btn.addEventListener('click', function() {
+        this.style.transform = 'scale(0.95)';
+        setTimeout(() => {
+          this.style.transform = '';
+        }, 150);
+      });
+    });
+  </script>
+</body>
+</html>
