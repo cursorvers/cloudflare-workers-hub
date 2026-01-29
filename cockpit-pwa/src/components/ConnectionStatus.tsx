@@ -1,7 +1,7 @@
 'use client';
 
 import { Badge } from '@/components/ui/badge';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 import type { ConnectionState } from '@/hooks/useWebSocket';
 
 interface ConnectionStatusProps {
@@ -9,34 +9,57 @@ interface ConnectionStatusProps {
   onReconnect?: () => void;
 }
 
-const stateConfig: Record<ConnectionState, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
-  connecting: { label: '接続中...', variant: 'secondary' },
-  connected: { label: '接続済み', variant: 'default' },
-  disconnected: { label: '切断', variant: 'outline' },
-  error: { label: 'エラー', variant: 'destructive' },
+const stateConfig: Record<ConnectionState, {
+  label: string;
+  variant: 'default' | 'secondary' | 'destructive' | 'outline';
+  dot: string;
+}> = {
+  connecting: { label: '接続中', variant: 'secondary', dot: 'bg-yellow-500 animate-pulse' },
+  connected: { label: '接続済み', variant: 'default', dot: 'bg-green-500' },
+  disconnected: { label: '切断', variant: 'outline', dot: 'bg-zinc-400' },
+  error: { label: 'エラー', variant: 'destructive', dot: 'bg-red-500' },
 };
 
+/**
+ * Compact connection status indicator for mobile header
+ * Gemini UI/UX Review: 省スペース化、メインコンテンツ表示領域を最大化
+ */
 export function ConnectionStatus({ state, onReconnect }: ConnectionStatusProps) {
   const config = stateConfig[state];
+  const showReconnect = (state === 'disconnected' || state === 'error') && onReconnect;
 
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium">接続状態</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-center justify-between">
-          <Badge variant={config.variant}>{config.label}</Badge>
-          {(state === 'disconnected' || state === 'error') && onReconnect && (
-            <button
-              onClick={onReconnect}
-              className="text-sm text-blue-600 hover:underline"
-            >
-              再接続
-            </button>
-          )}
-        </div>
-      </CardContent>
-    </Card>
+    <div className="flex items-center gap-2">
+      {/* Status indicator dot */}
+      <div className={`w-2.5 h-2.5 rounded-full ${config.dot}`} />
+
+      {/* Status badge - compact */}
+      <Badge variant={config.variant} className="text-xs px-2 py-0.5">
+        {config.label}
+      </Badge>
+
+      {/* Reconnect button - only when needed */}
+      {showReconnect && (
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onReconnect}
+          className="h-7 px-2 text-xs"
+        >
+          再接続
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Full card version for desktop (optional)
+ */
+export function ConnectionStatusCard({ state, onReconnect }: ConnectionStatusProps) {
+  return (
+    <div className="bg-white dark:bg-zinc-900 border rounded-lg p-3">
+      <ConnectionStatus state={state} onReconnect={onReconnect} />
+    </div>
   );
 }
