@@ -72,6 +72,7 @@ export function verifyAPIKey(request: Request, env: Env, scope: APIScope = 'queu
     return false;
   }
 
+
   // Check if provided key matches ANY valid key (constant-time for each comparison)
   // Always compare against ALL keys to prevent timing attacks revealing which keys exist
   let isValid = false;
