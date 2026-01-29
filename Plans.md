@@ -58,20 +58,12 @@ npm run dev
 
 ## 残タスク
 
-### 完了済み
-- [x] Local Agent の API キー設定 ✅ (2026-01-29)
-- [x] WebSocket 認証修正 ✅ (2026-01-29) - クエリパラメータ方式
-- [x] タスク実行機能 (Commit/Push/Pull) ✅ (2026-01-29)
-- [x] 承認ワークフロー UI ✅ (2026-01-29) - approval-modal.tsx
-- [x] Web Push 通知 ✅ (2026-01-29) - sw.js, push-notifications.ts
-- [x] JWT 詳細検証 ✅ (2026-01-29) - jwt-auth.ts, jose library
-- [x] RBAC 導入 ✅ (2026-01-29) - 3ロール (admin/operator/viewer)
-- [x] 401 エラー対応 ✅ (2026-01-29) - QUEUE_API_KEY 設定修正
-- [x] **Cloudflare Access 設定** ✅ (2026-01-29) - Google SSO, Cookie/Header JWT 対応
-- [x] **WebSocket Access 認証** ✅ (2026-01-29) - 3方式対応 (Access/API Key/JWT)
-- [x] **401 エラー根本修正** ✅ (2026-01-29) - 複数キー認証対応 (QUEUE_API_KEY + ASSISTANT_API_KEY 両方有効)
-- [x] **KV 最適化** ✅ (2026-01-29) - WebSocket 再接続間隔 5秒→15秒 (KV read 66%削減)
+### 完了済み (最新5件、詳細は docs/ARCHIVE_2026-01-25.md)
+- [x] **cockpit-pwa アクセシビリティ修正** ✅ (2026-01-30) - WCAG AA 準拠 (コントラスト 4.5:1+, タップターゲット 44px+)
+- [x] **Agentic Vision テスト** ✅ (2026-01-30) - Gemini 3 Flash Code Execution で UI 検証動作確認
 - [x] **KV put 超過対応** ✅ (2026-01-29) - rate-limiter をインメモリ優先に変更 (KV put 99%削減)
+- [x] **KV 最適化** ✅ (2026-01-29) - WebSocket 再接続間隔 5秒→15秒 (KV read 66%削減)
+- [x] **401 エラー根本修正** ✅ (2026-01-29) - 複数キー認証対応
 
 ### 未完了（オプション）
 - [ ] Cloudflare Tunnel 設定 - NAT 越え接続（外部ネットワークからアクセス時に必要）
@@ -194,6 +186,6 @@ Cloudflare Worker   Mac Mini Daemon
 
 | 日付 | 内容 |
 |------|------|
-| 2026-01-29 | **MVP完成(82%)**, 認証境界監査PASS, 保守モード移行, cockpit-pwa初期化完了 |
-| 2026-01-29 | 401エラー根本修正(複数キー認証), KV最適化(WS間隔15秒), **KV put超過対応(rate-limiterインメモリ化)**, 課金判断(ハイブリッド案), **Gemini 3 Flash Agentic Vision統合**, オーケストレーションレビュー(6/10) |
-| 2026-01-25 | IDOR修正, index.ts分割, Daemon Health API, KV Prefix Scan移行, Critical/High/Medium問題修正 |
+| 2026-01-30 | cockpit-pwa アクセシビリティ修正(WCAG AA), Agentic Vision テスト完了 |
+| 2026-01-29 | MVP完成(82%), KV最適化(put/read), Agentic Vision統合, オーケストレーションレビュー(6/10) |
+| 2026-01-25 | IDOR修正, index.ts分割, Critical/High/Medium問題修正 |

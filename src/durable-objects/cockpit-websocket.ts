@@ -72,6 +72,10 @@ const PongSchema = z.object({
   timestamp: z.number().optional(),
 });
 
+const StatusRequestSchema = z.object({
+  type: z.literal('status-request'),
+});
+
 // =============================================================================
 // Observability Schemas
 // =============================================================================
@@ -123,6 +127,7 @@ const IncomingMessageSchema = z.discriminatedUnion('type', [
   TaskResultSchema,
   PongSchema,
   ObservabilitySyncSchema,
+  StatusRequestSchema,
 ]);
 
 // Outgoing message types (sent to agent)
@@ -136,10 +141,6 @@ const TaskMessageSchema = z.object({
 const PingMessageSchema = z.object({
   type: z.literal('ping'),
   timestamp: z.number(),
-});
-
-const StatusRequestSchema = z.object({
-  type: z.literal('status-request'),
 });
 
 // =============================================================================
@@ -381,6 +382,9 @@ export class CockpitWebSocket extends DurableObject<Env> {
         case 'observability-sync':
           await this.handleObservabilitySync(validated);
           break;
+        case 'status-request':
+          await this.handleStatusRequest(ws);
+          break;
         default:
           safeLog.warn('[CockpitWebSocket] Unknown message type', { type: (validated as any).type });
       }
@@ -586,6 +590,137 @@ export class CockpitWebSocket extends DurableObject<Env> {
       agent.lastPingAt = new Date().toISOString();
       const key = `agent:${agent.agentId}`;
       await this.ctx.storage.put(key, agent);
+    }
+  }
+
+  /**
+   * Handle status request from PWA client
+   * Sends current state: tasks, repos, alerts, provider health
+   */
+  private async handleStatusRequest(ws: WebSocket): Promise<void> {
+    if (!this.env.DB) {
+      safeLog.warn('[CockpitWebSocket] DB not available for status request');
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Database not available',
+      }));
+      return;
+    }
+
+    try {
+      // Fetch tasks (limit 20, most recent first)
+      const tasksResult = await this.env.DB.prepare(`
+        SELECT id, title, status, executor, created_at, updated_at, logs, result
+        FROM cockpit_tasks
+        ORDER BY created_at DESC
+        LIMIT 20
+      `).all();
+
+      const tasks = (tasksResult.results || []).map((task: any) => ({
+        id: task.id,
+        title: task.title,
+        status: task.status,
+        executor: task.executor,
+        createdAt: task.created_at,
+        updatedAt: task.updated_at,
+        logs: task.logs,
+        result: task.result ? JSON.parse(task.result) : null,
+      }));
+
+      // Send tasks
+      ws.send(JSON.stringify({
+        type: 'tasks',
+        payload: tasks,
+      }));
+
+      // Fetch repos (limit 10)
+      const reposResult = await this.env.DB.prepare(`
+        SELECT id, name, path, branch, status, uncommitted_count, ahead_count, behind_count, last_checked, modified_files
+        FROM cockpit_git_repos
+        ORDER BY last_checked DESC
+        LIMIT 10
+      `).all();
+
+      const repos = (reposResult.results || []).map((repo: any) => ({
+        id: repo.id,
+        name: repo.name,
+        path: repo.path,
+        branch: repo.branch,
+        status: repo.status,
+        uncommittedCount: repo.uncommitted_count,
+        aheadCount: repo.ahead_count,
+        behindCount: repo.behind_count,
+        lastChecked: repo.last_checked,
+        modifiedFiles: repo.modified_files ? JSON.parse(repo.modified_files) : [],
+      }));
+
+      // Send git status
+      ws.send(JSON.stringify({
+        type: 'git-status',
+        payload: { repos },
+      }));
+
+      // Fetch alerts (unacknowledged, limit 10)
+      const alertsResult = await this.env.DB.prepare(`
+        SELECT id, severity, title, message, source, created_at, acknowledged
+        FROM cockpit_alerts
+        WHERE acknowledged = 0
+        ORDER BY created_at DESC
+        LIMIT 10
+      `).all();
+
+      const alerts = (alertsResult.results || []).map((alert: any) => ({
+        id: alert.id,
+        severity: alert.severity,
+        title: alert.title,
+        message: alert.message,
+        source: alert.source,
+        createdAt: alert.created_at,
+        acknowledged: alert.acknowledged === 1,
+      }));
+
+      // Send alerts one by one
+      for (const alert of alerts) {
+        ws.send(JSON.stringify({
+          type: 'alert',
+          payload: alert,
+        }));
+      }
+
+      // Fetch provider health
+      const healthResult = await this.env.DB.prepare(`
+        SELECT provider, status, latency_p95_ms, error_rate, last_request_at
+        FROM cockpit_provider_health
+      `).all();
+
+      const providerHealth = (healthResult.results || []).map((h: any) => ({
+        provider: h.provider,
+        status: h.status,
+        latencyP95Ms: h.latency_p95_ms,
+        errorRate: h.error_rate,
+        lastRequestAt: h.last_request_at,
+      }));
+
+      // Send observability sync
+      ws.send(JSON.stringify({
+        type: 'observability-sync',
+        payload: { provider_health: providerHealth },
+      }));
+
+      safeLog.log('[CockpitWebSocket] Status request handled', {
+        tasksCount: tasks.length,
+        reposCount: repos.length,
+        alertsCount: alerts.length,
+        providersCount: providerHealth.length,
+      });
+    } catch (error) {
+      safeLog.error('[CockpitWebSocket] Status request failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Failed to fetch status',
+      }));
     }
   }
 

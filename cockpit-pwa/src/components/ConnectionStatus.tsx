@@ -14,12 +14,12 @@ const stateConfig: Record<ConnectionState, {
   label: string;
   variant: 'default' | 'secondary' | 'destructive' | 'outline';
   dot: string;
+  animate?: boolean;
 }> = {
-  // animate-pulse removed to reduce visual noise
-  connecting: { label: '接続中', variant: 'secondary', dot: 'bg-yellow-500' },
+  connecting: { label: '接続中', variant: 'secondary', dot: 'bg-yellow-500', animate: true },
   connected: { label: '接続済み', variant: 'default', dot: 'bg-green-500' },
   disconnected: { label: '切断', variant: 'outline', dot: 'bg-zinc-400' },
-  error: { label: 'エラー', variant: 'destructive', dot: 'bg-red-500' },
+  error: { label: 'エラー', variant: 'destructive', dot: 'bg-red-500', animate: true },
 };
 
 // Debounce delay: Only show state after it persists for this duration
@@ -66,11 +66,11 @@ export function ConnectionStatus({ state, onReconnect }: ConnectionStatusProps) 
 
   return (
     <div className="flex items-center gap-2">
-      {/* Status indicator dot */}
-      <div className={`w-2.5 h-2.5 rounded-full ${config.dot}`} />
+      {/* Status indicator dot with pulse animation for connected state */}
+      <div className={`w-2.5 h-2.5 rounded-full ${config.dot} ${displayState === 'connected' ? 'pulse-green' : ''} ${config.animate ? 'animate-pulse' : ''}`} />
 
       {/* Status badge - compact */}
-      <Badge variant={config.variant} className="text-xs px-2 py-0.5">
+      <Badge variant={config.variant} className="text-xs px-2 py-0.5 transition-all duration-300">
         {config.label}
       </Badge>
 

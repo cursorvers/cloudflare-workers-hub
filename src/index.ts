@@ -350,7 +350,12 @@ export default {
     if (path.startsWith('/api/advisor')) {
       // CSRF protection: restrict CORS to same origin or trusted domains
       const origin = request.headers.get('Origin') || '';
-      const allowedOrigins = ['https://orchestrator-hub.masa-stage1.workers.dev', 'http://localhost:8787'];
+      const allowedOrigins = [
+        'https://orchestrator-hub.masa-stage1.workers.dev',
+        'https://cockpit-pwa.vercel.app',
+        'http://localhost:3000',
+        'http://localhost:8787',
+      ];
       const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
       const corsHeaders = {
         'Access-Control-Allow-Origin': allowOrigin,
@@ -386,7 +391,12 @@ export default {
     if (path.startsWith('/api/cockpit')) {
       // CSRF protection: restrict CORS to same origin or trusted domains
       const origin = request.headers.get('Origin') || '';
-      const allowedOrigins = ['https://orchestrator-hub.masa-stage1.workers.dev', 'http://localhost:8787'];
+      const allowedOrigins = [
+        'https://orchestrator-hub.masa-stage1.workers.dev',
+        'https://cockpit-pwa.vercel.app',
+        'http://localhost:3000',
+        'http://localhost:8787',
+      ];
       const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
       const corsHeaders = {
         'Access-Control-Allow-Origin': allowOrigin,
