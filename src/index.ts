@@ -285,8 +285,13 @@ export default {
     const path = url.pathname;
 
     // Health check endpoint
-    if (path === '/health' || path === '/') {
+    if (path === '/health') {
       return handleHealthCheck(request, env);
+    }
+
+    // Root redirect to Cockpit PWA
+    if (path === '/') {
+      return Response.redirect(`${url.origin}/cockpit`, 302);
     }
 
     // Metrics endpoint
