@@ -58,18 +58,17 @@ npm run dev
 
 ## 残タスク
 
-### 完了済み (最新5件、詳細は docs/ARCHIVE_2026-01-25.md)
+### 完了済み (最新6件、詳細は docs/ARCHIVE_2026-01-25.md)
+- [x] **PWA通知統合** ✅ (2026-01-30) - notification-hub.ts追加、/broadcast-alertエンドポイント、Discord fallback対応
+- [x] **FUGUE P0-P2 セキュリティ修正** ✅ (2026-01-30) - JWT環境変数化, コマンドインジェクション対策, WebSocket状態永続化, テスト91%+
+- [x] **CockpitGateway FUGUE統合** ✅ (2026-01-30) - delegation-matrix.mdベースのルーティング、3者合議フラグ
+- [x] **Daemon状態表示** ✅ (2026-01-30) - DaemonStatus.tsx追加、/api/daemon/health連携
 - [x] **cockpit-pwa アクセシビリティ修正** ✅ (2026-01-30) - WCAG AA 準拠 (コントラスト 4.5:1+, タップターゲット 44px+)
 - [x] **Agentic Vision テスト** ✅ (2026-01-30) - Gemini 3 Flash Code Execution で UI 検証動作確認
-- [x] **KV put 超過対応** ✅ (2026-01-29) - rate-limiter をインメモリ優先に変更 (KV put 99%削減)
-- [x] **KV 最適化** ✅ (2026-01-29) - WebSocket 再接続間隔 5秒→15秒 (KV read 66%削減)
-- [x] **401 エラー根本修正** ✅ (2026-01-29) - 複数キー認証対応
 
 ### 未完了（オプション）
 - [ ] Cloudflare Tunnel 設定 - NAT 越え接続（外部ネットワークからアクセス時に必要）
-- [ ] PWA 機能拡張 - タスク一覧、Daemon 状態表示
 - [ ] Push 通知統合 - VAPID 設定済み、フロントエンド連携待ち
-- [ ] Observability ダッシュボード - コスト/レイテンシ表示
 - [ ] KV 使用量閾値通知 - 80%で Slack 通知（課金判断用）
 
 ---

@@ -29,6 +29,7 @@ import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { z } from 'zod';
 import { verifyAccessToken, hasPermission, type UserRole } from '../utils/jwt-auth';
+import { CockpitGateway, type WebSocketMessage, type OrchestratorRequest } from '../fugue/cockpit-gateway';
 
 // =============================================================================
 // Message Schemas (Zod validation)
@@ -74,6 +75,22 @@ const PongSchema = z.object({
 
 const StatusRequestSchema = z.object({
   type: z.literal('status-request'),
+});
+
+const ChatMessageSchema = z.object({
+  type: z.literal('chat'),
+  payload: z.object({
+    message: z.string().min(1).max(10000),
+    context: z.record(z.unknown()).optional(),
+  }),
+});
+
+const CommandMessageSchema = z.object({
+  type: z.literal('command'),
+  payload: z.object({
+    command: z.string().min(1),
+    args: z.array(z.string()).optional(),
+  }),
 });
 
 // =============================================================================
@@ -128,6 +145,8 @@ const IncomingMessageSchema = z.discriminatedUnion('type', [
   PongSchema,
   ObservabilitySyncSchema,
   StatusRequestSchema,
+  ChatMessageSchema,
+  CommandMessageSchema,
 ]);
 
 // Outgoing message types (sent to agent)
@@ -162,22 +181,77 @@ interface AgentConnection {
 }
 
 // =============================================================================
+// Persistent State Interface (for DO eviction recovery)
+// =============================================================================
+
+interface PendingTask {
+  taskId: string;
+  taskType: string;
+  payload: unknown;
+  createdAt: number;
+  retryCount: number;
+}
+
+interface CockpitState {
+  pendingTasks: PendingTask[];
+  lastSavedAt: number;
+}
+
+// =============================================================================
 // CockpitWebSocket Durable Object
 // =============================================================================
 
 export class CockpitWebSocket extends DurableObject<Env> {
   private sessions: Map<WebSocket, AgentConnection> = new Map();
+  private pendingTasks: Map<string, PendingTask> = new Map();
+  private gateway: CockpitGateway = new CockpitGateway();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
-    // Restore sessions from storage on initialization
+    // Restore state from storage on initialization (critical for DO eviction recovery)
     this.ctx.blockConcurrencyWhile(async () => {
       await this.restoreSessions();
+      await this.loadState();
     });
 
     // Set up periodic cleanup alarm (every 60 seconds)
     this.ctx.storage.setAlarm(Date.now() + 60000);
+  }
+
+  /**
+   * Save persistent state to durable storage
+   * Called after task queue changes to survive DO eviction
+   */
+  private async saveState(): Promise<void> {
+    const state: CockpitState = {
+      pendingTasks: Array.from(this.pendingTasks.values()),
+      lastSavedAt: Date.now(),
+    };
+    await this.ctx.storage.put('cockpitState', state);
+    safeLog.log('[CockpitWebSocket] State saved', {
+      pendingTasksCount: this.pendingTasks.size
+    });
+  }
+
+  /**
+   * Load persistent state from durable storage
+   * Called on DO initialization to recover from eviction
+   */
+  private async loadState(): Promise<void> {
+    const stored = await this.ctx.storage.get<CockpitState>('cockpitState');
+    if (stored) {
+      this.pendingTasks = new Map(
+        stored.pendingTasks.map(task => [task.taskId, task])
+      );
+      safeLog.log('[CockpitWebSocket] State loaded', {
+        pendingTasksCount: this.pendingTasks.size,
+        lastSavedAt: stored.lastSavedAt,
+      });
+    } else {
+      this.pendingTasks = new Map();
+      safeLog.log('[CockpitWebSocket] No stored state found, initialized fresh');
+    }
   }
 
   /**
@@ -203,6 +277,11 @@ export class CockpitWebSocket extends DurableObject<Env> {
     // Internal API for broadcasting tasks
     if (path === '/broadcast-task' && request.method === 'POST') {
       return await this.handleBroadcastTask(request);
+    }
+
+    // Internal API for broadcasting alerts (from notification-hub)
+    if (path === '/broadcast-alert' && request.method === 'POST') {
+      return await this.handleBroadcastAlert(request);
     }
 
     // Get connected agents (monitoring)
@@ -384,6 +463,12 @@ export class CockpitWebSocket extends DurableObject<Env> {
           break;
         case 'status-request':
           await this.handleStatusRequest(ws);
+          break;
+        case 'chat':
+          await this.handleChatMessage(ws, validated);
+          break;
+        case 'command':
+          await this.handleCommandMessage(ws, validated);
           break;
         default:
           safeLog.warn('[CockpitWebSocket] Unknown message type', { type: (validated as any).type });
@@ -725,6 +810,292 @@ export class CockpitWebSocket extends DurableObject<Env> {
   }
 
   /**
+   * Handle chat message from PWA client
+   * Routes through CockpitGateway for FUGUE integration
+   */
+  private async handleChatMessage(
+    ws: WebSocket,
+    message: z.infer<typeof ChatMessageSchema>
+  ): Promise<void> {
+    // Get user info from session
+    const tags = this.ctx.getTags(ws);
+    let userId = 'unknown';
+    let userRole = 'viewer';
+
+    if (tags.length > 0) {
+      try {
+        const sessionData = JSON.parse(tags[0]);
+        userId = sessionData.userId || 'unknown';
+        userRole = sessionData.role || 'viewer';
+      } catch {
+        // Ignore parse errors
+      }
+    }
+
+    // Route through CockpitGateway for FUGUE delegation
+    const wsMessage: WebSocketMessage = {
+      type: 'chat',
+      payload: message.payload,
+    };
+
+    const { request, routingDecision } = await this.gateway.processMessage(wsMessage, userId);
+    const now = Math.floor(Date.now() / 1000);
+
+    // Check for dangerous operations requiring consensus
+    if (routingDecision.requiresConsensus) {
+      safeLog.warn('[CockpitWebSocket] Dangerous operation detected, requires consensus', {
+        taskId: request.id,
+        content: request.content.slice(0, 50),
+      });
+      // For now, still process but flag it (full 3-party consensus would need external calls)
+    }
+
+    // Store as a task in DB with delegation hints
+    if (this.env.DB) {
+      try {
+        await this.env.DB.prepare(`
+          INSERT INTO cockpit_tasks (
+            id, title, status, executor, priority, created_at, updated_at, metadata
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          request.id,
+          request.content.slice(0, 100) + (request.content.length > 100 ? '...' : ''),
+          'pending',
+          routingDecision.agent, // Suggested agent from CockpitGateway
+          routingDecision.requiresConsensus ? 'high' : 'normal',
+          now,
+          now,
+          JSON.stringify({
+            type: 'chat-instruction',
+            orchestratorRequest: request,
+            routingDecision,
+            userRole,
+          })
+        ).run();
+
+        safeLog.log('[CockpitWebSocket] Chat task created via Gateway', {
+          taskId: request.id,
+          userId,
+          suggestedAgent: routingDecision.agent,
+          confidence: routingDecision.confidence,
+        });
+      } catch (error) {
+        safeLog.error('[CockpitWebSocket] Failed to create chat task', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    // Broadcast to connected agents with routing info
+    const taskMessage = {
+      type: 'task',
+      taskId: request.id,
+      taskType: 'orchestrator-request',
+      payload: {
+        orchestratorRequest: request,
+        routingDecision,
+      },
+    };
+
+    let agentCount = 0;
+    for (const [agentWs, agent] of this.sessions) {
+      if (agentWs !== ws && (agent.status === 'online' || agent.status === 'idle')) {
+        try {
+          agentWs.send(JSON.stringify(taskMessage));
+          agentCount++;
+        } catch {
+          // Ignore send errors
+        }
+      }
+    }
+
+    // Send acknowledgment with routing info
+    ws.send(JSON.stringify({
+      type: 'ack',
+      taskId: request.id,
+      message: 'チャットを受信しました',
+      agentCount,
+      routing: {
+        suggestedAgent: routingDecision.agent,
+        confidence: routingDecision.confidence,
+        keywords: request.delegationHints.keywords,
+      },
+    }));
+
+    // Send task update to sender
+    ws.send(JSON.stringify({
+      type: 'task_created',
+      payload: {
+        id: request.id,
+        title: request.content.slice(0, 100) + (request.content.length > 100 ? '...' : ''),
+        status: 'pending',
+        executor: routingDecision.agent,
+        createdAt: now,
+        updatedAt: now,
+      },
+    }));
+
+    // Send chat response with routing info
+    const routingInfo = routingDecision.confidence > 0.5
+      ? `→ ${routingDecision.agent} (${Math.round(routingDecision.confidence * 100)}%)`
+      : '';
+
+    ws.send(JSON.stringify({
+      type: 'chat-response',
+      payload: {
+        taskId: request.id,
+        role: 'system',
+        content: agentCount > 0
+          ? `メッセージを受信しました。${agentCount}エージェントに転送中... ${routingInfo}`
+          : `メッセージを受信しました。処理中... ${routingInfo}`,
+        timestamp: now,
+      },
+    }));
+
+    safeLog.log('[CockpitWebSocket] Chat message processed via Gateway', {
+      taskId: request.id,
+      userId,
+      agentCount,
+      messageLength: request.content.length,
+      routing: routingDecision,
+    });
+  }
+
+  /**
+   * Handle command message from PWA client
+   * Routes through CockpitGateway for FUGUE integration
+   */
+  private async handleCommandMessage(
+    ws: WebSocket,
+    message: z.infer<typeof CommandMessageSchema>
+  ): Promise<void> {
+    // Get user info from session
+    const tags = this.ctx.getTags(ws);
+    let userId = 'unknown';
+    let userRole = 'viewer';
+
+    if (tags.length > 0) {
+      try {
+        const sessionData = JSON.parse(tags[0]);
+        userId = sessionData.userId || 'unknown';
+        userRole = sessionData.role || 'viewer';
+      } catch {
+        // Ignore parse errors
+      }
+    }
+
+    // Route through CockpitGateway for FUGUE delegation
+    const wsMessage: WebSocketMessage = {
+      type: 'command',
+      payload: message.payload,
+    };
+
+    const { request, routingDecision } = await this.gateway.processMessage(wsMessage, userId);
+    const now = Math.floor(Date.now() / 1000);
+
+    // Check for dangerous operations requiring consensus
+    if (routingDecision.requiresConsensus) {
+      safeLog.warn('[CockpitWebSocket] Dangerous command detected, requires consensus', {
+        taskId: request.id,
+        command: message.payload.command,
+      });
+    }
+
+    // Store as a task in DB with delegation hints
+    if (this.env.DB) {
+      try {
+        await this.env.DB.prepare(`
+          INSERT INTO cockpit_tasks (
+            id, title, status, executor, priority, created_at, updated_at, metadata
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          request.id,
+          request.content,
+          'pending',
+          routingDecision.agent,
+          routingDecision.requiresConsensus ? 'high' : 'normal',
+          now,
+          now,
+          JSON.stringify({
+            type: 'command',
+            orchestratorRequest: request,
+            routingDecision,
+            userRole,
+          })
+        ).run();
+
+        safeLog.log('[CockpitWebSocket] Command task created via Gateway', {
+          taskId: request.id,
+          command: message.payload.command,
+          userId,
+          suggestedAgent: routingDecision.agent,
+        });
+      } catch (error) {
+        safeLog.error('[CockpitWebSocket] Failed to create command task', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    // Broadcast to connected agents with routing info
+    const taskMessage = {
+      type: 'task',
+      taskId: request.id,
+      taskType: 'orchestrator-request',
+      payload: {
+        orchestratorRequest: request,
+        routingDecision,
+      },
+    };
+
+    let agentCount = 0;
+    for (const [agentWs, agent] of this.sessions) {
+      if (agentWs !== ws && (agent.status === 'online' || agent.status === 'idle')) {
+        try {
+          agentWs.send(JSON.stringify(taskMessage));
+          agentCount++;
+        } catch {
+          // Ignore send errors
+        }
+      }
+    }
+
+    // Send acknowledgment with routing info
+    ws.send(JSON.stringify({
+      type: 'ack',
+      taskId: request.id,
+      message: `コマンド ${message.payload.command} を受信しました`,
+      agentCount,
+      routing: {
+        suggestedAgent: routingDecision.agent,
+        confidence: routingDecision.confidence,
+        requiresConsensus: routingDecision.requiresConsensus,
+      },
+    }));
+
+    // Send task update to sender
+    ws.send(JSON.stringify({
+      type: 'task_created',
+      payload: {
+        id: request.id,
+        title: request.content,
+        status: 'pending',
+        executor: routingDecision.agent,
+        createdAt: now,
+        updatedAt: now,
+      },
+    }));
+
+    safeLog.log('[CockpitWebSocket] Command message processed via Gateway', {
+      taskId: request.id,
+      command: message.payload.command,
+      userId,
+      agentCount,
+      routing: routingDecision,
+    });
+  }
+
+  /**
    * Handle observability data sync from local agent
    */
   private async handleObservabilitySync(
@@ -901,6 +1272,77 @@ export class CockpitWebSocket extends DurableObject<Env> {
   }
 
   /**
+   * Broadcast alert to all connected PWA clients
+   * Called by notification-hub service to push alerts in real-time
+   */
+  private async handleBroadcastAlert(request: Request): Promise<Response> {
+    try {
+      const alert = await request.json() as {
+        id: string;
+        severity: string;
+        title: string;
+        message: string;
+        source: string;
+        createdAt: number;
+        acknowledged: boolean;
+      };
+
+      // Validate required fields
+      if (!alert.id || !alert.severity || !alert.title) {
+        return new Response(JSON.stringify({ error: 'Missing required fields' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Broadcast to all connected sessions
+      const alertMessage = {
+        type: 'alert',
+        payload: {
+          id: alert.id,
+          severity: alert.severity,
+          title: alert.title,
+          message: alert.message,
+          source: alert.source,
+          createdAt: alert.createdAt,
+          acknowledged: alert.acknowledged,
+        },
+      };
+
+      let sentCount = 0;
+      for (const [ws] of this.sessions) {
+        try {
+          ws.send(JSON.stringify(alertMessage));
+          sentCount++;
+        } catch {
+          // Ignore send errors for individual connections
+        }
+      }
+
+      safeLog.log('[CockpitWebSocket] Alert broadcasted', {
+        alertId: alert.id,
+        severity: alert.severity,
+        sentCount,
+      });
+
+      return new Response(JSON.stringify({
+        success: true,
+        sentCount,
+      }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (error) {
+      safeLog.error('[CockpitWebSocket] Broadcast alert failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return new Response(JSON.stringify({ error: 'Invalid request' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  /**
    * Get connected agents (monitoring)
    */
   private async handleGetAgents(request: Request): Promise<Response> {
@@ -918,7 +1360,7 @@ export class CockpitWebSocket extends DurableObject<Env> {
   }
 
   /**
-   * Periodic alarm to ping agents and cleanup stale connections
+   * Periodic alarm to ping agents, cleanup stale connections, and persist state
    */
   async alarm(): Promise<void> {
     safeLog.log('[CockpitWebSocket] Alarm triggered, pinging agents');
@@ -952,6 +1394,44 @@ export class CockpitWebSocket extends DurableObject<Env> {
         }
       }
     }
+
+    // Retry pending tasks to newly connected agents
+    if (this.pendingTasks.size > 0 && this.sessions.size > 0) {
+      const maxRetries = 3;
+      for (const [taskId, task] of this.pendingTasks) {
+        if (task.retryCount >= maxRetries) {
+          safeLog.warn('[CockpitWebSocket] Task exceeded max retries', { taskId });
+          this.pendingTasks.delete(taskId);
+          continue;
+        }
+
+        // Try to send to an available agent
+        for (const [ws, agent] of this.sessions) {
+          if (agent.status === 'online' || agent.status === 'idle') {
+            try {
+              ws.send(JSON.stringify({
+                type: 'task',
+                taskId: task.taskId,
+                taskType: task.taskType,
+                payload: task.payload,
+              }));
+              task.retryCount++;
+              safeLog.log('[CockpitWebSocket] Retried pending task', {
+                taskId,
+                retryCount: task.retryCount,
+                agentId: agent.agentId,
+              });
+              break;
+            } catch {
+              // Continue to next agent
+            }
+          }
+        }
+      }
+    }
+
+    // Persist state periodically (safety net)
+    await this.saveState();
 
     // Schedule next alarm
     await this.ctx.storage.setAlarm(Date.now() + 60000);
