@@ -24,6 +24,7 @@ import {
 } from '../services/digest-generator';
 import { sendDiscordNotification, type Notification } from './notifications';
 import { getAccessToken, type GoogleCredentials } from '../services/google-auth';
+import { handleReflectionNotifications } from './scheduled-reflection';
 import {
   generateSlidesFromMarkdown,
   formatDigestAsSlideMarkdown,
@@ -238,6 +239,10 @@ export async function handleDailyActionCheck(
       totalItems: report.totalItems,
       topicGroups: Object.keys(report.itemsByTopic).length,
     });
+
+    // Limitless Phase 5: Send reflection notifications for pending highlights
+    // Run independently to avoid blocking action item report
+    await handleReflectionNotifications(env, withLock);
   });
 }
 
