@@ -1,0 +1,86 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="512" height="512" fill="#09090b"/>
+
+  <defs>
+    <!-- Outer glow (radial gradient) - enhanced -->
+    <radialGradient id="outerGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:rgba(99, 102, 241, 0.5);stop-opacity:1" />
+      <stop offset="50%" style="stop-color:rgba(139, 92, 246, 0.3);stop-opacity:1" />
+      <stop offset="100%" style="stop-color:rgba(139, 92, 246, 0.05);stop-opacity:1" />
+    </radialGradient>
+
+    <!-- Center gradient (purple to violet) -->
+    <linearGradient id="centerGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#7c3aed;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Blur filter for glow -->
+    <filter id="blur">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="30" />
+    </filter>
+
+    <!-- Stronger blur for outer ripples -->
+    <filter id="blurStrong">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="40" />
+    </filter>
+  </defs>
+
+  <!-- Outer ripple circles (using space) -->
+  <circle cx="256" cy="256" r="220" fill="none" stroke="rgba(99, 102, 241, 0.15)" stroke-width="2" filter="url(#blurStrong)"/>
+  <circle cx="256" cy="256" r="190" fill="none" stroke="rgba(99, 102, 241, 0.2)" stroke-width="2" filter="url(#blur)"/>
+
+  <!-- Main glow circle (enhanced) -->
+  <circle cx="256" cy="256" r="170" fill="url(#outerGlow)" filter="url(#blur)"/>
+
+  <!-- Center circle with gradient (larger than v2) -->
+  <circle cx="256" cy="256" r="130" fill="url(#centerGradient)"/>
+
+  <!-- Inner glow accent -->
+  <circle cx="256" cy="256" r="100" fill="rgba(255, 255, 255, 0.05)"/>
+
+  <!-- Orchestration waves INSIDE the circle (enhanced visibility) -->
+  <g opacity="1">
+    <path d="M 170 280 Q 205 260 240 280 Q 275 300 310 280"
+          stroke="rgba(255,255,255,0.7)" stroke-width="6" fill="none" stroke-linecap="round"/>
+    <path d="M 170 305 Q 205 285 240 305 Q 275 325 310 305"
+          stroke="rgba(255,255,255,0.6)" stroke-width="6" fill="none" stroke-linecap="round"/>
+    <path d="M 170 330 Q 205 310 240 330 Q 275 350 310 330"
+          stroke="rgba(255,255,255,0.5)" stroke-width="6" fill="none" stroke-linecap="round"/>
+  </g>
+
+  <!-- Secondary wave ripples (background depth) -->
+  <g opacity="0.3" stroke="rgba(255, 255, 255, 0.4)" fill="none" stroke-width="3" stroke-linecap="round">
+    <path d="M 150 260 Q 190 240 230 260 Q 270 280 310 260"/>
+    <path d="M 150 350 Q 190 330 230 350 Q 270 370 310 350"/>
+  </g>
+
+  <!-- Conductor's baton (v2 style - straight, tapered) -->
+  <g transform="translate(256, 210) rotate(-45)">
+    <!-- Baton handle (grip) -->
+    <rect x="-9" y="0" width="18" height="35" rx="9" fill="#ffffff"/>
+
+    <!-- Decorative grip lines -->
+    <line x1="-9" y1="12" x2="9" y2="12" stroke="#6366f1" stroke-width="2" opacity="0.4"/>
+    <line x1="-9" y1="22" x2="9" y2="22" stroke="#6366f1" stroke-width="2" opacity="0.4"/>
+
+    <!-- Baton shaft - tapered (thin at top) -->
+    <path d="M -7 35 L -3 105 L 3 105 L 7 35 Z" fill="#ffffff"/>
+
+    <!-- Baton tip (sphere) -->
+    <circle cx="0" cy="110" r="7" fill="#ffffff"/>
+
+    <!-- Baton tip glow -->
+    <circle cx="0" cy="110" r="10" fill="rgba(255, 255, 255, 0.3)" filter="url(#blur)"/>
+  </g>
+
+  <!-- Subtle corner accents (musical notes metaphor) -->
+  <g fill="rgba(255,255,255,0.2)" opacity="0.6">
+    <circle cx="140" cy="140" r="3"/>
+    <circle cx="372" cy="140" r="3"/>
+    <circle cx="140" cy="372" r="3"/>
+    <circle cx="372" cy="372" r="3"/>
+  </g>
+</svg>

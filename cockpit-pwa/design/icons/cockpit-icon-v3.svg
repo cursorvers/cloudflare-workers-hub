@@ -1,0 +1,74 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="512" height="512" fill="#09090b"/>
+
+  <defs>
+    <!-- Outer glow (radial gradient) -->
+    <radialGradient id="outerGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:rgba(99, 102, 241, 0.5);stop-opacity:1" />
+      <stop offset="100%" style="stop-color:rgba(139, 92, 246, 0.1);stop-opacity:1" />
+    </radialGradient>
+
+    <!-- Center gradient (purple to violet) -->
+    <linearGradient id="centerGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Blur filter for glow -->
+    <filter id="blur">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="30" />
+    </filter>
+  </defs>
+
+  <!-- Outer glow circle (larger, blurred) -->
+  <circle cx="256" cy="256" r="180" fill="url(#outerGlow)" filter="url(#blur)"/>
+
+  <!-- Center circle with gradient (larger) -->
+  <circle cx="256" cy="256" r="140" fill="url(#centerGradient)"/>
+
+  <!-- Orchestration waves in circular arc pattern (using more space) -->
+  <g stroke="#ffffff" fill="none" stroke-width="6" stroke-linecap="round">
+    <!-- Inner wave arc -->
+    <path d="M 180 256 A 76 76 0 0 1 332 256" opacity="0.6"/>
+
+    <!-- Middle wave arc -->
+    <path d="M 170 256 A 86 86 0 0 1 342 256" opacity="0.5"/>
+
+    <!-- Outer wave arc -->
+    <path d="M 160 256 A 96 96 0 0 1 352 256" opacity="0.4"/>
+  </g>
+
+  <!-- Conductor's baton - curved along the circle (using full space) -->
+  <g>
+    <!-- Baton path following circular arc from bottom-left to top-right -->
+    <defs>
+      <path id="batonPath" d="M 190 340 Q 256 180 322 340"/>
+    </defs>
+
+    <!-- Baton shaft (following arc) -->
+    <path d="M 200 330 Q 256 200 312 330"
+          stroke="#ffffff"
+          stroke-width="24"
+          fill="none"
+          stroke-linecap="round"
+          opacity="0.95"/>
+
+    <!-- Baton handle (bottom) -->
+    <ellipse cx="206" cy="325" rx="16" ry="20" fill="#ffffff" transform="rotate(-45 206 325)"/>
+
+    <!-- Baton tip (top center) -->
+    <circle cx="256" cy="205" r="12" fill="#ffffff"/>
+
+    <!-- Baton handle (bottom-right for symmetry) -->
+    <ellipse cx="306" cy="325" rx="16" ry="20" fill="#ffffff" transform="rotate(45 306 325)"/>
+  </g>
+
+  <!-- Additional accent dots for orchestration theme (using corner space) -->
+  <g fill="rgba(255,255,255,0.3)">
+    <circle cx="150" cy="150" r="4"/>
+    <circle cx="362" cy="150" r="4"/>
+    <circle cx="150" cy="362" r="4"/>
+    <circle cx="362" cy="362" r="4"/>
+  </g>
+</svg>

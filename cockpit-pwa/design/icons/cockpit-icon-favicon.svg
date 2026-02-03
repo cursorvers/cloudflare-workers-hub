@@ -1,0 +1,41 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="512" height="512" fill="#09090b"/>
+
+  <defs>
+    <!-- Outer glow (radial gradient) -->
+    <radialGradient id="outerGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:rgba(99, 102, 241, 0.4);stop-opacity:1" />
+      <stop offset="100%" style="stop-color:rgba(139, 92, 246, 0.1);stop-opacity:1" />
+    </radialGradient>
+
+    <!-- Center gradient (purple to violet) -->
+    <linearGradient id="centerGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Blur filter for glow -->
+    <filter id="blur">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="25" />
+    </filter>
+  </defs>
+
+  <!-- Outer glow circle (blurred) -->
+  <circle cx="256" cy="256" r="160" fill="url(#outerGlow)" filter="url(#blur)"/>
+
+  <!-- Center circle with gradient -->
+  <circle cx="256" cy="256" r="110" fill="url(#centerGradient)"/>
+
+  <!-- Conductor's baton ONLY (no waves for small sizes) -->
+  <g transform="translate(256, 220) rotate(-45)">
+    <!-- Baton handle (grip) - slightly thicker -->
+    <rect x="-8" y="0" width="16" height="30" rx="8" fill="#ffffff"/>
+
+    <!-- Baton shaft - tapered (thin at top) -->
+    <path d="M -6 30 L -3 90 L 3 90 L 6 30 Z" fill="#ffffff"/>
+
+    <!-- Baton tip (small sphere) -->
+    <circle cx="0" cy="95" r="6" fill="#ffffff"/>
+  </g>
+</svg>

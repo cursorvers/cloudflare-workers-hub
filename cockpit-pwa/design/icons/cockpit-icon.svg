@@ -1,0 +1,42 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="512" height="512" fill="#09090b"/>
+
+  <!-- Outer glow (radial gradient) -->
+  <defs>
+    <radialGradient id="outerGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:rgba(99, 102, 241, 0.3);stop-opacity:1" />
+      <stop offset="100%" style="stop-color:rgba(139, 92, 246, 0.1);stop-opacity:1" />
+    </radialGradient>
+
+    <linearGradient id="centerGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Blur filter for glow -->
+    <filter id="blur">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="20" />
+    </filter>
+  </defs>
+
+  <!-- Outer glow circle -->
+  <circle cx="256" cy="256" r="150" fill="url(#outerGlow)" filter="url(#blur)"/>
+
+  <!-- Center circle with gradient -->
+  <circle cx="256" cy="256" r="100" fill="url(#centerGradient)"/>
+
+  <!-- Conductor's baton (rotated -15 degrees) -->
+  <g transform="translate(256, 240) rotate(-15) translate(-20, -60)">
+    <rect x="0" y="0" width="40" height="120" rx="20" fill="#ffffff"/>
+    <circle cx="20" cy="-5" r="15" fill="#ffffff"/>
+  </g>
+
+  <!-- Orchestration waves (3 layers with fading opacity) -->
+  <path d="M 180 340 Q 220 320 256 340 Q 292 360 332 340"
+        stroke="#ffffff" stroke-width="4" fill="none" opacity="0.4"/>
+  <path d="M 180 360 Q 220 340 256 360 Q 292 380 332 360"
+        stroke="#ffffff" stroke-width="4" fill="none" opacity="0.3"/>
+  <path d="M 180 380 Q 220 360 256 380 Q 292 400 332 380"
+        stroke="#ffffff" stroke-width="4" fill="none" opacity="0.2"/>
+</svg>
