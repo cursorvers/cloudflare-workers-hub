@@ -29,6 +29,11 @@ import {
   authenticateWithAccess,
   mapAccessUserToInternal,
 } from '../utils/cloudflare-access';
+import { handleSubscribe, handleUnsubscribe } from './push-notifications';
+import {
+  validateOrigin,
+  createCSRFErrorResponse,
+} from '../utils/csrf-protection';
 
 // =============================================================================
 // Request Schemas
@@ -39,6 +44,18 @@ const CreateTaskSchema = z.object({
   title: z.string().min(1),
   executor: z.enum(['claude-code', 'codex', 'glm', 'subagent', 'gemini']).optional(),
   payload: z.unknown().optional(),
+  status: z.enum(['backlog', 'pending', 'in_progress', 'review', 'completed']).optional(),
+  priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
+  description: z.string().optional(),
+});
+
+const UpdateTaskSchema = z.object({
+  title: z.string().min(1).optional(),
+  status: z.enum(['backlog', 'pending', 'in_progress', 'review', 'completed']).optional(),
+  executor: z.enum(['claude-code', 'codex', 'glm', 'subagent', 'gemini']).nullable().optional(),
+  priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
+  description: z.string().optional(),
+  result: z.unknown().optional(),
 });
 
 const LoginSchema = z.object({
@@ -86,6 +103,20 @@ async function authenticateAndAuthorize(
   request: Request,
   env: Env
 ): Promise<{ success: boolean; userId?: string; role?: UserRole; response?: Response }> {
+  // CSRF Protection: Validate Origin/Referer for state-changing requests
+  const csrfResult = validateOrigin(request, env);
+  if (!csrfResult.valid) {
+    safeLog.warn('[CSRF] Request rejected', {
+      method: request.method,
+      url: request.url,
+      error: csrfResult.error,
+    });
+    return {
+      success: false,
+      response: createCSRFErrorResponse(csrfResult),
+    };
+  }
+
   let userId: string | undefined;
   let role: UserRole | undefined;
   let authMethod: 'access' | 'jwt' | undefined;
@@ -437,6 +468,50 @@ async function handleGetTasks(request: Request, env: Env): Promise<Response> {
 }
 
 /**
+ * GET /api/cockpit/tasks/:id
+ * Get a single task by ID
+ */
+async function handleGetTask(request: Request, env: Env, taskId: string): Promise<Response> {
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: 'Database not available' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  try {
+    const task = await env.DB.prepare(`
+      SELECT * FROM cockpit_tasks WHERE id = ?
+    `).bind(taskId).first();
+
+    if (!task) {
+      return new Response(JSON.stringify({ error: 'Task not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    return new Response(JSON.stringify({
+      task: {
+        ...task,
+        result: task.result ? JSON.parse(task.result as string) : null,
+      },
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    safeLog.error('[CockpitAPI] Failed to get task', {
+      taskId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return new Response(JSON.stringify({ error: 'Internal error' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+}
+
+/**
  * POST /api/cockpit/tasks
  * Create a new task
  */
@@ -456,13 +531,15 @@ async function handleCreateTask(request: Request, env: Env): Promise<Response> {
     const now = Math.floor(Date.now() / 1000);
 
     await env.DB.prepare(`
-      INSERT INTO cockpit_tasks (id, title, status, executor, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO cockpit_tasks (id, title, status, executor, priority, description, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       taskId,
       validated.title,
-      'pending',
+      validated.status || 'backlog',
       validated.executor || null,
+      validated.priority || 'medium',
+      validated.description || null,
       now,
       now
     ).run();
@@ -518,6 +595,201 @@ async function handleCreateTask(request: Request, env: Env): Promise<Response> {
     }
 
     safeLog.error('[CockpitAPI] Failed to create task', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return new Response(JSON.stringify({ error: 'Internal error' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+}
+
+/**
+ * PUT /api/cockpit/tasks/:id
+ * Update an existing task
+ */
+async function handleUpdateTask(request: Request, env: Env, taskId: string): Promise<Response> {
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: 'Database not available' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  try {
+    const body = await request.json();
+    const validated = UpdateTaskSchema.parse(body);
+
+    // Check if task exists
+    const existing = await env.DB.prepare(`
+      SELECT id FROM cockpit_tasks WHERE id = ?
+    `).bind(taskId).first();
+
+    if (!existing) {
+      return new Response(JSON.stringify({ error: 'Task not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Build dynamic update query
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+
+    if (validated.title !== undefined) {
+      updates.push('title = ?');
+      values.push(validated.title);
+    }
+    if (validated.status !== undefined) {
+      updates.push('status = ?');
+      values.push(validated.status);
+    }
+    if (validated.executor !== undefined) {
+      updates.push('executor = ?');
+      values.push(validated.executor);
+    }
+    if (validated.priority !== undefined) {
+      updates.push('priority = ?');
+      values.push(validated.priority);
+    }
+    if (validated.description !== undefined) {
+      updates.push('description = ?');
+      values.push(validated.description);
+    }
+    if (validated.result !== undefined) {
+      updates.push('result = ?');
+      values.push(JSON.stringify(validated.result));
+    }
+
+    if (updates.length === 0) {
+      return new Response(JSON.stringify({ error: 'No fields to update' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Always update updated_at
+    updates.push('updated_at = ?');
+    values.push(Math.floor(Date.now() / 1000));
+    values.push(taskId);
+
+    await env.DB.prepare(`
+      UPDATE cockpit_tasks SET ${updates.join(', ')} WHERE id = ?
+    `).bind(...values).run();
+
+    safeLog.log('[CockpitAPI] Task updated', {
+      taskId,
+      fields: Object.keys(validated),
+    });
+
+    // Broadcast update to WebSocket clients
+    if (env.COCKPIT_WS) {
+      try {
+        const doId = env.COCKPIT_WS.idFromName('cockpit');
+        const doStub = env.COCKPIT_WS.get(doId);
+
+        await doStub.fetch(new Request('http://do/broadcast-task', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'task_update',
+            taskId,
+            changes: validated,
+          }),
+        }));
+      } catch (error) {
+        safeLog.warn('[CockpitAPI] Failed to broadcast task update', {
+          taskId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      taskId,
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return new Response(JSON.stringify({
+        error: 'Validation failed',
+        details: error.errors,
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    safeLog.error('[CockpitAPI] Failed to update task', {
+      taskId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return new Response(JSON.stringify({ error: 'Internal error' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+}
+
+/**
+ * DELETE /api/cockpit/tasks/:id
+ * Delete a task
+ */
+async function handleDeleteTask(request: Request, env: Env, taskId: string): Promise<Response> {
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: 'Database not available' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  try {
+    const result = await env.DB.prepare(`
+      DELETE FROM cockpit_tasks WHERE id = ?
+    `).bind(taskId).run();
+
+    if (result.meta.changes === 0) {
+      return new Response(JSON.stringify({ error: 'Task not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    safeLog.log('[CockpitAPI] Task deleted', { taskId });
+
+    // Broadcast deletion to WebSocket clients
+    if (env.COCKPIT_WS) {
+      try {
+        const doId = env.COCKPIT_WS.idFromName('cockpit');
+        const doStub = env.COCKPIT_WS.get(doId);
+
+        await doStub.fetch(new Request('http://do/broadcast-task', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'task_delete',
+            taskId,
+          }),
+        }));
+      } catch (error) {
+        safeLog.warn('[CockpitAPI] Failed to broadcast task deletion', {
+          taskId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      taskId,
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    safeLog.error('[CockpitAPI] Failed to delete task', {
+      taskId,
       error: error instanceof Error ? error.message : String(error),
     });
     return new Response(JSON.stringify({ error: 'Internal error' }), {
@@ -696,6 +968,15 @@ export async function handleCockpitAPI(request: Request, env: Env, path: string)
     return handleRefreshToken(request, env);
   }
 
+  // Push notification subscription endpoints (public - no auth required for PWA)
+  if (path === '/api/cockpit/subscribe' && request.method === 'POST') {
+    return handleSubscribe(request, env);
+  }
+
+  if (path === '/api/cockpit/unsubscribe' && request.method === 'POST') {
+    return handleUnsubscribe(request, env);
+  }
+
   // All other endpoints require JWT authentication
   const authResult = await authenticateAndAuthorize(request, env);
   if (!authResult.success) {
@@ -703,6 +984,22 @@ export async function handleCockpitAPI(request: Request, env: Env, path: string)
   }
 
   // Route requests (all protected by JWT + RBAC)
+
+  // Task endpoints with :id parameter
+  const taskIdMatch = path.match(/^\/api\/cockpit\/tasks\/([^/]+)$/);
+  if (taskIdMatch) {
+    const taskId = taskIdMatch[1];
+    if (request.method === 'GET') {
+      return handleGetTask(request, env, taskId);
+    }
+    if (request.method === 'PUT') {
+      return handleUpdateTask(request, env, taskId);
+    }
+    if (request.method === 'DELETE') {
+      return handleDeleteTask(request, env, taskId);
+    }
+  }
+
   if (path === '/api/cockpit/tasks' && request.method === 'GET') {
     return handleGetTasks(request, env);
   }
