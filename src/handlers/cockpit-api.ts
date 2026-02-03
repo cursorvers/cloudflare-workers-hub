@@ -39,6 +39,11 @@ import {
   createRateLimitErrorResponse,
   addRateLimitHeaders,
 } from '../utils/rate-limiter';
+import {
+  hashPassword,
+  verifyPassword,
+  PasswordSchema,
+} from '../utils/password-auth';
 
 // =============================================================================
 // Request Schemas
@@ -65,8 +70,7 @@ const UpdateTaskSchema = z.object({
 
 const LoginSchema = z.object({
   email: z.string().email(),
-  // In production, add password field and implement proper authentication
-  // For now, this is a simplified login for JWT token issuance
+  password: PasswordSchema, // Password with strength validation
 });
 
 const RefreshTokenSchema = z.object({
@@ -294,13 +298,36 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     const body = await request.json();
     const validated = LoginSchema.parse(body);
 
-    // Look up user by email
+    // Look up user by email (include password_hash for verification)
     const user = await env.DB.prepare(`
-      SELECT user_id, role, is_active FROM cockpit_users WHERE email = ?
-    `).bind(validated.email).first<{ user_id: string; role: UserRole; is_active: number }>();
+      SELECT user_id, role, is_active, password_hash FROM cockpit_users WHERE email = ?
+    `).bind(validated.email).first<{ user_id: string; role: UserRole; is_active: number; password_hash: string | null }>();
 
     if (!user || !user.is_active) {
       return new Response(JSON.stringify({ error: 'Invalid credentials' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Verify password (only if password_hash exists)
+    if (user.password_hash) {
+      const isValidPassword = await verifyPassword(validated.password, user.password_hash);
+      if (!isValidPassword) {
+        safeLog.warn('[Auth] Invalid password attempt', { email: validated.email });
+        return new Response(JSON.stringify({ error: 'Invalid credentials' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    } else {
+      // User exists but has no password_hash (legacy Cloudflare Access user)
+      // Reject password login for these users
+      safeLog.warn('[Auth] Password login attempted for Access-only user', { email: validated.email });
+      return new Response(JSON.stringify({
+        error: 'Password authentication not configured',
+        message: 'Please use Google SSO via Cloudflare Access',
+      }), {
         status: 401,
         headers: { 'Content-Type': 'application/json' },
       });
