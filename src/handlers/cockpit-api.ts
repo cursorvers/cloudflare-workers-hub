@@ -34,6 +34,11 @@ import {
   validateOrigin,
   createCSRFErrorResponse,
 } from '../utils/csrf-protection';
+import {
+  checkRateLimit,
+  createRateLimitErrorResponse,
+  addRateLimitHeaders,
+} from '../utils/rate-limiter';
 
 // =============================================================================
 // Request Schemas
@@ -114,6 +119,21 @@ async function authenticateAndAuthorize(
     return {
       success: false,
       response: createCSRFErrorResponse(csrfResult),
+    };
+  }
+
+  // Rate Limiting: Check before authentication (prevents auth bypass via brute force)
+  const rateLimitResult = await checkRateLimit(request, env);
+  if (!rateLimitResult.allowed) {
+    safeLog.warn('[RateLimit] Request rejected', {
+      method: request.method,
+      url: request.url,
+      remaining: rateLimitResult.remaining,
+      retryAfter: rateLimitResult.retryAfter,
+    });
+    return {
+      success: false,
+      response: createRateLimitErrorResponse(rateLimitResult),
     };
   }
 
