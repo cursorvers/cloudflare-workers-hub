@@ -145,22 +145,44 @@
       };
     }
 
-    // リポジトリ表示
+    // リポジトリ表示（XSS対策: innerHTML → createElement）
     function renderRepos(repos) {
       const container = document.getElementById('repos');
+      container.textContent = ''; // Clear previous content
+
       if (!repos || repos.length === 0) {
-        container.innerHTML = '<div class="no-alerts">リポジトリなし</div>';
+        const noRepos = document.createElement('div');
+        noRepos.className = 'no-alerts';
+        noRepos.textContent = 'リポジトリなし';
+        container.appendChild(noRepos);
         return;
       }
-      container.innerHTML = repos.map(r => `
-        <div class="repo">
-          <div>
-            <div class="repo-name">${r.name}</div>
-            <div class="repo-branch">${r.branch || 'main'}</div>
-          </div>
-          <div class="repo-status ${r.status || 'clean'}">${getStatusLabel(r)}</div>
-        </div>
-      `).join('');
+
+      repos.forEach(r => {
+        const repoDiv = document.createElement('div');
+        repoDiv.className = 'repo';
+
+        const infoDiv = document.createElement('div');
+
+        const nameDiv = document.createElement('div');
+        nameDiv.className = 'repo-name';
+        nameDiv.textContent = r.name; // Safe: textContent
+
+        const branchDiv = document.createElement('div');
+        branchDiv.className = 'repo-branch';
+        branchDiv.textContent = r.branch || 'main'; // Safe: textContent
+
+        infoDiv.appendChild(nameDiv);
+        infoDiv.appendChild(branchDiv);
+
+        const statusDiv = document.createElement('div');
+        statusDiv.className = `repo-status ${r.status || 'clean'}`;
+        statusDiv.textContent = getStatusLabel(r); // Safe: textContent
+
+        repoDiv.appendChild(infoDiv);
+        repoDiv.appendChild(statusDiv);
+        container.appendChild(repoDiv);
+      });
     }
 
     function getStatusLabel(repo) {
@@ -192,18 +214,35 @@
       }
     }
 
+    // アラート表示（XSS対策: innerHTML → createElement）
     function renderAlerts(alerts) {
       const container = document.getElementById('alerts');
+      container.textContent = ''; // Clear previous content
+
       if (!alerts || alerts.length === 0) {
-        container.innerHTML = '<div class="no-alerts">アラートなし</div>';
+        const noAlerts = document.createElement('div');
+        noAlerts.className = 'no-alerts';
+        noAlerts.textContent = 'アラートなし';
+        container.appendChild(noAlerts);
         return;
       }
-      container.innerHTML = alerts.map(a => `
-        <div class="alert">
-          <div class="alert-title">${a.message}</div>
-          <div class="alert-time">${new Date(a.timestamp).toLocaleString()}</div>
-        </div>
-      `).join('');
+
+      alerts.forEach(a => {
+        const alertDiv = document.createElement('div');
+        alertDiv.className = 'alert';
+
+        const titleDiv = document.createElement('div');
+        titleDiv.className = 'alert-title';
+        titleDiv.textContent = a.message; // Safe: textContent
+
+        const timeDiv = document.createElement('div');
+        timeDiv.className = 'alert-time';
+        timeDiv.textContent = new Date(a.timestamp).toLocaleString(); // Safe: textContent
+
+        alertDiv.appendChild(titleDiv);
+        alertDiv.appendChild(timeDiv);
+        container.appendChild(alertDiv);
+      });
     }
 
     function refresh() {
