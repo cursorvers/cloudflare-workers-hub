@@ -18,11 +18,17 @@ database_id = "4164f0fc-d6bb-4e78-86d1-2601d762d6de"
 binding = "CACHE"
 id = "378a478680ec41d280737181530f58a9"
 
+# KV Namespace for AI classification cache (30-day TTL)
+[[kv_namespaces]]
+binding = "KV"
+id = "378a478680ec41d280737181530f58a9"  # Reusing same KV namespace
+
 # Durable Objects for atomic task queue coordination
 [durable_objects]
 bindings = [
   { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
-  { name = "COCKPIT_WS", class_name = "CockpitWebSocket" }
+  { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
+  { name = "SYSTEM_EVENTS", class_name = "SystemEvents" }
 ]
 
 # DO migration (required for first deployment, free plan requires new_sqlite_classes)
@@ -34,6 +40,10 @@ new_sqlite_classes = ["TaskCoordinator"]
 tag = "v2"
 new_sqlite_classes = ["CockpitWebSocket"]
 
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["SystemEvents"]
+
 # R2 bucket for audio staging and Obsidian vault (requires R2 enabled on account)
 # [[r2_buckets]]
 # binding = "AUDIO_STAGING"
@@ -43,21 +53,31 @@ new_sqlite_classes = ["CockpitWebSocket"]
 # binding = "OBSIDIAN_VAULT"
 # bucket_name = "obsidian-vault"
 
+# R2 bucket for receipt WORM storage (Electronic Bookkeeping Law compliant)
+# Uncomment after enabling R2 in Cloudflare Dashboard
+# [[r2_buckets]]
+# binding = "R2"
+# bucket_name = "receipt-worm-storage"
+
 # Vectorize for semantic search
 [[vectorize]]
 binding = "KNOWLEDGE_INDEX"
 index_name = "obsidian-knowledge"
 
-# Cron Triggers
+# Cron Triggers (Free plan limit: 5, currently using 4)
 [triggers]
-crons = ["0 * * * *", "0 21 * * *", "0 0 * * SUN", "0 0 1 * *", "0 0 2 1 *"]  # Hourly sync, Daily actions (6AM JST), Weekly digest (Sun 9AM JST), Monthly digest (1st 9AM JST), Annual digest (Jan 2nd 9AM JST)
+crons = ["0 * * * *", "0 */6 * * *", "0 21 * * *", "0 0 * * SUN"]  # Hourly sync, PHI verification (every 6h), Daily actions (6AM JST), Weekly digest (Sun 9AM JST)
 
 # Environment variables
 [vars]
 ENVIRONMENT = "development"
+ALLOW_DEV_ORIGINS = "fugue-system-ui.vercel.app,localhost:3000"
 LIMITLESS_AUTO_SYNC_ENABLED = "true"
 LIMITLESS_USER_ID = "masayuki"
 LIMITLESS_SYNC_INTERVAL_HOURS = "1"
+FEATURE_HIGHLIGHTS_ENABLED = "true"
+# freee API Base URL
+FREEE_BASE_URL = "https://api.freee.co.jp/api/1"
 # Cloudflare Access (Zero Trust)
 CF_ACCESS_TEAM = "masa-stage1"
 # CF_ACCESS_AUD is set via wrangler secret
@@ -69,7 +89,7 @@ local_protocol = "http"
 
 # Production environment
 [env.production]
-vars = { ENVIRONMENT = "production", CF_ACCESS_TEAM = "masa-stage1" }
+vars = { ENVIRONMENT = "production", CF_ACCESS_TEAM = "masa-stage1", ALLOW_DEV_ORIGINS = "fugue-system-ui.vercel.app", FEATURE_HIGHLIGHTS_ENABLED = "true", LIMITLESS_AUTO_SYNC_ENABLED = "true", LIMITLESS_USER_ID = "masayuki", LIMITLESS_SYNC_INTERVAL_HOURS = "1" }
 # CF_ACCESS_AUD should be set via wrangler secret or dashboard after Access app creation
 
 [env.production.ai]
@@ -87,7 +107,8 @@ id = "378a478680ec41d280737181530f58a9"
 [env.production.durable_objects]
 bindings = [
   { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
-  { name = "COCKPIT_WS", class_name = "CockpitWebSocket" }
+  { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
+  { name = "SYSTEM_EVENTS", class_name = "SystemEvents" }
 ]
 
 # [[env.production.r2_buckets]]

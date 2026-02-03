@@ -22,12 +22,16 @@ export interface Env {
   AI: Ai;
   DB?: D1Database;
   CACHE?: KVNamespace;
+  KV?: KVNamespace; // AI classification cache
   TASK_COORDINATOR?: DurableObjectNamespace;
   COCKPIT_WS?: DurableObjectNamespace;
+  SYSTEM_EVENTS?: DurableObjectNamespace;
   AUDIO_STAGING?: R2Bucket;
   OBSIDIAN_VAULT?: R2Bucket;
+  R2?: R2Bucket; // Receipt WORM storage
   KNOWLEDGE_INDEX?: VectorizeIndex;
   ENVIRONMENT: string;
+  ALLOW_DEV_ORIGINS?: string;
   // Slack
   SLACK_BOT_TOKEN?: string;
   SLACK_SIGNING_SECRET?: string;
@@ -76,4 +80,21 @@ export interface Env {
   // Cloudflare Access (Zero Trust)
   CF_ACCESS_TEAM?: string;         // Cloudflare Access team domain (e.g., "masa-stage1")
   CF_ACCESS_AUD?: string;          // Application AUD tag from Access dashboard
+  // Feature flags
+  FEATURE_HIGHLIGHTS_ENABLED?: string; // Enable/disable Limitless highlights feature
+  DRY_RUN?: string;                // Enable dry-run mode for testing (Limitless poller)
+  // Web Push (PWA)
+  VAPID_PUBLIC_KEY?: string;       // VAPID public key for web push
+  VAPID_PRIVATE_KEY?: string;      // VAPID private key for web push
+  // Slack webhook (alternative to bot)
+  SLACK_WEBHOOK_URL?: string;      // Slack webhook URL for notifications
+  // freee API Integration
+  FREEE_CLIENT_ID?: string;        // freee OAuth client ID
+  FREEE_CLIENT_SECRET?: string;    // freee OAuth client secret
+  FREEE_REDIRECT_URI?: string;     // freee OAuth redirect URI
+  FREEE_COMPANY_ID?: string;       // freee company ID
+  FREEE_ENCRYPTION_KEY?: string;   // AES-GCM encryption key for refresh token (32 chars)
+  FREEE_BASE_URL?: string;         // freee API base URL (default: https://api.freee.co.jp/api/1)
+  // Highlight API (iOS Shortcut)
+  HIGHLIGHT_API_KEY?: string;      // API key for Limitless highlights feature
 }
