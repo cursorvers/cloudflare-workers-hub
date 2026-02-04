@@ -3,6 +3,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import type { RealtimeHeartbeatMap } from '@/types/heartbeat';
+import type { UsageResponse, UsageViewModel, UsageQuota } from '@/types/usage';
 
 export interface DaemonState {
   daemonId: string;
@@ -18,6 +20,7 @@ interface DaemonStatusProps {
   apiBase?: string;
   apiKey?: string;
   refreshInterval?: number; // ms, default 30000
+  realtimeHeartbeats?: RealtimeHeartbeatMap;
 }
 
 const statusConfig: Record<DaemonState['status'], {
@@ -37,16 +40,55 @@ function formatAge(isoString: string): string {
   return `${Math.round(age / 3600)}時間前`;
 }
 
+function formatHeartbeatAge(timestamp: number): string {
+  const age = Math.round((Date.now() - timestamp) / 1000);
+  if (age < 60) return `${age}秒前`;
+  if (age < 3600) return `${Math.round(age / 60)}分前`;
+  if (age < 86400) return `${Math.round(age / 3600)}時間前`;
+  return `${Math.round(age / 86400)}日前`;
+}
+
+function getUsageStatus(percent: number): 'ok' | 'warn' | 'critical' {
+  if (percent >= 95) return 'critical';
+  if (percent >= 85) return 'warn';
+  return 'ok';
+}
+
+function getAgentLabel(agent: string): string {
+  const labels: Record<string, string> = {
+    claude: 'Claude',
+    codex: 'Codex',
+    glm: 'GLM-4.7',
+    gemini: 'Gemini',
+  };
+  return labels[agent] || agent;
+}
+
+function getPeriodLabel(period: string): string {
+  const labels: Record<string, string> = {
+    daily: '日次',
+    weekly: '週次',
+    monthly: '月次',
+    '5h_rolling': '5時間',
+    'monthly_web': '月次(Web)',
+  };
+  return labels[period] || period;
+}
+
 export function DaemonStatus({
-  apiBase = process.env.NEXT_PUBLIC_API_URL || 'https://orchestrator-hub.masa-stage1.workers.dev/api',
+  apiBase = '/api',
   apiKey = process.env.NEXT_PUBLIC_API_KEY,
   refreshInterval = 30000,
+  realtimeHeartbeats,
 }: DaemonStatusProps) {
   const [daemons, setDaemons] = useState<DaemonState[]>([]);
   const [staleDaemons, setStaleDaemons] = useState<DaemonState[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isExpanded, setIsExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [usageData, setUsageData] = useState<UsageResponse | null>(null);
+  const [usageError, setUsageError] = useState<string | null>(null);
+  const [expandedAgents, setExpandedAgents] = useState<Set<string>>(new Set());
 
   const fetchDaemonHealth = useCallback(async () => {
     const headers: HeadersInit = {
@@ -72,15 +114,45 @@ export function DaemonStatus({
     }
   }, [apiBase, apiKey]);
 
+  const fetchUsage = useCallback(async () => {
+    const headers: HeadersInit = {
+      'Content-Type': 'application/json',
+    };
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+
+    try {
+      const res = await fetch(`${apiBase}/usage`, { headers });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const data: UsageResponse = await res.json();
+      setUsageData(data);
+      setUsageError(null);
+    } catch (err) {
+      setUsageError(err instanceof Error ? err.message : 'Unknown error');
+    }
+  }, [apiBase, apiKey]);
+
   useEffect(() => {
     fetchDaemonHealth();
     const interval = setInterval(fetchDaemonHealth, refreshInterval);
     return () => clearInterval(interval);
   }, [fetchDaemonHealth, refreshInterval]);
 
+  useEffect(() => {
+    fetchUsage();
+    const interval = setInterval(fetchUsage, 300000); // 5 minutes
+    return () => clearInterval(interval);
+  }, [fetchUsage]);
+
   const totalActive = daemons.length;
   const totalStale = staleDaemons.length;
   const hasIssues = totalStale > 0 || daemons.some(d => d.status !== 'healthy');
+  const heartbeatEntries = Array.from(realtimeHeartbeats?.entries() ?? [])
+    .sort(([, a], [, b]) => b.timestamp - a.timestamp);
+  const showHeartbeatSection = realtimeHeartbeats !== undefined;
 
   return (
     <div className="space-y-2">
@@ -91,7 +163,7 @@ export function DaemonStatus({
         <span className={`transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`}>
           ▶
         </span>
-        <span>デーモン</span>
+        <span>エージェント</span>
         {isLoading ? (
           <Badge variant="outline" className="text-xs">読込中...</Badge>
         ) : error ? (
@@ -114,6 +186,7 @@ export function DaemonStatus({
 
       {isExpanded && (
         <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden animate-fade-in">
+          {/* Daemon Health Section */}
           {error ? (
             <div className="px-4 py-3 text-sm text-red-500">
               エラー: {error}
@@ -131,20 +204,184 @@ export function DaemonStatus({
             </div>
           ) : totalActive === 0 && totalStale === 0 ? (
             <div className="px-4 py-3 text-sm text-zinc-500 dark:text-zinc-400">
-              デーモンが登録されていません
+              エージェントが登録されていません
             </div>
           ) : (
             <ul className="divide-y divide-zinc-200 dark:divide-zinc-800">
-              {/* Active Daemons */}
               {daemons.map((daemon) => (
                 <DaemonRow key={daemon.daemonId} daemon={daemon} isStale={false} />
               ))}
-              {/* Stale Daemons */}
               {staleDaemons.map((daemon) => (
                 <DaemonRow key={daemon.daemonId} daemon={daemon} isStale={true} />
               ))}
             </ul>
           )}
+          {/* HEARTBEAT Section - Always show when available */}
+          {showHeartbeatSection && (
+            <div className="border-t border-zinc-200 dark:border-zinc-800">
+              <div className="px-4 py-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
+                最新 HEARTBEAT
+              </div>
+              {heartbeatEntries.length === 0 ? (
+                <div className="px-4 py-3 text-sm text-zinc-500 dark:text-zinc-400">
+                  HEARTBEAT はまだありません
+                </div>
+              ) : (
+                <ul className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                  {heartbeatEntries.map(([source, heartbeat]) => (
+                    <li key={source} className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm" aria-hidden="true">💓</span>
+                        <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">
+                          {source}
+                        </span>
+                        <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {heartbeat.type || 'HEARTBEAT'}
+                        </span>
+                        <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-auto">
+                          {formatHeartbeatAge(heartbeat.timestamp)}
+                        </span>
+                      </div>
+                      <p className="text-xs text-zinc-600 dark:text-zinc-400 truncate">
+                        {heartbeat.message}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          {/* AI Usage Section - Always show when available */}
+          {usageData && (
+            <div className="border-t border-zinc-200 dark:border-zinc-800">
+              <div className="px-4 py-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
+                AI 使用量
+              </div>
+              {usageError ? (
+                <div className="px-4 py-3 text-sm text-red-500">
+                  エラー: {usageError}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="ml-2"
+                    onClick={() => fetchUsage()}
+                  >
+                    再試行
+                  </Button>
+                </div>
+              ) : (
+                <ul className="divide-y divide-zinc-200 dark:border-zinc-800">
+                  {(['claude', 'codex', 'glm', 'gemini'] as const).map((agent) => {
+                    const agentData = usageData.agents[agent];
+                    if (!agentData || !agentData.quotas.length) return null;
+
+                    const criticalQuota = agentData.critical || agentData.quotas[0];
+                    const percent = criticalQuota.limit > 0
+                      ? Math.round((criticalQuota.used / criticalQuota.limit) * 100)
+                      : 0;
+                    const status = getUsageStatus(percent);
+                    const isExpanded = expandedAgents.has(agent);
+
+                    return (
+                      <li key={agent} className="px-4 py-3">
+                        <button
+                          onClick={() => {
+                            const newExpanded = new Set(expandedAgents);
+                            if (isExpanded) {
+                              newExpanded.delete(agent);
+                            } else {
+                              newExpanded.add(agent);
+                            }
+                            setExpandedAgents(newExpanded);
+                          }}
+                          className="w-full text-left"
+                        >
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className={`text-xs transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`}>
+                              ▶
+                            </span>
+                            <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                              {getAgentLabel(agent)}
+                            </span>
+                            <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                              {getPeriodLabel(criticalQuota.period)}
+                            </span>
+                            {status === 'critical' && (
+                              <span className="text-xs text-red-500">⚠️</span>
+                            )}
+                            {status === 'warn' && (
+                              <span className="text-xs text-yellow-500">⚠️</span>
+                            )}
+                          </div>
+                          <QuotaBar quota={criticalQuota} />
+                        </button>
+                        {isExpanded && agentData.quotas.length > 1 && (
+                          <div className="ml-4 mt-2 space-y-2">
+                            {agentData.quotas
+                              .filter(q => q !== criticalQuota)
+                              .map((quota, idx) => (
+                                <div key={idx}>
+                                  <div className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">
+                                    {getPeriodLabel(quota.period)}
+                                  </div>
+                                  <QuotaBar quota={quota} />
+                                </div>
+                              ))}
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface QuotaBarProps {
+  quota: UsageQuota;
+}
+
+function QuotaBar({ quota }: QuotaBarProps) {
+  const percent = quota.limit > 0
+    ? Math.round((quota.used / quota.limit) * 100)
+    : 0;
+  const remaining = quota.limit - quota.used;
+  const status = getUsageStatus(percent);
+
+  const barColor = status === 'critical'
+    ? 'bg-red-500'
+    : status === 'warn'
+    ? 'bg-yellow-500'
+    : 'bg-blue-500';
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-zinc-600 dark:text-zinc-400">
+          {quota.used}/{quota.limit} {quota.budget && `(${quota.budget})`}
+        </span>
+        <span className={`font-medium ${
+          status === 'critical' ? 'text-red-500' :
+          status === 'warn' ? 'text-yellow-600' :
+          'text-zinc-600 dark:text-zinc-400'
+        }`}>
+          {percent}%
+        </span>
+      </div>
+      <div className="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-2 overflow-hidden">
+        <div
+          className={`${barColor} h-full transition-all duration-300`}
+          style={{ width: `${Math.min(percent, 100)}%` }}
+        />
+      </div>
+      {remaining > 0 && (
+        <div className="text-xs text-zinc-500 dark:text-zinc-400">
+          残り {remaining}
         </div>
       )}
     </div>

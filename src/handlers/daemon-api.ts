@@ -16,6 +16,33 @@ import { validateRequestBody } from '../schemas/validation-helper';
 import { DaemonRegistrationSchema, DaemonHeartbeatSchema } from '../schemas/daemon';
 
 export async function handleDaemonAPI(request: Request, env: Env, path: string): Promise<Response> {
+  // GET /api/daemon/health - List active daemons (queue scope - read-only)
+  if (path === '/api/daemon/health' && request.method === 'GET') {
+    // Health check uses queue scope (less restrictive than admin)
+    if (!verifyAPIKey(request, env, 'queue')) {
+      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    try {
+      const health = await getDaemonHealth(env);
+      return new Response(JSON.stringify(health), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (error) {
+      safeLog.error('[Daemon API] Health check error', { error: String(error) });
+      return new Response(JSON.stringify({
+        error: 'Failed to get daemon health status',
+        type: 'internal_error',
+      }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
   // Verify API key with admin scope (daemon endpoints are administrative)
   if (!verifyAPIKey(request, env, 'admin')) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -26,7 +53,7 @@ export async function handleDaemonAPI(request: Request, env: Env, path: string):
 
   // Rate limit check
   const apiKey = request.headers.get('X-API-Key') || '';
-  const rateLimitResult = await checkRateLimit(env, 'admin', apiKey.substring(0, 8));
+  const rateLimitResult = await checkRateLimit(request, env, apiKey.substring(0, 8));
   if (!rateLimitResult.allowed) {
     return createRateLimitResponse(rateLimitResult);
   }
@@ -82,25 +109,6 @@ export async function handleDaemonAPI(request: Request, env: Env, path: string):
       safeLog.error('[Daemon API] Heartbeat error', { error: String(error) });
       return new Response(JSON.stringify({
         error: 'Failed to update heartbeat',
-        type: 'internal_error',
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-  }
-
-  // GET /api/daemon/health - List active daemons
-  if (path === '/api/daemon/health' && request.method === 'GET') {
-    try {
-      const health = await getDaemonHealth(env);
-      return new Response(JSON.stringify(health), {
-        headers: { 'Content-Type': 'application/json' },
-      });
-    } catch (error) {
-      safeLog.error('[Daemon API] Health check error', { error: String(error) });
-      return new Response(JSON.stringify({
-        error: 'Failed to get daemon health status',
         type: 'internal_error',
       }), {
         status: 500,

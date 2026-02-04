@@ -150,6 +150,8 @@ export const PHIDetectionResultSchema = z.object({
     })
   ),
   masked_text: z.string(),
+  confidence_score: z.number().min(0).max(100),
+  needs_verification: z.boolean(),
 });
 
 export type PHIDetectionResult = z.infer<typeof PHIDetectionResultSchema>;

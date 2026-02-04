@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 
 export interface ProviderStatus {
@@ -33,7 +34,16 @@ const providerNames: Record<string, string> = {
   manus: 'Manus',
 };
 
+// Format latency for human readability
+function formatLatency(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${(ms / 60000).toFixed(1)}m`;
+}
+
 export function ProviderHealth({ providers }: ProviderHealthProps) {
+  const [isExpanded, setIsExpanded] = useState(false);
+
   if (providers.length === 0) {
     return null;
   }
@@ -42,24 +52,41 @@ export function ProviderHealth({ providers }: ProviderHealthProps) {
     (p) => p.status === 'unhealthy' || p.status === 'degraded'
   ).length;
 
+  const healthyCount = providers.filter((p) => p.status === 'healthy').length;
+
   return (
     <div className="space-y-2">
-      <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 px-1 flex items-center gap-2">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="w-full text-sm font-semibold text-zinc-700 dark:text-zinc-300 px-1 flex items-center gap-2 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+      >
+        <span className={`transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`}>
+          ▶
+        </span>
         <span>プロバイダー</span>
-        {unhealthyCount > 0 && (
-          <Badge variant="secondary" className="text-xs">
+        {unhealthyCount > 0 ? (
+          <Badge variant="destructive" className="text-xs">
             {unhealthyCount} issues
           </Badge>
+        ) : (
+          <Badge variant="default" className="text-xs">
+            {healthyCount} healthy
+          </Badge>
         )}
-      </h2>
+        <span className="text-xs text-zinc-400 ml-auto">
+          {providers.length} providers
+        </span>
+      </button>
 
-      <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-        <ul className="divide-y divide-zinc-200 dark:divide-zinc-800">
-          {providers.map((provider) => (
-            <ProviderRow key={provider.provider} provider={provider} />
-          ))}
-        </ul>
-      </div>
+      {isExpanded && (
+        <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden animate-fade-in">
+          <ul className="divide-y divide-zinc-200 dark:divide-zinc-800">
+            {providers.map((provider) => (
+              <ProviderRow key={provider.provider} provider={provider} />
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
@@ -87,14 +114,14 @@ function ProviderRow({ provider }: ProviderRowProps) {
       {/* Metrics */}
       <div className="flex items-center gap-3 text-xs text-zinc-500 dark:text-zinc-400">
         {/* Latency */}
-        {provider.latencyP95Ms !== undefined && (
+        {provider.latencyP95Ms != null && (
           <span className="font-mono">
-            {provider.latencyP95Ms}ms
+            {formatLatency(provider.latencyP95Ms)}
           </span>
         )}
 
         {/* Error rate */}
-        {provider.errorRate !== undefined && (
+        {provider.errorRate != null && (
           <span
             className={`font-mono ${
               provider.errorRate > 5 ? 'text-red-500' : ''

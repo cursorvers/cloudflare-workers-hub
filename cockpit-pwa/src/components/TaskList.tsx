@@ -1,5 +1,6 @@
 'use client';
 
+import { useState, useEffect } from 'react';
 import { Badge } from '@/components/ui/badge';
 
 // Task type (read-only for Phase 3)
@@ -33,72 +34,87 @@ const statusConfig: Record<Task['status'], {
  * Gemini UI/UX Review: タップ領域 44px 以上確保、カード型 UI
  */
 export function TaskList({ tasks, isLoading, onTaskTap }: TaskListProps) {
+  // Auto-expand when there are tasks, collapse when empty
+  const [isExpanded, setIsExpanded] = useState(tasks.length > 0);
+
+  // Auto-expand when new tasks arrive
+  useEffect(() => {
+    if (tasks.length > 0) {
+      setIsExpanded(true);
+    }
+  }, [tasks.length]);
+
+  const pendingCount = tasks.filter((t) => t.status === 'pending').length;
+  const runningCount = tasks.filter((t) => t.status === 'running').length;
+
   if (isLoading) {
     return (
-      <div className="space-y-3 section-animate">
-        <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 px-1">
-          タスク一覧
-        </h2>
-        {/* Skeleton loading with shimmer effect */}
-        {[1, 2, 3].map((i) => (
-          <div
-            key={i}
-            className="bg-white dark:bg-zinc-900 rounded-xl p-4 border border-zinc-200 dark:border-zinc-800"
-            style={{ animationDelay: `${i * 100}ms` }}
-          >
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-full skeleton" />
-              <div className="flex-1">
-                <div className="h-4 skeleton rounded w-3/4 mb-2" />
-                <div className="h-3 skeleton rounded w-1/2" />
-              </div>
-              <div className="w-16 h-6 skeleton rounded-full" />
-            </div>
-          </div>
-        ))}
+      <div className="space-y-2">
+        <button
+          className="w-full text-sm font-semibold text-zinc-700 dark:text-zinc-300 px-1 flex items-center gap-2"
+          disabled
+        >
+          <span className="animate-spin">⏳</span>
+          <span>タスク一覧</span>
+          <span className="text-xs text-zinc-400 ml-auto">読み込み中...</span>
+        </button>
       </div>
     );
   }
 
   return (
-    <div className="space-y-3">
-      <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 px-1">
-        タスク一覧 ({tasks.length})
-      </h2>
+    <div className="space-y-2">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="w-full text-sm font-semibold text-zinc-700 dark:text-zinc-300 px-1 flex items-center gap-2 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+      >
+        <span className={`transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`}>
+          ▶
+        </span>
+        <span>タスク一覧</span>
+        {tasks.length === 0 ? (
+          <Badge variant="outline" className="text-xs">
+            なし
+          </Badge>
+        ) : (
+          <>
+            {runningCount > 0 && (
+              <Badge variant="secondary" className="text-xs">
+                {runningCount} 実行中
+              </Badge>
+            )}
+            {pendingCount > 0 && (
+              <Badge variant="outline" className="text-xs">
+                {pendingCount} 待機
+              </Badge>
+            )}
+          </>
+        )}
+        <span className="text-xs text-zinc-400 ml-auto">
+          {tasks.length} tasks
+        </span>
+      </button>
 
-      {tasks.length === 0 ? (
-        <div className="bg-white dark:bg-zinc-900 rounded-xl p-8 text-center border border-zinc-200 dark:border-zinc-800 animate-fade-in">
-          {/* Empty state icon with subtle animation */}
-          <div className="text-5xl mb-4 opacity-70 animate-pulse" aria-hidden="true">
-            📋
-          </div>
-          {/* Main message - gradient text */}
-          <p className="text-zinc-700 dark:text-zinc-200 font-semibold mb-2 text-lg">
-            タスクがありません
-          </p>
-          {/* Sub message - guidance text */}
-          <p className="text-zinc-500 dark:text-zinc-400 text-sm leading-relaxed">
-            オーケストレーターからタスクが配信されると
-            <br />
-            ここに表示されます
-          </p>
-          {/* Decorative dots */}
-          <div className="flex justify-center gap-1 mt-4">
-            <span className="w-1.5 h-1.5 rounded-full bg-zinc-300 dark:bg-zinc-600 animate-pulse" style={{ animationDelay: '0ms' }} />
-            <span className="w-1.5 h-1.5 rounded-full bg-zinc-300 dark:bg-zinc-600 animate-pulse" style={{ animationDelay: '200ms' }} />
-            <span className="w-1.5 h-1.5 rounded-full bg-zinc-300 dark:bg-zinc-600 animate-pulse" style={{ animationDelay: '400ms' }} />
-          </div>
+      {isExpanded && (
+        <div className="animate-fade-in">
+          {tasks.length === 0 ? (
+            <div className="bg-white dark:bg-zinc-900 rounded-xl p-4 text-center border border-zinc-200 dark:border-zinc-800">
+              <p className="text-zinc-500 dark:text-zinc-400 text-sm">
+                チャットで指示を送信するとタスクが作成されます
+              </p>
+            </div>
+          ) : (
+            <ul className="space-y-2">
+              {tasks.map((task) => (
+                <TaskCard
+                  key={task.id}
+                  task={task}
+                  onTap={onTaskTap ? () => onTaskTap(task) : undefined}
+                />
+              ))}
+            </ul>
+          )}
         </div>
-      ) : (
-        <ul className="space-y-2">
-          {tasks.map((task) => (
-            <TaskCard
-              key={task.id}
-              task={task}
-              onTap={onTaskTap ? () => onTaskTap(task) : undefined}
-            />
-          ))}
-        </ul>
       )}
     </div>
   );

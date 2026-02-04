@@ -15,6 +15,7 @@ import {
   OrchestratorRequestSchema,
   type ChatMessage,
   type CommandMessage,
+  type HeartbeatMessage,
   type WebSocketMessage,
 } from './cockpit-gateway';
 
@@ -141,6 +142,47 @@ describe('CockpitGateway', () => {
       expect(request.content).toBe('/status');
     });
 
+    it('should transform heartbeat message correctly', () => {
+      const message: HeartbeatMessage = {
+        type: 'heartbeat',
+        payload: {
+          message: '今日の予定: 会議3件',
+          type: 'Morning Start',
+          source: 'OpenClaw HEARTBEAT',
+        },
+      };
+
+      const request = gateway.transformToOrchestratorRequest(message, 'user-999');
+
+      expect(request.messageType).toBe('heartbeat');
+      expect(request.content).toBe('今日の予定: 会議3件');
+      expect(request.context).toEqual({
+        heartbeatType: 'Morning Start',
+        heartbeatSource: 'OpenClaw HEARTBEAT',
+      });
+      expect(request.delegationHints.suggestedAgent).toBe('none');
+      expect(request.delegationHints.confidence).toBe(1.0);
+      expect(request.delegationHints.keywords).toContain('heartbeat');
+    });
+
+    it('should handle heartbeat message without optional fields', () => {
+      const message: HeartbeatMessage = {
+        type: 'heartbeat',
+        payload: {
+          message: 'HEARTBEAT_OK',
+        },
+      };
+
+      const request = gateway.transformToOrchestratorRequest(message, 'user-000');
+
+      expect(request.messageType).toBe('heartbeat');
+      expect(request.content).toBe('HEARTBEAT_OK');
+      expect(request.context).toEqual({
+        heartbeatType: undefined,
+        heartbeatSource: undefined,
+      });
+    });
+
     it('should generate unique IDs', () => {
       const message: ChatMessage = {
         type: 'chat',
@@ -215,6 +257,25 @@ describe('CockpitGateway', () => {
 
       expect(result.routingDecision.requiresConsensus).toBe(true);
     });
+
+    it('should process heartbeat message without requiring consensus', async () => {
+      const message: HeartbeatMessage = {
+        type: 'heartbeat',
+        payload: {
+          message: 'Morning Start: 今日の予定を確認してください',
+          type: 'Morning Start',
+          source: 'OpenClaw HEARTBEAT',
+        },
+      };
+
+      const result = await gateway.processMessage(message, 'user-123');
+
+      expect(result.request).toBeDefined();
+      expect(result.request.messageType).toBe('heartbeat');
+      expect(result.routingDecision.agent).toBe('none');
+      expect(result.routingDecision.confidence).toBe(1.0);
+      expect(result.routingDecision.requiresConsensus).toBe(false);
+    });
   });
 
   describe('Zod Schema Validation', () => {
@@ -268,6 +329,56 @@ describe('CockpitGateway', () => {
       expect(result.success).toBe(true);
     });
 
+    it('should validate heartbeat message schema', () => {
+      const validHeartbeat = {
+        type: 'heartbeat',
+        payload: {
+          message: 'Morning Start: 今日の予定をお知らせします',
+          type: 'Morning Start',
+          source: 'OpenClaw HEARTBEAT',
+        },
+      };
+
+      const result = WebSocketMessageSchema.safeParse(validHeartbeat);
+      expect(result.success).toBe(true);
+    });
+
+    it('should validate heartbeat message without optional fields', () => {
+      const validHeartbeat = {
+        type: 'heartbeat',
+        payload: {
+          message: 'HEARTBEAT_OK',
+        },
+      };
+
+      const result = WebSocketMessageSchema.safeParse(validHeartbeat);
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject empty heartbeat message', () => {
+      const invalidHeartbeat = {
+        type: 'heartbeat',
+        payload: {
+          message: '',
+        },
+      };
+
+      const result = WebSocketMessageSchema.safeParse(invalidHeartbeat);
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject heartbeat message exceeding max length', () => {
+      const invalidHeartbeat = {
+        type: 'heartbeat',
+        payload: {
+          message: 'x'.repeat(10001),
+        },
+      };
+
+      const result = WebSocketMessageSchema.safeParse(invalidHeartbeat);
+      expect(result.success).toBe(false);
+    });
+
     it('should validate OrchestratorRequest schema', () => {
       const validRequest = {
         id: '550e8400-e29b-41d4-a716-446655440000',
@@ -278,6 +389,29 @@ describe('CockpitGateway', () => {
           suggestedAgent: 'GLM general-reviewer',
           confidence: 0.5,
           keywords: ['test'],
+        },
+        userId: 'user-123',
+        timestamp: Date.now(),
+      };
+
+      const result = OrchestratorRequestSchema.safeParse(validRequest);
+      expect(result.success).toBe(true);
+    });
+
+    it('should validate OrchestratorRequest with heartbeat messageType', () => {
+      const validRequest = {
+        id: '550e8400-e29b-41d4-a716-446655440000',
+        source: 'cockpit',
+        messageType: 'heartbeat',
+        content: 'Morning Start notification',
+        context: {
+          heartbeatType: 'Morning Start',
+          heartbeatSource: 'OpenClaw HEARTBEAT',
+        },
+        delegationHints: {
+          suggestedAgent: 'none',
+          confidence: 1.0,
+          keywords: ['heartbeat'],
         },
         userId: 'user-123',
         timestamp: Date.now(),

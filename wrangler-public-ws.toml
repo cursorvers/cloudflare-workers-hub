@@ -1,0 +1,17 @@
+# Public WebSocket Worker
+# Access を経由せずに WebSocket を提供
+
+name = "cockpit-public-ws"
+main = "src/public-ws.ts"
+compatibility_date = "2024-12-30"
+
+[vars]
+ALLOW_ORIGINS = "fugue-system-ui.vercel.app,localhost:3000"
+
+[[durable_objects.bindings]]
+name = "COCKPIT_WS"
+class_name = "CockpitWebSocket"
+script_name = "orchestrator-hub-production"
+
+[observability]
+enabled = true

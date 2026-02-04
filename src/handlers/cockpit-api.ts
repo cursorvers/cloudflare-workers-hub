@@ -1016,12 +1016,36 @@ export async function handleCockpitAPI(request: Request, env: Env, path: string)
   }
 
   // Push notification subscription endpoints (public - no auth required for PWA)
+  if (path === '/api/cockpit/vapid-public-key' && request.method === 'GET') {
+    if (!env.VAPID_PUBLIC_KEY) {
+      return new Response(JSON.stringify({ error: 'VAPID public key not configured' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ publicKey: env.VAPID_PUBLIC_KEY }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  // Push notification endpoints require authentication
   if (path === '/api/cockpit/subscribe' && request.method === 'POST') {
-    return handleSubscribe(request, env);
+    const authResult = await authenticateAndAuthorize(request, env);
+    if (!authResult.success) {
+      return authResult.response!;
+    }
+    // Pass authenticated userId to handler (ignore request body userId)
+    return handleSubscribe(request, env, authResult.userId!);
   }
 
   if (path === '/api/cockpit/unsubscribe' && request.method === 'POST') {
-    return handleUnsubscribe(request, env);
+    const authResult = await authenticateAndAuthorize(request, env);
+    if (!authResult.success) {
+      return authResult.response!;
+    }
+    // Pass authenticated userId to handler for ownership verification
+    return handleUnsubscribe(request, env, authResult.userId!);
   }
 
   // All other endpoints require JWT authentication

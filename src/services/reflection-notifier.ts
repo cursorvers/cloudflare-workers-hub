@@ -365,10 +365,19 @@ async function checkNotificationFrequency(
   highlightId: string,
   channel: NotificationChannel
 ): Promise<boolean> {
+  // SECURITY: Early return if CACHE is not configured
+  if (!env.CACHE) {
+    safeLog.warn('[Notifier] CACHE not configured, skipping frequency control', {
+      highlight_id: highlightId,
+      channel,
+    });
+    return true; // Allow notification when cache is unavailable
+  }
+
   const key = `notification:${highlightId}:${channel}`;
 
   try {
-    const lastNotification = await env.CACHE_KV.get(key);
+    const lastNotification = await env.CACHE.get(key);
 
     if (lastNotification) {
       const lastTime = parseInt(lastNotification, 10);
@@ -399,12 +408,21 @@ async function recordNotification(
   highlightId: string,
   channel: NotificationChannel
 ): Promise<void> {
+  // SECURITY: Early return if CACHE is not configured
+  if (!env.CACHE) {
+    safeLog.warn('[Notifier] CACHE not configured, skipping notification recording', {
+      highlight_id: highlightId,
+      channel,
+    });
+    return;
+  }
+
   const key = `notification:${highlightId}:${channel}`;
   const timestamp = Date.now().toString();
 
   try {
     // Store with 48-hour expiration (2 days)
-    await env.CACHE_KV.put(key, timestamp, {
+    await env.CACHE.put(key, timestamp, {
       expirationTtl: 60 * 60 * 48,
     });
 

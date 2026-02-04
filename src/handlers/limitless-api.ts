@@ -40,7 +40,7 @@ export async function handleLimitlessAPI(
   }
 
   // Rate limit check
-  const rateLimitResult = await checkRateLimit(env, 'limitless', apiKey.substring(0, 8));
+  const rateLimitResult = await checkRateLimit(request, env, apiKey.substring(0, 8));
   if (!rateLimitResult.allowed) {
     return createRateLimitResponse(rateLimitResult);
   }
@@ -58,6 +58,18 @@ export async function handleLimitlessAPI(
   // GET /api/limitless/config - Get configuration
   if (path === '/api/limitless/config' && request.method === 'GET') {
     return handleGetConfig(env);
+  }
+
+  // Phase 5: Reflection API
+  if (path.startsWith('/api/limitless/reflection') || path.startsWith('/api/limitless/pending-reviews')) {
+    const { handleLimitlessReflectionAPI } = await import('./limitless-reflection');
+    return handleLimitlessReflectionAPI(request, env, path);
+  }
+
+  // Phase 6.2: PHI Verification API
+  if (path.startsWith('/api/limitless/verify-phi')) {
+    const { handlePhiVerificationAPI } = await import('./limitless-phi-verification');
+    return handlePhiVerificationAPI(request, env, path);
   }
 
   // Unknown endpoint

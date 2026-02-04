@@ -67,7 +67,7 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
   // Rate limiting for Queue API (keyed on API key hash for client identification)
   const apiKey = request.headers.get('X-API-Key') || 'unknown';
   const clientId = `key:${apiKey.substring(0, 8)}`;
-  const rateLimitResult = await checkRateLimit(env, 'queue', clientId);
+  const rateLimitResult = await checkRateLimit(request, env, clientId);
   if (!rateLimitResult.allowed) {
     safeLog.warn('[Queue API] Rate limit exceeded', { clientId: clientId.substring(0, 12) });
     return createRateLimitResponse(rateLimitResult);

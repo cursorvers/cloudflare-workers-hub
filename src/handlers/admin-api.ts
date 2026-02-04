@@ -24,7 +24,7 @@ export async function handleAdminAPI(request: Request, env: Env, path: string): 
 
   // Rate limit check
   const apiKey = request.headers.get('X-API-Key') || '';
-  const rateLimitResult = await checkRateLimit(env, 'admin', apiKey.substring(0, 8));
+  const rateLimitResult = await checkRateLimit(request, env, apiKey.substring(0, 8));
   if (!rateLimitResult.allowed) {
     return createRateLimitResponse(rateLimitResult);
   }

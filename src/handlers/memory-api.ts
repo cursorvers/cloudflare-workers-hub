@@ -142,7 +142,7 @@ export async function handleMemoryAPI(request: Request, env: Env, path: string):
 
   const apiKey = request.headers.get('X-API-Key') || 'unknown';
   const clientId = `key:${apiKey.substring(0, 8)}`;
-  const rateLimitResult = await checkRateLimit(env, 'memory', clientId);
+  const rateLimitResult = await checkRateLimit(request, env, clientId);
   if (!rateLimitResult.allowed) {
     safeLog.warn('[Memory API] Rate limit exceeded', { clientId: clientId.substring(0, 12) });
     return createRateLimitResponse(rateLimitResult);

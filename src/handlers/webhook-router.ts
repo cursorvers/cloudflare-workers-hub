@@ -43,7 +43,7 @@ export async function handleWebhook(request: Request, env: Env, ctx?: ExecutionC
   const metric = metricsCollector.startRequest(requestId, source, url.pathname, request.method);
 
   // Check rate limit
-  const rateLimitResult = await checkRateLimit(env, source, clientIp);
+  const rateLimitResult = await checkRateLimit(request, env, clientIp);
   if (!rateLimitResult.allowed) {
     safeLog.warn(`[${requestId}] Rate limit exceeded for ${source}`, {
       clientIp: maskUserId(clientIp),

@@ -24,7 +24,16 @@ export interface CommandMessage {
   payload: { command: string; args?: string[] };
 }
 
-export type WebSocketMessage = ChatMessage | CommandMessage;
+export interface HeartbeatMessage {
+  type: 'heartbeat';
+  payload: {
+    message: string;
+    type?: string; // e.g., 'HEARTBEAT_OK', 'Morning Start', 'Midday Check', 'Evening Review'
+    source?: string; // e.g., 'OpenClaw HEARTBEAT'
+  };
+}
+
+export type WebSocketMessage = ChatMessage | CommandMessage | HeartbeatMessage;
 
 export interface DelegationHints {
   suggestedAgent: string;
@@ -35,7 +44,7 @@ export interface DelegationHints {
 export interface OrchestratorRequest {
   id: string;
   source: 'cockpit';
-  messageType: 'chat' | 'command';
+  messageType: 'chat' | 'command' | 'heartbeat';
   content: string;
   context?: Record<string, unknown>;
   delegationHints: DelegationHints;
@@ -113,6 +122,23 @@ const DELEGATION_RULES: DelegationRule[] = [
 ];
 
 const DEFAULT_AGENT = 'GLM general-reviewer';
+const MIN_TEXT_LENGTH = 1;
+const MAX_MESSAGE_LENGTH = 10000;
+const PRIORITY_WEIGHT_DIVISOR = 10;
+const CONFIDENCE_NORMALIZATION_FACTOR = 30;
+const MIN_CONFIDENCE = 0;
+const MAX_CONFIDENCE = 1;
+
+const SORTED_DELEGATION_RULES = [...DELEGATION_RULES].sort(
+  (a, b) => b.priority - a.priority
+);
+
+const DANGEROUS_PATTERNS = [
+  /(?:^|\W)(production|本番|main|master)(?=\W|$)/i,
+  /(?:^|\W)(force push|--force|--hard|reset)(?=\W|$)/i,
+  /(?:^|\W)(delete|削除|rm -rf|drop)(?=\W|$)/i,
+  /(?:^|\W)(sudo|chmod|credentials|secret)(?=\W|$)/i,
+];
 
 // =============================================================================
 // CockpitGateway Class
@@ -128,16 +154,13 @@ export class CockpitGateway {
     let maxScore = 0;
     const matchedKeywords = new Set<string>();
 
-    // Sort rules by priority (descending)
-    const sortedRules = [...DELEGATION_RULES].sort((a, b) => b.priority - a.priority);
-
-    for (const rule of sortedRules) {
+    for (const rule of SORTED_DELEGATION_RULES) {
       let currentScore = 0;
 
       for (const pattern of rule.patterns) {
         const matches = content.match(pattern);
         if (matches) {
-          currentScore += matches.length * (rule.priority / 10); // Weight by priority
+          currentScore += matches.length * (rule.priority / PRIORITY_WEIGHT_DIVISOR); // Weight by priority
           matches.forEach(m => matchedKeywords.add(m.toLowerCase()));
         }
       }
@@ -150,7 +173,9 @@ export class CockpitGateway {
 
     // Calculate confidence (0.0 to 1.0)
     // Higher score and priority = higher confidence
-    const confidence = maxScore === 0 ? 0 : Math.min(maxScore / 30, 1.0);
+    const confidence = maxScore === 0
+      ? MIN_CONFIDENCE
+      : Math.min(maxScore / CONFIDENCE_NORMALIZATION_FACTOR, MAX_CONFIDENCE);
 
     return {
       suggestedAgent: bestMatch ? bestMatch.agent : DEFAULT_AGENT,
@@ -172,13 +197,28 @@ export class CockpitGateway {
     if (message.type === 'chat') {
       content = message.payload.message;
       context = message.payload.context;
-    } else {
+    } else if (message.type === 'command') {
       // Command: join command and args
       const argsStr = message.payload.args ? message.payload.args.join(' ') : '';
       content = `/${message.payload.command} ${argsStr}`.trim();
+    } else {
+      // Heartbeat: use message as-is, no delegation needed
+      content = message.payload.message;
+      context = {
+        heartbeatType: message.payload.type,
+        heartbeatSource: message.payload.source,
+      };
     }
 
-    const delegationHints = this.analyzeMessage(content);
+    // Skip delegation analysis for heartbeat messages
+    const delegationHints =
+      message.type === 'heartbeat'
+        ? {
+            suggestedAgent: 'none', // No delegation for heartbeat
+            confidence: MAX_CONFIDENCE,
+            keywords: ['heartbeat'],
+          }
+        : this.analyzeMessage(content);
 
     return {
       id: crypto.randomUUID(),
@@ -196,18 +236,19 @@ export class CockpitGateway {
    * Process message and return routing information
    * This is the main entry point for the gateway
    */
-  public async processMessage(
+  public processMessage(
     message: WebSocketMessage,
     userId: string
-  ): Promise<{
+  ): {
     request: OrchestratorRequest;
     routingDecision: {
       agent: string;
       confidence: number;
       requiresConsensus: boolean;
     };
-  }> {
-    const request = this.transformToOrchestratorRequest(message, userId);
+  } {
+    const parsedMessage = WebSocketMessageSchema.parse(message);
+    const request = this.transformToOrchestratorRequest(parsedMessage, userId);
 
     // Determine if consensus is required (dangerous operations)
     const requiresConsensus = this.checkRequiresConsensus(request.content);
@@ -227,14 +268,7 @@ export class CockpitGateway {
    * Based on dangerous-permission-consensus.md rules
    */
   private checkRequiresConsensus(content: string): boolean {
-    const dangerousPatterns = [
-      /\b(production|本番|main|master)\b/i,
-      /\b(force push|--force|--hard|reset)\b/i,
-      /\b(delete|削除|rm -rf|drop)\b/i,
-      /\b(sudo|chmod|credentials|secret)\b/i,
-    ];
-
-    return dangerousPatterns.some(pattern => pattern.test(content));
+    return DANGEROUS_PATTERNS.some(pattern => pattern.test(content));
   }
 }
 
@@ -245,7 +279,7 @@ export class CockpitGateway {
 export const ChatMessageSchema = z.object({
   type: z.literal('chat'),
   payload: z.object({
-    message: z.string().min(1).max(10000),
+    message: z.string().min(MIN_TEXT_LENGTH).max(MAX_MESSAGE_LENGTH),
     context: z.record(z.unknown()).optional(),
   }),
 });
@@ -253,25 +287,35 @@ export const ChatMessageSchema = z.object({
 export const CommandMessageSchema = z.object({
   type: z.literal('command'),
   payload: z.object({
-    command: z.string().min(1),
+    command: z.string().min(MIN_TEXT_LENGTH),
     args: z.array(z.string()).optional(),
+  }),
+});
+
+export const HeartbeatMessageSchema = z.object({
+  type: z.literal('heartbeat'),
+  payload: z.object({
+    message: z.string().min(MIN_TEXT_LENGTH).max(MAX_MESSAGE_LENGTH),
+    type: z.string().optional(),
+    source: z.string().optional(),
   }),
 });
 
 export const WebSocketMessageSchema = z.discriminatedUnion('type', [
   ChatMessageSchema,
   CommandMessageSchema,
+  HeartbeatMessageSchema,
 ]);
 
 export const OrchestratorRequestSchema = z.object({
   id: z.string().uuid(),
   source: z.literal('cockpit'),
-  messageType: z.enum(['chat', 'command']),
+  messageType: z.enum(['chat', 'command', 'heartbeat']),
   content: z.string(),
   context: z.record(z.unknown()).optional(),
   delegationHints: z.object({
     suggestedAgent: z.string(),
-    confidence: z.number().min(0).max(1),
+    confidence: z.number().min(MIN_CONFIDENCE).max(MAX_CONFIDENCE),
     keywords: z.array(z.string()),
   }),
   userId: z.string(),

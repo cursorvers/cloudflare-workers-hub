@@ -1,0 +1,84 @@
+name: Deploy PWA Push Notifications
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - production
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate VAPID Keys (if not exist)
+        id: vapid
+        run: |
+          if [ -z "${{ secrets.VAPID_PUBLIC_KEY }}" ]; then
+            echo "🔑 Generating new VAPID keys..."
+            npx web-push generate-vapid-keys --json > vapid.json
+            echo "vapid_public=$(jq -r '.publicKey' vapid.json)" >> $GITHUB_OUTPUT
+            echo "vapid_private=$(jq -r '.privateKey' vapid.json)" >> $GITHUB_OUTPUT
+            echo "vapid_generated=true" >> $GITHUB_OUTPUT
+            echo "⚠️ VAPID keys generated. Please save them to GitHub Secrets:"
+            echo "VAPID_PUBLIC_KEY=$(jq -r '.publicKey' vapid.json)"
+            echo "VAPID_PRIVATE_KEY=$(jq -r '.privateKey' vapid.json)"
+          else
+            echo "✅ Using existing VAPID keys from secrets"
+            echo "vapid_public=${{ secrets.VAPID_PUBLIC_KEY }}" >> $GITHUB_OUTPUT
+            echo "vapid_private=${{ secrets.VAPID_PRIVATE_KEY }}" >> $GITHUB_OUTPUT
+            echo "vapid_generated=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run D1 Migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          echo "📦 Running D1 migrations..."
+          npx wrangler d1 migrations apply knowledge-base --env ${{ github.event.inputs.environment }}
+
+      - name: Set VAPID Secrets in Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          echo "🔐 Setting VAPID secrets..."
+          echo "${{ steps.vapid.outputs.vapid_public }}" | npx wrangler secret put VAPID_PUBLIC_KEY --env ${{ github.event.inputs.environment }}
+          echo "${{ steps.vapid.outputs.vapid_private }}" | npx wrangler secret put VAPID_PRIVATE_KEY --env ${{ github.event.inputs.environment }}
+          echo "${{ secrets.VAPID_SUBJECT || 'mailto:admin@example.com' }}" | npx wrangler secret put VAPID_SUBJECT --env ${{ github.event.inputs.environment }}
+
+      - name: Deploy to Cloudflare Workers
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          echo "🚀 Deploying to Cloudflare Workers..."
+          npx wrangler deploy --env ${{ github.event.inputs.environment }}
+
+      - name: Test Deployment
+        run: |
+          echo "✅ Deployment complete!"
+          echo "📱 Access your PWA at: https://orchestrator-hub.your-subdomain.workers.dev/cockpit"
+          echo "🔔 Push Notifications API: /api/cockpit/subscribe"
+
+      - name: Save VAPID Keys (first time only)
+        if: steps.vapid.outputs.vapid_generated == 'true'
+        run: |
+          echo "⚠️ IMPORTANT: Save these VAPID keys to GitHub Secrets!"
+          echo "Go to: Settings → Secrets and variables → Actions"
+          echo "Create secrets: VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY"
+          cat vapid.json

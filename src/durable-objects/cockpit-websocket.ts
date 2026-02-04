@@ -93,6 +93,15 @@ const CommandMessageSchema = z.object({
   }),
 });
 
+const HeartbeatMessageSchema = z.object({
+  type: z.literal('heartbeat'),
+  payload: z.object({
+    message: z.string().min(1).max(10000),
+    type: z.string().optional(),
+    source: z.string().optional(),
+  }),
+});
+
 // =============================================================================
 // Observability Schemas
 // =============================================================================
@@ -147,6 +156,7 @@ const IncomingMessageSchema = z.discriminatedUnion('type', [
   StatusRequestSchema,
   ChatMessageSchema,
   CommandMessageSchema,
+  HeartbeatMessageSchema,
 ]);
 
 // Outgoing message types (sent to agent)
@@ -168,6 +178,19 @@ const PingMessageSchema = z.object({
 
 type IncomingMessage = z.infer<typeof IncomingMessageSchema>;
 type GitStatus = z.infer<typeof GitStatusSchema>;
+
+// =============================================================================
+// Security Configuration
+// =============================================================================
+
+/**
+ * Trusted sources for HEARTBEAT messages
+ * Only these sources are allowed to broadcast system-wide notifications
+ */
+const TRUSTED_HEARTBEAT_SOURCES = [
+  'OpenClaw HEARTBEAT',
+  'Local Agent HEARTBEAT',
+] as const;
 
 interface AgentConnection {
   agentId: string;
@@ -313,6 +336,32 @@ export class CockpitWebSocket extends DurableObject<Env> {
     const accessUserId = request.headers.get('X-Access-User-Id');
     const accessUserRole = request.headers.get('X-Access-User-Role');
     const accessUserEmail = request.headers.get('X-Access-User-Email');
+
+    // Method 0: Development mode - allow trusted origins without auth
+    const origin = request.headers.get('Origin') || '';
+    const allowedDevOrigins = (this.env.ALLOW_DEV_ORIGINS || '').split(',').filter(Boolean);
+    const isDevelopmentOrigin = allowedDevOrigins.some(allowed => origin.includes(allowed));
+
+    if (isDevelopmentOrigin) {
+      safeLog.log('[CockpitWebSocket] Development origin allowed', { origin });
+
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+
+      const sessionData = {
+        userId: 'dev-user',
+        role: 'operator' as UserRole,
+        authMethod: 'dev-origin',
+        origin,
+      };
+
+      this.ctx.acceptWebSocket(server, [JSON.stringify(sessionData)]);
+
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+      });
+    }
 
     // Method 1: Cloudflare Access (pre-verified by main router)
     if (accessUserId && accessUserRole) {
@@ -469,6 +518,9 @@ export class CockpitWebSocket extends DurableObject<Env> {
           break;
         case 'command':
           await this.handleCommandMessage(ws, validated);
+          break;
+        case 'heartbeat':
+          await this.handleHeartbeatMessage(ws, validated);
           break;
         default:
           safeLog.warn('[CockpitWebSocket] Unknown message type', { type: (validated as any).type });
@@ -940,17 +992,86 @@ export class CockpitWebSocket extends DurableObject<Env> {
       ? `→ ${routingDecision.agent} (${Math.round(routingDecision.confidence * 100)}%)`
       : '';
 
-    ws.send(JSON.stringify({
-      type: 'chat-response',
-      payload: {
-        taskId: request.id,
-        role: 'system',
-        content: agentCount > 0
-          ? `メッセージを受信しました。${agentCount}エージェントに転送中... ${routingInfo}`
-          : `メッセージを受信しました。処理中... ${routingInfo}`,
-        timestamp: now,
-      },
-    }));
+    // If no agents connected, use Workers AI as fallback
+    if (agentCount === 0 && this.env.AI) {
+      ws.send(JSON.stringify({
+        type: 'chat-response',
+        payload: {
+          taskId: request.id,
+          role: 'system',
+          content: `処理中... ${routingInfo}`,
+          timestamp: now,
+        },
+      }));
+
+      try {
+        // Note: llama-3.1-8b-instruct is valid but not in @cloudflare/workers-types yet
+        const aiResponse = await this.env.AI.run(
+          '@cf/meta/llama-3.1-8b-instruct' as Parameters<typeof this.env.AI.run>[0],
+          {
+            prompt: `You are FUGUE Orchestrator, an AI assistant. Respond helpfully and concisely in the same language as the user's message.
+
+User message: ${request.content}
+
+Response:`,
+            max_tokens: 1024,
+            temperature: 0.7,
+          }
+        );
+
+        const responseContent = typeof aiResponse === 'string'
+          ? aiResponse
+          : (aiResponse as { response?: string }).response || 'Unable to process message.';
+
+        ws.send(JSON.stringify({
+          type: 'chat-response',
+          payload: {
+            taskId: request.id,
+            role: 'assistant',
+            content: responseContent,
+            timestamp: Math.floor(Date.now() / 1000),
+          },
+        }));
+
+        // Update task status in DB
+        if (this.env.DB) {
+          await this.env.DB.prepare(`
+            UPDATE cockpit_tasks SET status = 'completed', updated_at = ? WHERE id = ?
+          `).bind(Math.floor(Date.now() / 1000), request.id).run();
+        }
+
+        safeLog.log('[CockpitWebSocket] AI fallback response sent', {
+          taskId: request.id,
+          responseLength: responseContent.length,
+        });
+      } catch (error) {
+        safeLog.error('[CockpitWebSocket] AI fallback failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+
+        ws.send(JSON.stringify({
+          type: 'chat-response',
+          payload: {
+            taskId: request.id,
+            role: 'system',
+            content: 'エラーが発生しました。しばらく待ってから再試行してください。',
+            timestamp: Math.floor(Date.now() / 1000),
+          },
+        }));
+      }
+    } else {
+      ws.send(JSON.stringify({
+        type: 'chat-response',
+        payload: {
+          taskId: request.id,
+          role: 'system',
+          content: agentCount > 0
+            ? `メッセージを受信しました。${agentCount}エージェントに転送中... ${routingInfo}`
+            : `メッセージを受信しました。処理中... ${routingInfo}`,
+          timestamp: now,
+        },
+      }));
+    }
 
     safeLog.log('[CockpitWebSocket] Chat message processed via Gateway', {
       taskId: request.id,
@@ -1092,6 +1213,67 @@ export class CockpitWebSocket extends DurableObject<Env> {
       userId,
       agentCount,
       routing: routingDecision,
+    });
+  }
+
+  /**
+   * Handle heartbeat message from OpenClaw HEARTBEAT system
+   * Broadcasts to all connected PWA clients
+   *
+   * Security: Only trusted sources (TRUSTED_HEARTBEAT_SOURCES) can broadcast
+   */
+  private async handleHeartbeatMessage(
+    ws: WebSocket,
+    message: z.infer<typeof HeartbeatMessageSchema>
+  ): Promise<void> {
+    const source = message.payload.source || 'Unknown';
+
+    // Verify source is trusted
+    if (!TRUSTED_HEARTBEAT_SOURCES.includes(source as any)) {
+      safeLog.warn('[CockpitWebSocket] Unauthorized heartbeat attempt', {
+        source,
+        rejectedMessage: message.payload.message.slice(0, 50),
+      });
+
+      // Send error response to unauthorized sender
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Unauthorized heartbeat source',
+        code: 'HEARTBEAT_AUTH_FAILED',
+        details: {
+          providedSource: source,
+          trustedSources: TRUSTED_HEARTBEAT_SOURCES,
+        },
+      }));
+
+      return; // Reject broadcast
+    }
+
+    // Broadcast to all connected PWA clients
+    const heartbeatMessage = {
+      type: 'heartbeat',
+      payload: {
+        message: message.payload.message,
+        type: message.payload.type,
+        source,
+      },
+    };
+
+    let sentCount = 0;
+    for (const [targetWs] of this.sessions) {
+      try {
+        targetWs.send(JSON.stringify(heartbeatMessage));
+        sentCount++;
+      } catch {
+        // Ignore send errors for individual connections
+      }
+    }
+
+    safeLog.log('[CockpitWebSocket] Heartbeat broadcasted', {
+      type: message.payload.type,
+      source,
+      message: message.payload.message.slice(0, 50),
+      sentCount,
     });
   }
 

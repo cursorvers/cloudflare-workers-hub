@@ -15,6 +15,28 @@ export const TaskSchema = z.object({
 
 export type Task = z.infer<typeof TaskSchema>;
 
+// =============================================================================
+// Security Constants (Command Injection Prevention)
+// =============================================================================
+
+/**
+ * Allowlist of permitted commands
+ * Only these commands can be executed via bash type
+ */
+const ALLOWED_COMMANDS = [
+  'git', 'ls', 'pwd', 'cat', 'head', 'tail',
+  'npm', 'npx', 'node', 'pnpm', 'bun', 'claude', 'codex',
+  'wrangler', 'vitest', 'jest', 'tsc', 'eslint', 'prettier',
+] as const;
+
+/**
+ * Dangerous patterns that indicate potential command injection
+ * - Shell metacharacters: ; | & $ `
+ * - Newlines: \n \r
+ * - Path traversal: ..
+ */
+const DANGEROUS_PATTERNS = /[;|&$`\n\r]|(\.\.)/;
+
 /**
  * タスク実行結果
  */
@@ -37,6 +59,29 @@ export type TaskResult = z.infer<typeof TaskResultSchema>;
  */
 export class TaskExecutor {
   private runningTasks: Map<string, NodeJS.Timeout> = new Map();
+
+  /**
+   * Validate command against security policies
+   * @throws Error if command is not allowed or contains dangerous patterns
+   */
+  private validateCommand(command: string, args: string[]): void {
+    // Check if command is in allowlist
+    if (!ALLOWED_COMMANDS.includes(command as typeof ALLOWED_COMMANDS[number])) {
+      throw new Error(`[Security] Command "${command}" is not in the allowlist`);
+    }
+
+    // Check command itself for dangerous patterns
+    if (DANGEROUS_PATTERNS.test(command)) {
+      throw new Error(`[Security] Command contains dangerous patterns`);
+    }
+
+    // Check all arguments for dangerous patterns
+    for (const arg of args) {
+      if (DANGEROUS_PATTERNS.test(arg)) {
+        throw new Error(`[Security] Argument "${arg}" contains dangerous patterns`);
+      }
+    }
+  }
 
   /**
    * タスクを実行
@@ -98,13 +143,30 @@ export class TaskExecutor {
 
   /**
    * Bash コマンドを実行
+   * SECURITY: shell:false + allowlist + dangerous pattern detection
    */
   private async executeBash(task: Task): Promise<Omit<TaskResult, 'startTime' | 'endTime' | 'duration'>> {
     return new Promise((resolve) => {
       const args = task.args || [];
+
+      // Security validation before execution
+      try {
+        this.validateCommand(task.command, args);
+      } catch (error) {
+        return resolve({
+          id: task.id,
+          success: false,
+          stdout: '',
+          stderr: '',
+          exitCode: null,
+          error: error instanceof Error ? error.message : 'Command validation failed',
+        });
+      }
+
+      // CRITICAL: shell:false prevents command injection
       const proc = spawn(task.command, args, {
         cwd: task.workingDir,
-        shell: true,
+        shell: false,
       });
 
       let stdout = '';

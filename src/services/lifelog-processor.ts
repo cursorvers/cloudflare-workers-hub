@@ -437,3 +437,153 @@ function buildTextContent(lifelog: RawLifelogInput): string {
 
   return '';
 }
+
+// ============================================================================
+// Phase 1: Highlight Processing (New Feature)
+// ============================================================================
+
+/**
+ * Process a highlight extraction (±30s window) using Workers AI
+ *
+ * Purpose: Extract topics and generate summary for a short time segment
+ * Use case: User-marked highlights from iOS Shortcut
+ *
+ * @param ai - Workers AI binding
+ * @param highlightText - Transcription of ±30s window (60s total)
+ * @param openaiApiKey - Optional OpenAI API key for higher quality
+ * @returns Topics and summary for the highlight segment
+ *
+ * GLM condition: Edge case handling for network errors and invalid responses
+ */
+export async function processHighlight(
+  ai: Ai,
+  highlightText: string,
+  openaiApiKey?: string
+): Promise<{
+  topics: string[];
+  summary: string;
+}> {
+  // Validate input
+  if (!highlightText || highlightText.length < 10) {
+    return {
+      topics: [],
+      summary: '内容が短すぎます',
+    };
+  }
+
+  try {
+    // For short segments (60s), Workers AI is sufficient - no need for expensive GPT-4o-mini
+    const systemPrompt = `あなたは音声録音のハイライト部分（30秒前後）を分析するアシスタントです。
+短い区間から主要なトピックと要約を抽出してください。
+
+必ず以下のJSON形式で回答してください:
+{
+  "topics": ["トピック1", "トピック2", "トピック3"],
+  "summary": "1-2文の要約（日本語）"
+}`;
+
+    const userPrompt = `以下のテキストから、トピックと要約を抽出してください:\n\n${highlightText}`;
+
+    // Call Workers AI with timeout (GLM condition: network error handling)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+
+    try {
+      const response = await (ai.run as (model: string, input: unknown, options?: unknown) => Promise<unknown>)(
+        WORKERS_AI_MODEL,
+        {
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          max_tokens: 256,
+          temperature: 0.2,
+        },
+        { signal: controller.signal }
+      );
+
+      clearTimeout(timeoutId);
+
+      const aiText = (response as { response?: string })?.response;
+      if (!aiText) {
+        // GLM condition: Invalid response handling
+        throw new Error('Empty response from Workers AI');
+      }
+
+      // Parse JSON from AI response
+      const parsed = parseHighlightResponse(aiText);
+
+      safeLog.info('[Processor] Highlight processing successful', {
+        topics: parsed.topics,
+        summaryLength: parsed.summary.length,
+      });
+
+      return parsed;
+    } catch (error) {
+      clearTimeout(timeoutId);
+
+      // GLM condition: Network error fallback
+      if (error instanceof Error && error.name === 'AbortError') {
+        safeLog.error('[Processor] Highlight processing timeout', {
+          error: 'Request aborted after 15s',
+        });
+        return {
+          topics: [],
+          summary: 'AI処理がタイムアウトしました',
+        };
+      }
+
+      throw error;
+    }
+  } catch (error) {
+    // GLM condition: Comprehensive error handling
+    safeLog.error('[Processor] Highlight processing failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+
+    // Return safe fallback instead of throwing
+    return {
+      topics: [],
+      summary: 'ハイライトの処理中にエラーが発生しました',
+    };
+  }
+}
+
+/**
+ * Parse and validate highlight AI response
+ * Simpler schema than full lifelog processing
+ */
+function parseHighlightResponse(text: string): {
+  topics: string[];
+  summary: string;
+} {
+  let jsonStr = text.trim();
+
+  // Remove markdown code block if present
+  const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    jsonStr = codeBlockMatch[1].trim();
+  }
+
+  // Try to find JSON object in the response
+  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error('No JSON found in highlight AI response');
+  }
+
+  const raw = JSON.parse(jsonMatch[0]) as {
+    topics?: unknown;
+    summary?: unknown;
+  };
+
+  // Simple validation (no Zod schema needed for this simple case)
+  const topics = Array.isArray(raw.topics)
+    ? raw.topics.filter((t): t is string => typeof t === 'string')
+    : [];
+
+  const summary = typeof raw.summary === 'string' && raw.summary.length > 0
+    ? raw.summary
+    : 'ハイライトの要約';
+
+  return { topics, summary };
+}

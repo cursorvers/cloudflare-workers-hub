@@ -30,6 +30,7 @@ export interface Env {
   OBSIDIAN_VAULT?: R2Bucket;
   R2?: R2Bucket; // Receipt WORM storage
   KNOWLEDGE_INDEX?: VectorizeIndex;
+  PUSH_NOTIFICATION_QUEUE?: Queue<PushNotificationQueueMessage>;
   ENVIRONMENT: string;
   ALLOW_DEV_ORIGINS?: string;
   // Slack
@@ -86,6 +87,7 @@ export interface Env {
   // Web Push (PWA)
   VAPID_PUBLIC_KEY?: string;       // VAPID public key for web push
   VAPID_PRIVATE_KEY?: string;      // VAPID private key for web push
+  VAPID_SUBJECT?: string;          // VAPID subject (mailto: or https URL)
   // Slack webhook (alternative to bot)
   SLACK_WEBHOOK_URL?: string;      // Slack webhook URL for notifications
   // freee API Integration
@@ -97,4 +99,21 @@ export interface Env {
   FREEE_BASE_URL?: string;         // freee API base URL (default: https://api.freee.co.jp/api/1)
   // Highlight API (iOS Shortcut)
   HIGHLIGHT_API_KEY?: string;      // API key for Limitless highlights feature
+}
+
+/**
+ * Push Notification Queue Message
+ * Used for offloading bulk push notifications to background processing
+ */
+export interface PushNotificationQueueMessage {
+  subscriptionIds: number[];
+  payload: {
+    title: string;
+    body: string;
+    icon?: string;
+    badge?: string;
+    tag?: string;
+    data?: Record<string, unknown>;
+  };
+  severity: 'critical' | 'high' | 'medium' | 'low';
 }

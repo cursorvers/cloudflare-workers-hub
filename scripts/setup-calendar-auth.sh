@@ -1,0 +1,18 @@
+#!/bin/bash
+
+echo "Google Calendar 認証セットアップ"
+echo "================================"
+echo ""
+echo "Service Account共有は不要です。"
+echo "あなたのGoogleアカウントで直接認証します。"
+echo ""
+echo "以下のコマンドを実行してください："
+echo ""
+echo "gcloud auth application-default login \\"
+echo "  --scopes=https://www.googleapis.com/auth/calendar.readonly,https://www.googleapis.com/auth/cloud-platform \\"
+echo "  --project=juken-ai-workflow"
+echo ""
+echo "認証後、GOOGLE_APPLICATION_CREDENTIALSをクリアしてください："
+echo ""
+echo "unset GOOGLE_APPLICATION_CREDENTIALS"
+echo ""

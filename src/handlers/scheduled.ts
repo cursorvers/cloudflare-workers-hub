@@ -19,6 +19,8 @@ import {
   handleMonthlyDigest,
   handleAnnualDigest,
 } from './scheduled-digest';
+import { handlePhiVerificationCron } from './phi-verification-cron';
+import { handleLimitlessPollerCron } from './limitless-poller';
 
 // ============================================================================
 // Cron Expression Constants
@@ -27,8 +29,8 @@ import {
 const CRON_HOURLY_SYNC = '0 * * * *';
 const CRON_DAILY_ACTIONS = '0 21 * * *';   // 21:00 UTC = 06:00 JST
 const CRON_WEEKLY_DIGEST = '0 0 * * SUN';  // Sun 00:00 UTC = Sun 09:00 JST
-const CRON_MONTHLY_DIGEST = '0 0 1 * *';  // 1st 00:00 UTC = 1st 09:00 JST
-const CRON_ANNUAL_DIGEST = '0 0 2 1 *';   // Jan 2nd 00:00 UTC = Jan 2nd 09:00 JST
+const CRON_PHI_VERIFICATION = '0 */6 * * *'; // Every 6 hours (Phase 6.2)
+const CRON_SUBSCRIPTION_CLEANUP = '0 2 * * *'; // 02:00 UTC = 11:00 JST (daily cleanup)
 
 // ============================================================================
 // Distributed Lock Helpers
@@ -119,10 +121,13 @@ export async function handleScheduled(
 
   switch (controller.cron) {
     case CRON_HOURLY_SYNC:
-      // Run both tasks independently with separate locks
+      // Run all tasks independently with separate locks
       await Promise.all([
         handleLimitlessSync(env),
         handleDaemonHealthCheck(env, withLock),
+        handleLimitlessPollerCron(env).catch((error) => {
+          safeLog.error('[Scheduled] Limitless poller failed', { error: String(error) });
+        }),
       ]);
       return;
 
@@ -132,11 +137,11 @@ export async function handleScheduled(
     case CRON_WEEKLY_DIGEST:
       return handleWeeklyDigest(env, withLock);
 
-    case CRON_MONTHLY_DIGEST:
-      return handleMonthlyDigest(env, withLock);
+    case CRON_PHI_VERIFICATION:
+      return handlePhiVerificationCron(env);
 
-    case CRON_ANNUAL_DIGEST:
-      return handleAnnualDigest(env, withLock);
+    case CRON_SUBSCRIPTION_CLEANUP:
+      return handleSubscriptionCleanup(env, withLock);
 
     default:
       safeLog.warn('[Scheduled] Unknown cron expression', { cron: controller.cron });
@@ -240,5 +245,88 @@ async function handleLimitlessSync(env: Env): Promise<void> {
         errors: result.errors.slice(0, 5),
       });
     }
+  });
+}
+
+// ============================================================================
+// Handler: Subscription Cleanup (Push Notifications)
+// ============================================================================
+
+/**
+ * Clean up expired push subscriptions
+ *
+ * Criteria for cleanup:
+ * 1. last_notified > 30 days ago (inactive)
+ * 2. created_at > 90 days ago AND never notified (abandoned)
+ */
+async function handleSubscriptionCleanup(
+  env: Env,
+  withLock: (kv: KVNamespace, lockKey: string, ttlSeconds: number, handler: () => Promise<void>) => Promise<void>
+): Promise<void> {
+  const lockKey = 'push:subscription_cleanup_lock';
+
+  await withLock(env.CACHE!, lockKey, 300, async () => {
+    if (!env.DB) {
+      safeLog.warn('[SubscriptionCleanup] DB not configured, skipping cleanup');
+      return;
+    }
+
+    const now = Math.floor(Date.now() / 1000); // Unix timestamp
+    const thirtyDaysAgo = now - 30 * 24 * 60 * 60;
+    const ninetyDaysAgo = now - 90 * 24 * 60 * 60;
+
+    safeLog.info('[SubscriptionCleanup] Starting cleanup', {
+      thirtyDaysAgo: new Date(thirtyDaysAgo * 1000).toISOString(),
+      ninetyDaysAgo: new Date(ninetyDaysAgo * 1000).toISOString(),
+    });
+
+    // 1. Deactivate subscriptions not notified in 30 days
+    const { success: deactivateSuccess, meta: deactivateMeta } = await env.DB.prepare(
+      `UPDATE push_subscriptions
+       SET active = 0
+       WHERE active = 1
+       AND last_notified IS NOT NULL
+       AND last_notified < ?`
+    )
+      .bind(thirtyDaysAgo)
+      .run();
+
+    const deactivatedCount = deactivateMeta?.changes || 0;
+
+    if (deactivatedCount > 0) {
+      safeLog.info('[SubscriptionCleanup] Deactivated inactive subscriptions', {
+        count: deactivatedCount,
+      });
+    }
+
+    // 2. Delete abandoned subscriptions (never notified, created > 90 days ago)
+    const { success: deleteSuccess, meta: deleteMeta } = await env.DB.prepare(
+      `DELETE FROM push_subscriptions
+       WHERE last_notified IS NULL
+       AND created_at < ?`
+    )
+      .bind(ninetyDaysAgo)
+      .run();
+
+    const deletedCount = deleteMeta?.changes || 0;
+
+    if (deletedCount > 0) {
+      safeLog.info('[SubscriptionCleanup] Deleted abandoned subscriptions', {
+        count: deletedCount,
+      });
+    }
+
+    // 3. Count remaining active subscriptions
+    const { results: countResults } = await env.DB.prepare(
+      'SELECT COUNT(*) as count FROM push_subscriptions WHERE active = 1'
+    ).all<{ count: number }>();
+
+    const activeCount = countResults?.[0]?.count || 0;
+
+    safeLog.info('[SubscriptionCleanup] Cleanup completed', {
+      deactivated: deactivatedCount,
+      deleted: deletedCount,
+      remainingActive: activeCount,
+    });
   });
 }

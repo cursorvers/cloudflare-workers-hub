@@ -55,18 +55,31 @@ new_sqlite_classes = ["SystemEvents"]
 
 # R2 bucket for receipt WORM storage (Electronic Bookkeeping Law compliant)
 # Uncomment after enabling R2 in Cloudflare Dashboard
-# [[r2_buckets]]
-# binding = "R2"
-# bucket_name = "receipt-worm-storage"
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "receipt-worm-storage"
 
 # Vectorize for semantic search
 [[vectorize]]
 binding = "KNOWLEDGE_INDEX"
 index_name = "obsidian-knowledge"
 
-# Cron Triggers (Free plan limit: 5, currently using 4)
+# Cloudflare Queues for push notification spike handling
+# Note: Queues require paid plan - commented out for free plan
+# [[queues.producers]]
+# binding = "PUSH_NOTIFICATION_QUEUE"
+# queue = "push-notifications"
+#
+# [[queues.consumers]]
+# queue = "push-notifications"
+# max_batch_size = 50
+# max_batch_timeout = 5
+# max_retries = 3
+# dead_letter_queue = "push-notifications-dlq"
+
+# Cron Triggers (Free plan limit: 5, currently using 5)
 [triggers]
-crons = ["0 * * * *", "0 */6 * * *", "0 21 * * *", "0 0 * * SUN"]  # Hourly sync, PHI verification (every 6h), Daily actions (6AM JST), Weekly digest (Sun 9AM JST)
+crons = ["0 * * * *", "0 */6 * * *", "0 2 * * *", "0 21 * * *", "0 0 * * SUN"]  # Hourly sync, PHI verification (every 6h), Subscription cleanup (11AM JST), Daily actions (6AM JST), Weekly digest (Sun 9AM JST)
 
 # Environment variables
 [vars]
@@ -89,7 +102,7 @@ local_protocol = "http"
 
 # Production environment
 [env.production]
-vars = { ENVIRONMENT = "production", CF_ACCESS_TEAM = "masa-stage1", ALLOW_DEV_ORIGINS = "fugue-system-ui.vercel.app", FEATURE_HIGHLIGHTS_ENABLED = "true", LIMITLESS_AUTO_SYNC_ENABLED = "true", LIMITLESS_USER_ID = "masayuki", LIMITLESS_SYNC_INTERVAL_HOURS = "1" }
+vars = { ENVIRONMENT = "production", CF_ACCESS_TEAM = "masa-stage1", ALLOW_DEV_ORIGINS = "fugue-system-ui.vercel.app", FEATURE_HIGHLIGHTS_ENABLED = "true", LIMITLESS_AUTO_SYNC_ENABLED = "true", LIMITLESS_USER_ID = "masayuki", LIMITLESS_SYNC_INTERVAL_HOURS = "1", FREEE_BASE_URL = "https://api.freee.co.jp/api/1" }
 # CF_ACCESS_AUD should be set via wrangler secret or dashboard after Access app creation
 
 [env.production.ai]
@@ -104,12 +117,19 @@ database_id = "4164f0fc-d6bb-4e78-86d1-2601d762d6de"
 binding = "CACHE"
 id = "378a478680ec41d280737181530f58a9"
 
+[[env.production.kv_namespaces]]
+binding = "KV"
+id = "378a478680ec41d280737181530f58a9"
+
 [env.production.durable_objects]
 bindings = [
   { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
   { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
   { name = "SYSTEM_EVENTS", class_name = "SystemEvents" }
 ]
+
+[env.production.triggers]
+crons = []
 
 # [[env.production.r2_buckets]]
 # binding = "AUDIO_STAGING"

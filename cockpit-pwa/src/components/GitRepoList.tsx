@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 
 export interface GitRepo {
@@ -33,6 +34,8 @@ const statusConfig: Record<NonNullable<GitRepo['status']>, {
 };
 
 export function GitRepoList({ repos, onRepoTap }: GitRepoListProps) {
+  const [isExpanded, setIsExpanded] = useState(false);
+
   if (repos.length === 0) {
     return null;
   }
@@ -41,24 +44,35 @@ export function GitRepoList({ repos, onRepoTap }: GitRepoListProps) {
 
   return (
     <div className="space-y-2">
-      <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 px-1 flex items-center gap-2">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="w-full text-sm font-semibold text-zinc-700 dark:text-zinc-300 px-1 flex items-center gap-2 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+      >
+        <span className={`transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`}>
+          ▶
+        </span>
         <span>Git リポジトリ</span>
         {dirtyCount > 0 && (
           <Badge variant="secondary" className="text-xs">
             {dirtyCount} dirty
           </Badge>
         )}
-      </h2>
+        <span className="text-xs text-zinc-400 ml-auto">
+          {repos.length} repos
+        </span>
+      </button>
 
-      <ul className="space-y-2">
-        {repos.map((repo) => (
-          <GitRepoCard
-            key={repo.id}
-            repo={repo}
-            onTap={onRepoTap ? () => onRepoTap(repo) : undefined}
-          />
-        ))}
-      </ul>
+      {isExpanded && (
+        <ul className="space-y-2 animate-fade-in">
+          {repos.map((repo) => (
+            <GitRepoCard
+              key={repo.id}
+              repo={repo}
+              onTap={onRepoTap ? () => onRepoTap(repo) : undefined}
+            />
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

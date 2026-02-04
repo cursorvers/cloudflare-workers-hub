@@ -48,6 +48,43 @@ const JWT_ISSUER = 'cloudflare-workers-hub';
 const JWT_AUDIENCE = 'cockpit-api';
 const ACCESS_TOKEN_EXPIRY = 15 * 60; // 15 minutes
 const REFRESH_TOKEN_EXPIRY = 7 * 24 * 60 * 60; // 7 days
+const MIN_SECRET_LENGTH = 32; // Minimum 256 bits
+
+// =============================================================================
+// JWT Configuration Validation (Call at startup)
+// =============================================================================
+
+/**
+ * Validate JWT configuration at startup
+ * @throws Error if configuration is invalid
+ */
+export function validateJWTConfig(env: Env): void {
+  const isProduction = env.ENVIRONMENT === 'production';
+
+  if (isProduction) {
+    if (!env.JWT_PRIVATE_KEY) {
+      throw new Error('[JWT] CRITICAL: JWT_PRIVATE_KEY is required in production');
+    }
+    if (!env.JWT_PUBLIC_KEY) {
+      throw new Error('[JWT] CRITICAL: JWT_PUBLIC_KEY is required in production');
+    }
+  } else {
+    // Development/staging: require JWT_SECRET (no fallback!)
+    if (!env.JWT_SECRET) {
+      throw new Error(
+        '[JWT] CRITICAL: JWT_SECRET is required. Set it in .dev.vars or wrangler.toml'
+      );
+    }
+    // Enforce minimum secret length (256 bits = 32 bytes)
+    if (env.JWT_SECRET.length < MIN_SECRET_LENGTH) {
+      throw new Error(
+        `[JWT] CRITICAL: JWT_SECRET must be at least ${MIN_SECRET_LENGTH} characters`
+      );
+    }
+  }
+
+  safeLog.log('[JWT] Configuration validated', { isProduction });
+}
 
 // =============================================================================
 // JWT Generation & Verification
@@ -88,10 +125,11 @@ export async function generateAccessToken(
       .setAudience(JWT_AUDIENCE)
       .sign(privateKey);
   } else {
-    // Development: symmetric key
-    const secret = new TextEncoder().encode(
-      env.JWT_SECRET || 'dev-secret-change-in-production'
-    );
+    // Development: symmetric key - MUST be configured (no fallback!)
+    if (!env.JWT_SECRET) {
+      throw new Error('[JWT] JWT_SECRET is required but not configured');
+    }
+    const secret = new TextEncoder().encode(env.JWT_SECRET);
     return new SignJWT(payload)
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuedAt(now)
@@ -148,10 +186,12 @@ export async function verifyAccessToken(
       });
       return payload as unknown as JWTPayload;
     } else {
-      // Development: symmetric key
-      const secret = new TextEncoder().encode(
-        env.JWT_SECRET || 'dev-secret-change-in-production'
-      );
+      // Development: symmetric key - MUST be configured (no fallback!)
+      if (!env.JWT_SECRET) {
+        safeLog.error('[JWT] JWT_SECRET is required but not configured');
+        return null;
+      }
+      const secret = new TextEncoder().encode(env.JWT_SECRET);
       const { payload } = await jwtVerify(token, secret, {
         issuer: JWT_ISSUER,
         audience: JWT_AUDIENCE,

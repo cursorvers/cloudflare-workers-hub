@@ -25,6 +25,10 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { config } from 'dotenv';
+
+// Load environment variables from .env file
+config();
 
 // ============================================================================
 // Configuration
@@ -71,6 +75,19 @@ interface ProcessedLifelog {
   duration_seconds: number | null;
   is_starred: boolean;
   raw_markdown: string | null;
+}
+
+interface LifelogHighlight {
+  id: string;
+  limitless_id: string;
+  title: string;
+  content: string;
+  speaker: string | null;
+  topics: string[];
+  timestamp: string;
+  user_reflection: string | null; // Phase 4: User's emotional reflection
+  user_action_plan: string | null; // Phase 4: Action plan for applying insights
+  created_at: string;
 }
 
 // ============================================================================
@@ -152,6 +169,14 @@ function getJSTDate(isoString: string): string {
 }
 
 /**
+ * Format date string (YYYY-MM-DD) to Japanese format (YYYY年M月D日)
+ */
+function formatJapaneseDate(dateStr: string): string {
+  const [year, month, day] = dateStr.split('-');
+  return `${year}年${parseInt(month, 10)}月${parseInt(day, 10)}日`;
+}
+
+/**
  * Classification label in Japanese
  */
 function classificationLabel(classification: string): string {
@@ -210,10 +235,11 @@ const MEANINGFUL_CLASSIFICATIONS = new Set(['insight', 'meeting', 'brainstorm', 
  * Compact format:
  * - Day summary with stats
  * - Aggregated action items & insights (deduplicated)
+ * - User Highlights (from lifelog_highlights table)
  * - Meaningful recordings: summary + insights (no transcript)
  * - Casual recordings: timeline only
  */
-function buildDailyDigest(date: string, lifelogs: ProcessedLifelog[]): string {
+function buildDailyDigest(date: string, lifelogs: ProcessedLifelog[], highlights: LifelogHighlight[]): string {
   const sorted = [...lifelogs].sort(
     (a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime()
   );
@@ -242,8 +268,16 @@ function buildDailyDigest(date: string, lifelogs: ProcessedLifelog[]): string {
     .filter((t) => t.length > 1)
     .slice(0, 10)
     .map((t) => t.replace(/\s+/g, '-'));
+
+  // Generate Japanese date format for title (e.g., "2026年2月1日")
+  const japaneseDate = formatJapaneseDate(date);
+  const [, month, day] = date.split('-');
+  const shortDate = `${parseInt(month, 10)}月${parseInt(day, 10)}日`;
+
   const lines: string[] = [
     '---',
+    `title: 📅 ${japaneseDate} - 生活ログ`,
+    `aliases: [${shortDate}, ${month}/${day}]`,
     `date: ${date}`,
     'source: Limitless Pendant',
     `recordings: ${sorted.length}`,
@@ -283,6 +317,67 @@ function buildDailyDigest(date: string, lifelogs: ProcessedLifelog[]): string {
       lines.push(`> [!tip] ${insight}`);
     }
     lines.push('');
+  }
+
+  // === User Highlights (from lifelog_highlights table) ===
+  if (highlights.length > 0) {
+    lines.push('## User Highlights');
+    lines.push('');
+
+    // Sort highlights by timestamp
+    const sortedHighlights = [...highlights].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+
+    for (const highlight of sortedHighlights) {
+      const time = formatTimeJST(highlight.timestamp);
+      const speaker = highlight.speaker || '大田原正幸';
+
+      lines.push(`### ${time} — ${highlight.title}`);
+      lines.push(`*Speaker: ${speaker}*`);
+      lines.push('');
+      lines.push(`> [!tip] ハイライト`);
+      lines.push(`> ${highlight.content}`);
+      lines.push('');
+
+      const topics = parseJsonArray(highlight.topics);
+      if (topics.length > 0) {
+        lines.push(`**Topics**: ${topics.join(', ')}`);
+        lines.push('');
+      }
+
+      lines.push(`#### 📋 振り返り（必須）`);
+      lines.push('');
+
+      // Display existing reflections or prompts
+      if (highlight.user_reflection || highlight.user_action_plan) {
+        // User has already filled in reflections
+        if (highlight.user_reflection) {
+          lines.push(`**1. どう感じたか？**`);
+          lines.push(`${highlight.user_reflection}`);
+          lines.push('');
+        }
+        if (highlight.user_action_plan) {
+          lines.push(`**2. 今後の仕事でどう生かすか？**`);
+          lines.push(`${highlight.user_action_plan}`);
+          lines.push('');
+        }
+      } else {
+        // Prompt user to fill in reflections
+        lines.push(`> [!note] このハイライトについて、必ず以下の2つを記録してください`);
+        lines.push('');
+        lines.push(`**1. どう感じたか？**`);
+        lines.push(`<!-- 感情・印象・違和感など、率直な感想を記録 -->`);
+        lines.push(`- `);
+        lines.push('');
+        lines.push(`**2. 今後の仕事でどう生かすか？**`);
+        lines.push(`<!-- 具体的なアクション・適用方法・実験したいこと -->`);
+        lines.push(`- `);
+        lines.push('');
+      }
+      lines.push('---');
+      lines.push('');
+    }
   }
 
   // === Meaningful Recordings (detail view) ===
@@ -748,6 +843,42 @@ async function main(): Promise<void> {
 
   console.log(`📁 Grouped into ${byDate.size} date(s)`);
 
+  // Fetch highlights for all dates (optimized: single query instead of N+1)
+  console.log('📌 Fetching user highlights from Supabase...');
+  const allDates = Array.from(byDate.keys());
+  const highlightsByDate = new Map<string, LifelogHighlight[]>();
+
+  if (allDates.length > 0) {
+    // Calculate date range (min to max)
+    const sortedDates = [...allDates].sort();
+    const minDate = new Date(`${sortedDates[0]}T00:00:00+09:00`).toISOString();
+    const maxDate = new Date(`${sortedDates[sortedDates.length - 1]}T23:59:59+09:00`).toISOString();
+
+    // Fetch all highlights in one query
+    const allHighlights = await supabaseFetch<LifelogHighlight[]>(
+      supabaseUrl,
+      serviceRoleKey,
+      'lifelog_highlights',
+      `select=id,limitless_id,title,content,speaker,topics,timestamp,user_reflection,user_action_plan,created_at&timestamp=gte.${minDate}&timestamp=lte.${maxDate}&order=timestamp.asc`
+    );
+
+    // Group highlights by date in memory
+    for (const highlight of allHighlights) {
+      const highlightDate = new Date(highlight.timestamp).toLocaleString('ja-JP', {
+        timeZone: 'Asia/Tokyo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      }).split('/').join('-');
+
+      const existing = highlightsByDate.get(highlightDate) || [];
+      existing.push(highlight);
+      highlightsByDate.set(highlightDate, existing);
+    }
+
+    console.log(`  📌 Total ${allHighlights.length} highlight(s) across ${allDates.length} date(s)`);
+  }
+
   // Process each date
   const syncedIds: string[] = [];
 
@@ -756,10 +887,11 @@ async function main(): Promise<void> {
     const dirPath = path.join(pendantDir, year, month);
     const filePath = path.join(dirPath, `${date}.md`);
 
-    console.log(`  📝 ${date}: ${logs.length} recording(s) → ${filePath}`);
+    const highlights = highlightsByDate.get(date) || [];
+    console.log(`  📝 ${date}: ${logs.length} recording(s) + ${highlights.length} highlight(s) → ${filePath}`);
 
     // Build markdown
-    const markdown = buildDailyDigest(date, logs);
+    const markdown = buildDailyDigest(date, logs, highlights);
 
     if (!isDryRun) {
       // Create directory if needed

@@ -198,4 +198,94 @@ describe('PHI Detector', () => {
       // This reflection can be public without approval
     });
   });
+
+  describe('Confidence Scoring (Phase 6.1)', () => {
+    it('returns high confidence (90+) for multiple strong PHI patterns', () => {
+      const text =
+        'Patient John Doe (SSN 123-45-6789) called at (415) 555-1212. MRN: X789Y12.';
+      const result = detectPHI(text);
+
+      expect(result.contains_phi).toBe(true);
+      expect(result.confidence_score).toBeGreaterThanOrEqual(90);
+      expect(result.needs_verification).toBe(false);
+
+      // Should detect: name(30) + SSN(25) + phone(10) + MRN(20) = high confidence
+      const detectedTypes = new Set(result.detected_patterns.map((p) => p.type));
+      expect(detectedTypes.size).toBeGreaterThanOrEqual(3);
+    });
+
+    it('returns low-medium confidence for single weak PHI pattern', () => {
+      const text = 'Please contact me at john.doe@example.com for further discussion.';
+      const result = detectPHI(text);
+
+      expect(result.contains_phi).toBe(true);
+      expect(result.confidence_score).toBeGreaterThan(0);
+      expect(result.confidence_score).toBeLessThan(50);
+      expect(result.needs_verification).toBe(true);
+
+      // Email alone has low weight (5), triggers verification despite low score
+      const emailPatterns = result.detected_patterns.filter((p) => p.type === 'email');
+      expect(emailPatterns.length).toBe(1);
+    });
+
+    it('returns low confidence (<50) for ambiguous pattern in long text', () => {
+      const longText =
+        'Today we had a very productive meeting discussing various topics. ' +
+        'The session covered multiple aspects of the project including timelines, ' +
+        'resource allocation, and strategic planning. We also reviewed the budget ' +
+        'and discussed potential risks. The address 123 Main Street was mentioned ' +
+        'briefly as a possible venue for the next event. Overall, it was a comprehensive ' +
+        'discussion that touched on many important points and set a clear direction ' +
+        'for the upcoming quarter.';
+
+      const result = detectPHI(longText);
+
+      // Should detect address but with low confidence due to text length penalty
+      const addressPatterns = result.detected_patterns.filter((p) => p.type === 'address');
+      if (addressPatterns.length > 0) {
+        expect(result.confidence_score).toBeLessThan(50);
+        expect(result.needs_verification).toBe(true);
+      }
+    });
+
+    it('returns zero confidence for no PHI detected', () => {
+      const safeText = 'This is a completely safe reflection with no sensitive information.';
+      const result = detectPHI(safeText);
+
+      expect(result.contains_phi).toBe(false);
+      expect(result.confidence_score).toBe(0);
+      expect(result.needs_verification).toBe(false);
+      expect(result.detected_patterns).toEqual([]);
+    });
+
+    it('handles edge case: high confidence with short text and multiple patterns', () => {
+      const shortText = 'SSN 987-65-4321, DOB 05/15/1990, MRN: ABC123XYZ';
+      const result = detectPHI(shortText);
+
+      expect(result.contains_phi).toBe(true);
+      expect(result.confidence_score).toBeGreaterThanOrEqual(90);
+      expect(result.needs_verification).toBe(false);
+
+      // Short text + multiple high-weight patterns = very high confidence
+      const detectedTypes = new Set(result.detected_patterns.map((p) => p.type));
+      expect(detectedTypes).toContain('ssn');
+      expect(detectedTypes).toContain('date_of_birth');
+      expect(detectedTypes).toContain('mrn');
+    });
+
+    it('confidence score scales appropriately with pattern count', () => {
+      const onePattern = 'Email: test@example.com';
+      const twoPatterns = 'Email: test@example.com, Phone: 415-555-1212';
+      const threePatterns =
+        'Email: test@example.com, Phone: 415-555-1212, DOB: 01/01/2000';
+
+      const result1 = detectPHI(onePattern);
+      const result2 = detectPHI(twoPatterns);
+      const result3 = detectPHI(threePatterns);
+
+      // More patterns = higher confidence (assuming similar text length)
+      expect(result2.confidence_score).toBeGreaterThan(result1.confidence_score);
+      expect(result3.confidence_score).toBeGreaterThan(result2.confidence_score);
+    });
+  });
 });

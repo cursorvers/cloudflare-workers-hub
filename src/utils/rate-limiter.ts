@@ -218,3 +218,9 @@ export function addRateLimitHeaders(
   newResponse.headers.set('X-RateLimit-Reset', result.resetAt.toISOString());
   return newResponse;
 }
+
+/**
+ * Alias for backward compatibility
+ * @deprecated Use createRateLimitErrorResponse instead
+ */
+export const createRateLimitResponse = createRateLimitErrorResponse;

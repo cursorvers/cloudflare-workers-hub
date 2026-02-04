@@ -64,10 +64,12 @@ const DEFAULT_SLIDES_CRED_PATH = `${homedir()}/.config/gcloud/slides-credentials
 const DEFAULT_SA_KEY_PATH = `${homedir()}/.config/gcloud/slides-generator-key.json`;
 const DEFAULT_ADC_PATH = `${homedir()}/.config/gcloud/application_default_credentials.json`;
 
-/** Default scopes for Slides + Drive (sharing) */
+/** Default scopes for Slides + Drive (sharing) + Calendar (read-only) + Gmail (read-only) */
 const DEFAULT_SCOPES = [
   'https://www.googleapis.com/auth/presentations',
   'https://www.googleapis.com/auth/drive',
+  'https://www.googleapis.com/auth/calendar.readonly',
+  'https://www.googleapis.com/auth/gmail.readonly',
 ].join(' ');
 
 // ============================================================================
@@ -133,13 +135,18 @@ export async function loadGoogleCredentials(
 /**
  * Get an access token from credentials.
  * Routes to JWT flow (service account) or refresh_token flow (ADC).
+ *
+ * @param credentials - Google credentials
+ * @param scopes - OAuth scopes (optional)
+ * @param subject - Email address to impersonate for Domain-Wide Delegation (optional)
  */
 export async function getAccessToken(
   credentials: GoogleCredentials,
-  scopes?: string
+  scopes?: string,
+  subject?: string
 ): Promise<TokenResponse> {
   if (credentials.type === 'service_account') {
-    return getAccessTokenViaJWT(credentials, scopes || DEFAULT_SCOPES);
+    return getAccessTokenViaJWT(credentials, scopes || DEFAULT_SCOPES, subject);
   }
   return getAccessTokenViaRefresh(credentials);
 }
@@ -190,21 +197,33 @@ export async function authenticate(
 /**
  * Create a signed JWT and exchange it for an access token.
  * Standard Google Service Account OAuth 2.0 flow.
+ *
+ * @param credentials - Service Account credentials
+ * @param scopes - OAuth scopes
+ * @param subject - (Optional) Email address to impersonate (for Domain-Wide Delegation)
  */
 async function getAccessTokenViaJWT(
   credentials: z.infer<typeof ServiceAccountCredentialsSchema>,
-  scopes: string
+  scopes: string,
+  subject?: string
 ): Promise<TokenResponse> {
   const now = Math.floor(Date.now() / 1000);
 
   const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
-  const payload = base64url(JSON.stringify({
+  const payloadData: Record<string, string | number> = {
     iss: credentials.client_email,
     scope: scopes,
     aud: GOOGLE_TOKEN_ENDPOINT,
     iat: now,
     exp: now + 3600,
-  }));
+  };
+
+  // Domain-Wide Delegation: impersonate user
+  if (subject) {
+    payloadData.sub = subject;
+  }
+
+  const payload = base64url(JSON.stringify(payloadData));
 
   const signatureInput = `${header}.${payload}`;
   const sign = createSign('RSA-SHA256');

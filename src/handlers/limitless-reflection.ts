@@ -8,19 +8,22 @@
  */
 
 import { Env } from '../types';
-import { safeLog, maskUserId } from '../utils/log-sanitizer';
+import { safeLog } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
 import { detectPHI } from '../services/phi-detector';
 import {
   CreateReflectionRequestSchema,
   UpdateReflectionRequestSchema,
-  GetPendingReviewsRequestSchema,
   validatePHIConsistency,
   type UserReflection,
-  type ReflectionWithHighlight,
-  type PendingReviewsResponse,
 } from '../schemas/user-reflections';
-import { createClient } from '@supabase/supabase-js';
+import {
+  supabaseSelect,
+  supabaseInsert,
+  supabaseUpdate,
+  type SupabaseConfig,
+} from '../services/supabase-client';
+import { sendReflectionNotification } from '../services/reflection-notifier';
 
 /**
  * Handle Limitless Reflection API requests
@@ -30,9 +33,13 @@ export async function handleLimitlessReflectionAPI(
   env: Env,
   path: string
 ): Promise<Response> {
-  // Verify API key
+  // Verify API key (support header OR query parameter for iOS Shortcut)
   const apiKey = extractAPIKey(request);
   if (!apiKey || !verifyAPIKey(apiKey, env)) {
+    safeLog.warn('[Reflection API] Unauthorized access attempt', {
+      hasApiKey: !!apiKey,
+      ip: request.headers.get('CF-Connecting-IP') || 'unknown',
+    });
     return new Response(
       JSON.stringify({ success: false, error: 'Unauthorized' }),
       {
@@ -44,8 +51,8 @@ export async function handleLimitlessReflectionAPI(
 
   // Rate limit check
   const rateLimitResult = await checkRateLimit(
+    request,
     env,
-    'limitless-reflection',
     apiKey.substring(0, 8)
   );
   if (!rateLimitResult.allowed) {
@@ -129,45 +136,96 @@ async function handleCreateReflection(
 
   const reflectionData = validation.data;
 
-  // Detect PHI in reflection text
-  const phiDetectionResult = detectPHI(reflectionData.reflection_text);
+  // Detect PHI in all text fields
+  const reflectionTextPHI = detectPHI(reflectionData.reflection_text);
+  const insightsPHI = (reflectionData.key_insights || []).map(detectPHI);
+  const actionsPHI = (reflectionData.action_items || []).map(detectPHI);
+
+  const allDetectedPatterns = [
+    ...reflectionTextPHI.detected_patterns,
+    ...insightsPHI.flatMap((r) => r.detected_patterns),
+    ...actionsPHI.flatMap((r) => r.detected_patterns),
+  ];
+
+  const contains_phi =
+    reflectionTextPHI.contains_phi ||
+    insightsPHI.some((r) => r.contains_phi) ||
+    actionsPHI.some((r) => r.contains_phi);
+
+  const needs_verification =
+    reflectionTextPHI.needs_verification ||
+    insightsPHI.some((r) => r.needs_verification) ||
+    actionsPHI.some((r) => r.needs_verification);
 
   safeLog.info('[Reflection API] Creating reflection', {
     highlight_id: reflectionData.highlight_id,
-    contains_phi: phiDetectionResult.contains_phi,
-    detected_patterns: phiDetectionResult.detected_patterns.length,
+    contains_phi,
+    detected_patterns: allDetectedPatterns.length,
+    confidence_score: reflectionTextPHI.confidence_score,
+    needs_verification,
   });
 
-  // Create Supabase client
-  const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+  // Force manual review if needs_verification is true
+  let is_public = reflectionData.is_public || false;
+  if (needs_verification) {
+    is_public = false; // Force private until manual approval
+    safeLog.warn('[Reflection API] Forcing private due to needs_verification', {
+      highlight_id: reflectionData.highlight_id,
+      original_is_public: reflectionData.is_public,
+    });
+  }
+
+  // PHI consistency check
+  if (contains_phi && is_public) {
+    safeLog.warn('[Reflection API] PHI consistency violation', {
+      highlight_id: reflectionData.highlight_id,
+    });
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: 'Cannot publish reflection containing PHI without approval',
+      }),
+      {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  // Supabase config
+  const config: SupabaseConfig = {
+    url: env.SUPABASE_URL!,
+    serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY!,
+  };
 
   try {
-    // Insert reflection with PHI detection results
-    const { data, error } = await supabase
-      .from('user_reflections')
-      .insert({
-        highlight_id: reflectionData.highlight_id,
-        user_id: env.LIMITLESS_USER_ID || 'default_user',
-        reflection_text: reflectionData.reflection_text,
-        key_insights: reflectionData.key_insights || [],
-        action_items: reflectionData.action_items || [],
-        contains_phi: phiDetectionResult.contains_phi,
-        phi_approved: false, // Must be explicitly approved later
-        is_public: reflectionData.is_public && !phiDetectionResult.contains_phi, // Cannot be public if contains PHI
-      })
-      .select()
-      .single();
+    // Insert reflection
+    const insertData = {
+      highlight_id: reflectionData.highlight_id,
+      user_id: 'default_user', // Single-user system
+      reflection_text: reflectionData.reflection_text,
+      key_insights: reflectionData.key_insights || [],
+      action_items: reflectionData.action_items || [],
+      contains_phi,
+      phi_approved: false,
+      is_public, // Use computed is_public (forced to false if needs_verification)
+    };
 
-    if (error) {
-      safeLog.error('[Reflection API] Failed to create reflection', {
-        error: error.message,
+    const { data: insertedReflection, error: insertError } = await supabaseInsert<UserReflection>(
+      config,
+      'user_reflections',
+      insertData
+    );
+
+    if (insertError) {
+      safeLog.error('[Reflection API] Failed to insert reflection', {
+        error: insertError.message,
       });
-
       return new Response(
         JSON.stringify({
           success: false,
           error: 'Failed to create reflection',
-          details: error.message,
+          details: insertError.message,
         }),
         {
           status: 500,
@@ -176,45 +234,72 @@ async function handleCreateReflection(
       );
     }
 
-    // Update highlight status to 'under_review'
-    await supabase
-      .from('lifelog_highlights')
-      .update({
+    // Update highlight status
+    const { error: updateError } = await supabaseUpdate(
+      config,
+      'lifelog_highlights',
+      {
         status: 'under_review',
         reviewed_at: new Date().toISOString(),
-      })
-      .eq('id', reflectionData.highlight_id);
+      },
+      `id=eq.${reflectionData.highlight_id}`
+    );
+
+    if (updateError) {
+      safeLog.warn('[Reflection API] Failed to update highlight status', {
+        highlight_id: reflectionData.highlight_id,
+        error: updateError.message,
+      });
+    }
 
     safeLog.info('[Reflection API] Reflection created successfully', {
-      id: data.id,
-      contains_phi: data.contains_phi,
+      reflection_id: insertedReflection?.[0]?.id,
+      highlight_id: reflectionData.highlight_id,
+      contains_phi,
+      needs_verification,
     });
+
+    // Send Discord alert if needs verification
+    if (needs_verification) {
+      // Send alert notification (force=true to bypass frequency control)
+      await sendReflectionNotification(
+        env,
+        'discord',
+        {
+          highlight_id: reflectionData.highlight_id,
+          highlight_time: new Date().toISOString(), // Use current time for alert
+          extracted_text: `⚠️ PHI検出: 手動レビュー必要\n\n${reflectionData.reflection_text.substring(0, 150)}...`,
+          speaker_name: 'System',
+          topics: ['PHI Review Required'],
+          notification_url: `https://cockpit.masayuki.work/reflections/${insertedReflection?.[0]?.id}`,
+        },
+        true // force=true
+      ).catch((error) => {
+        safeLog.error('[Reflection API] Failed to send Discord alert', {
+          error: String(error),
+        });
+      });
+    }
 
     return new Response(
       JSON.stringify({
         success: true,
-        data: {
-          ...data,
-          phi_detection: phiDetectionResult.contains_phi
-            ? {
-                detected_patterns: phiDetectionResult.detected_patterns.map(
-                  (p) => ({ type: p.type, confidence: p.confidence })
-                ),
-                requires_approval: true,
-              }
-            : undefined,
+        reflection: {
+          ...insertedReflection?.[0],
+          detected_patterns: allDetectedPatterns,
+          masked_text: reflectionTextPHI.masked_text,
+          needs_verification, // Include in response
         },
       }),
       {
-        status: 201,
+        status: 200,
         headers: { 'Content-Type': 'application/json' },
       }
     );
   } catch (error) {
-    safeLog.error('[Reflection API] Unexpected error', {
+    safeLog.error('[Reflection API] Unexpected error creating reflection', {
       error: String(error),
     });
-
     return new Response(
       JSON.stringify({
         success: false,
@@ -236,65 +321,37 @@ async function handleGetPendingReviews(
   request: Request,
   env: Env
 ): Promise<Response> {
-  // Parse query parameters
-  const url = new URL(request.url);
-  const limit = parseInt(url.searchParams.get('limit') || '20');
-  const offset = parseInt(url.searchParams.get('offset') || '0');
-  const status = url.searchParams.get('status') || 'pending_review';
-  const notifiedOnly = url.searchParams.get('notified_only') === 'true';
-
-  // Validate parameters
-  const validation = GetPendingReviewsRequestSchema.safeParse({
-    limit,
-    offset,
-    status,
-    notified_only: notifiedOnly,
-  });
-
-  if (!validation.success) {
-    return new Response(
-      JSON.stringify({
-        success: false,
-        error: 'Invalid parameters',
-        details: validation.error.errors,
-      }),
-      {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      }
-    );
-  }
-
-  const params = validation.data;
-
-  // Create Supabase client
-  const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+  // Supabase config
+  const config: SupabaseConfig = {
+    url: env.SUPABASE_URL!,
+    serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY!,
+  };
 
   try {
-    // Build query
-    let query = supabase
-      .from('lifelog_highlights')
-      .select('*', { count: 'exact' })
-      .eq('status', params.status)
-      .order('highlight_time', { ascending: false })
-      .range(params.offset, params.offset + params.limit - 1);
+    // Query highlights with status='pending_review' AND notified_at IS NOT NULL
+    const selectFields =
+      'id,highlight_time,extracted_text,speaker_name,topics,status,notified_at,created_at';
+    const query = `select=${selectFields}&status=eq.pending_review&notified_at=not.is.null&order=highlight_time.desc&limit=50`;
 
-    // Filter by notified status if requested
-    if (params.notified_only) {
-      query = query.not('notified_at', 'is', null);
-    }
-
-    const { data, error, count } = await query;
+    const { data: highlights, error } = await supabaseSelect<{
+      id: string;
+      highlight_time: string;
+      extracted_text: string | null;
+      speaker_name: string | null;
+      topics: string[];
+      status: string;
+      notified_at: string | null;
+      created_at: string;
+    }>(config, 'lifelog_highlights', query);
 
     if (error) {
-      safeLog.error('[Reflection API] Failed to get pending reviews', {
+      safeLog.error('[Reflection API] Failed to fetch pending reviews', {
         error: error.message,
       });
-
       return new Response(
         JSON.stringify({
           success: false,
-          error: 'Failed to get pending reviews',
+          error: 'Failed to fetch pending reviews',
           details: error.message,
         }),
         {
@@ -304,22 +361,14 @@ async function handleGetPendingReviews(
       );
     }
 
-    const response: PendingReviewsResponse = {
-      highlights: data || [],
-      total: count || 0,
-      limit: params.limit,
-      offset: params.offset,
-    };
-
-    safeLog.info('[Reflection API] Pending reviews retrieved', {
-      total: count,
-      returned: data?.length || 0,
+    safeLog.info('[Reflection API] Fetched pending reviews', {
+      count: highlights?.length || 0,
     });
 
     return new Response(
       JSON.stringify({
         success: true,
-        data: response,
+        highlights: highlights || [],
       }),
       {
         status: 200,
@@ -327,10 +376,9 @@ async function handleGetPendingReviews(
       }
     );
   } catch (error) {
-    safeLog.error('[Reflection API] Unexpected error', {
+    safeLog.error('[Reflection API] Unexpected error fetching pending reviews', {
       error: String(error),
     });
-
     return new Response(
       JSON.stringify({
         success: false,
@@ -351,24 +399,8 @@ async function handleGetPendingReviews(
 async function handleUpdateReflection(
   request: Request,
   env: Env,
-  id: string
+  reflectionId: string
 ): Promise<Response> {
-  // Validate UUID format
-  const uuidRegex =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (!uuidRegex.test(id)) {
-    return new Response(
-      JSON.stringify({
-        success: false,
-        error: 'Invalid reflection ID format',
-      }),
-      {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      }
-    );
-  }
-
   // Parse and validate request body
   let body: unknown;
   try {
@@ -404,18 +436,39 @@ async function handleUpdateReflection(
 
   const updateData = validation.data;
 
-  // Create Supabase client
-  const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+  // Supabase config
+  const config: SupabaseConfig = {
+    url: env.SUPABASE_URL!,
+    serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY!,
+  };
 
   try {
-    // Get existing reflection
-    const { data: existing, error: fetchError } = await supabase
-      .from('user_reflections')
-      .select('*')
-      .eq('id', id)
-      .single();
+    // Fetch existing reflection
+    const { data: existing, error: fetchError } = await supabaseSelect<UserReflection>(
+      config,
+      'user_reflections',
+      `select=*&id=eq.${reflectionId}`
+    );
 
-    if (fetchError || !existing) {
+    if (fetchError) {
+      safeLog.error('[Reflection API] Failed to fetch reflection', {
+        reflection_id: reflectionId,
+        error: fetchError.message,
+      });
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: 'Failed to fetch reflection',
+          details: fetchError.message,
+        }),
+        {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    if (!existing || existing.length === 0) {
       return new Response(
         JSON.stringify({
           success: false,
@@ -428,83 +481,85 @@ async function handleUpdateReflection(
       );
     }
 
-    // Prepare update object
-    const updates: Partial<UserReflection> = {};
+    const currentReflection = existing[0];
 
-    if (updateData.reflection_text) {
-      // Re-detect PHI if text changed
-      const phiDetectionResult = detectPHI(updateData.reflection_text);
-      updates.reflection_text = updateData.reflection_text;
-      updates.contains_phi = phiDetectionResult.contains_phi;
+    // Detect PHI if text fields changed
+    const mergedReflection = {
+      ...currentReflection,
+      ...updateData,
+    };
 
-      // Reset phi_approved if PHI status changed
-      if (phiDetectionResult.contains_phi !== existing.contains_phi) {
-        updates.phi_approved = false;
-      }
+    let contains_phi = currentReflection.contains_phi;
+
+    if (updateData.reflection_text || updateData.key_insights || updateData.action_items) {
+      const reflectionTextPHI = detectPHI(
+        updateData.reflection_text || currentReflection.reflection_text
+      );
+      const insightsPHI = (
+        updateData.key_insights ||
+        currentReflection.key_insights ||
+        []
+      ).map(detectPHI);
+      const actionsPHI = (
+        updateData.action_items ||
+        currentReflection.action_items ||
+        []
+      ).map(detectPHI);
+
+      contains_phi =
+        reflectionTextPHI.contains_phi ||
+        insightsPHI.some((r) => r.contains_phi) ||
+        actionsPHI.some((r) => r.contains_phi);
+
+      safeLog.info('[Reflection API] PHI re-detection after update', {
+        reflection_id: reflectionId,
+        contains_phi,
+      });
     }
 
-    if (updateData.key_insights) {
-      updates.key_insights = updateData.key_insights;
-    }
+    // PHI consistency check
+    const isPublic = updateData.is_public !== undefined ? updateData.is_public : currentReflection.is_public;
+    const phiApproved = updateData.phi_approved !== undefined ? updateData.phi_approved : currentReflection.phi_approved;
 
-    if (updateData.action_items) {
-      updates.action_items = updateData.action_items;
-    }
-
-    if (updateData.phi_approved !== undefined) {
-      // Can only approve PHI if it contains PHI
-      if (updateData.phi_approved && !existing.contains_phi && !updates.contains_phi) {
-        return new Response(
-          JSON.stringify({
-            success: false,
-            error: 'Cannot approve PHI for content without PHI',
-          }),
-          {
-            status: 400,
-            headers: { 'Content-Type': 'application/json' },
-          }
-        );
-      }
-      updates.phi_approved = updateData.phi_approved;
-    }
-
-    if (updateData.is_public !== undefined) {
-      // Validate PHI consistency
-      const testReflection = { ...existing, ...updates, is_public: updateData.is_public };
-      if (!validatePHIConsistency(testReflection)) {
-        return new Response(
-          JSON.stringify({
-            success: false,
-            error: 'Cannot make PHI content public without approval',
-          }),
-          {
-            status: 400,
-            headers: { 'Content-Type': 'application/json' },
-          }
-        );
-      }
-      updates.is_public = updateData.is_public;
+    if (contains_phi && isPublic && !phiApproved) {
+      safeLog.warn('[Reflection API] PHI consistency violation on update', {
+        reflection_id: reflectionId,
+      });
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: 'Cannot publish reflection containing PHI without approval',
+        }),
+        {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
     }
 
     // Update reflection
-    const { data, error } = await supabase
-      .from('user_reflections')
-      .update(updates)
-      .eq('id', id)
-      .select()
-      .single();
+    const finalUpdateData: Partial<UserReflection> = {
+      ...updateData,
+      contains_phi,
+    };
 
-    if (error) {
+    const { data: updatedReflection, error: updateError } = await supabaseUpdate<UserReflection>(
+      config,
+      'user_reflections',
+      finalUpdateData,
+      `id=eq.${reflectionId}`
+    );
+
+    if (updateError) {
       safeLog.error('[Reflection API] Failed to update reflection', {
-        id,
-        error: error.message,
+        reflection_id: reflectionId,
+        error: updateError.message,
       });
-
       return new Response(
         JSON.stringify({
           success: false,
           error: 'Failed to update reflection',
-          details: error.message,
+          details: updateError.message,
         }),
         {
           status: 500,
@@ -513,25 +568,17 @@ async function handleUpdateReflection(
       );
     }
 
-    // Update highlight status to 'completed' if reflection is finalized
-    if (data.is_public || data.phi_approved) {
-      await supabase
-        .from('lifelog_highlights')
-        .update({ status: 'completed' })
-        .eq('id', data.highlight_id);
-    }
-
     safeLog.info('[Reflection API] Reflection updated successfully', {
-      id: data.id,
-      contains_phi: data.contains_phi,
-      phi_approved: data.phi_approved,
-      is_public: data.is_public,
+      reflection_id: reflectionId,
+      contains_phi,
+      is_public: isPublic,
+      phi_approved: phiApproved,
     });
 
     return new Response(
       JSON.stringify({
         success: true,
-        data,
+        reflection: updatedReflection?.[0] || mergedReflection,
       }),
       {
         status: 200,
@@ -539,10 +586,10 @@ async function handleUpdateReflection(
       }
     );
   } catch (error) {
-    safeLog.error('[Reflection API] Unexpected error', {
+    safeLog.error('[Reflection API] Unexpected error updating reflection', {
+      reflection_id: reflectionId,
       error: String(error),
     });
-
     return new Response(
       JSON.stringify({
         success: false,
@@ -558,38 +605,42 @@ async function handleUpdateReflection(
 }
 
 /**
- * Extract API key from request headers
+ * Extract API key from request headers or query parameters
  */
 function extractAPIKey(request: Request): string | null {
+  // Check Authorization header
   const authHeader = request.headers.get('Authorization');
   if (authHeader?.startsWith('Bearer ')) {
     return authHeader.substring(7);
   }
 
+  // Check X-API-Key header
   const apiKeyHeader = request.headers.get('X-API-Key');
   if (apiKeyHeader) {
     return apiKeyHeader;
+  }
+
+  // Check query parameter (iOS Shortcut fallback)
+  const url = new URL(request.url);
+  const apiKeyQuery = url.searchParams.get('apiKey');
+  if (apiKeyQuery) {
+    return apiKeyQuery;
   }
 
   return null;
 }
 
 /**
- * Verify API key
+ * Verify API key against environment variables
  */
 function verifyAPIKey(apiKey: string, env: Env): boolean {
-  // Check against MONITORING_API_KEY
+  // Check against MONITORING_API_KEY (for reflection operations)
   if (env.MONITORING_API_KEY && apiKey === env.MONITORING_API_KEY) {
     return true;
   }
 
-  // Check against ADMIN_API_KEY
-  if (env.ADMIN_API_KEY && apiKey === env.ADMIN_API_KEY) {
-    return true;
-  }
-
-  // Check against legacy ASSISTANT_API_KEY
-  if (env.ASSISTANT_API_KEY && apiKey === env.ASSISTANT_API_KEY) {
+  // Check against HIGHLIGHT_API_KEY (for compatibility)
+  if (env.HIGHLIGHT_API_KEY && apiKey === env.HIGHLIGHT_API_KEY) {
     return true;
   }
 

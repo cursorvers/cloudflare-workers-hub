@@ -161,7 +161,7 @@ export async function handleCronAPI(request: Request, env: Env, path: string): P
   }
 
   const apiKey = request.headers.get('Authorization')?.replace('Bearer ', '') || request.headers.get('X-API-Key') || '';
-  const rateLimitResult = await checkRateLimit(env, 'admin', apiKey.substring(0, 8));
+  const rateLimitResult = await checkRateLimit(request, env, apiKey.substring(0, 8));
   if (!rateLimitResult.allowed) {
     return createRateLimitResponse(rateLimitResult);
   }
