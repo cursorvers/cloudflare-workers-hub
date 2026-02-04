@@ -37,6 +37,8 @@ import { handleAdvisorAPI } from './handlers/strategic-advisor-api';
 import { handleUsageAPI } from './handlers/usage-api';
 import { handleGoalPlannerAPI } from './handlers/goal-planner';
 import { handlePushQueueBatch } from './handlers/push-queue-consumer';
+import { handleReceiptUpload } from './handlers/receipt-upload';
+import { handleReceiptSearch } from './handlers/receipt-search';
 
 export type { Env };
 
@@ -540,6 +542,16 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
     // Memory API endpoints (for persistent conversation history)
     if (path.startsWith('/api/memory')) {
       return handleMemoryAPI(request, env, path);
+    }
+
+    // Receipt Upload API endpoint (freee integration)
+    if (path === '/api/receipts/upload' && request.method === 'POST') {
+      return handleReceiptUpload(request, env);
+    }
+
+    // Receipt Search API endpoint (Electronic Bookkeeping Law compliant)
+    if (path === '/api/receipts/search' && request.method === 'GET') {
+      return handleReceiptSearch(request, env);
     }
 
     // Cron API endpoints (for scheduled task management)
