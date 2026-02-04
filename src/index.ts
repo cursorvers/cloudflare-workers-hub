@@ -40,6 +40,7 @@ import { handlePushQueueBatch } from './handlers/push-queue-consumer';
 import { handleReceiptUpload } from './handlers/receipt-upload';
 import { handleReceiptSearch } from './handlers/receipt-search';
 import { handleReceiptSourcesAPI } from './handlers/receipt-sources-api';
+import { handleDLQAPI } from './handlers/dlq-api';
 
 export type { Env };
 
@@ -558,6 +559,11 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
     // Receipt Sources Management API (Web scraper configuration)
     if (path.startsWith('/api/receipts/sources')) {
       return handleReceiptSourcesAPI(request, env, path);
+    }
+
+    // Dead Letter Queue API (Failed receipt processing management)
+    if (path.startsWith('/api/receipts/dlq')) {
+      return handleDLQAPI(request, env, path);
     }
 
     // Cron API endpoints (for scheduled task management)

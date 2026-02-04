@@ -29,6 +29,7 @@ export interface Env {
   AUDIO_STAGING?: R2Bucket;
   OBSIDIAN_VAULT?: R2Bucket;
   R2?: R2Bucket; // Receipt WORM storage
+  RECEIPTS?: R2Bucket; // Receipt WORM storage (new binding)
   KNOWLEDGE_INDEX?: VectorizeIndex;
   PUSH_NOTIFICATION_QUEUE?: Queue<PushNotificationQueueMessage>;
   ENVIRONMENT: string;
@@ -55,6 +56,7 @@ export interface Env {
   MEMORY_API_KEY?: string;         // /api/memory endpoints
   ADMIN_API_KEY?: string;          // /api/admin endpoints (future)
   MONITORING_API_KEY?: string;     // /health, /metrics endpoints
+  RECEIPTS_API_KEY?: string;       // /api/receipts endpoints
   // Limitless.ai Integration
   LIMITLESS_API_KEY?: string;      // Limitless.ai API key for Pendant sync
   LIMITLESS_USER_ID?: string;      // User ID for automatic sync
@@ -74,6 +76,10 @@ export interface Env {
   GOOGLE_SHARE_EMAIL?: string;     // Email to share generated slides with
   GCP_PROJECT_ID?: string;         // GCP project ID (for quota attribution)
   SLIDES_AUTO_GENERATE?: string;   // Enable/disable auto slide generation (default: false)
+  // Gmail Receipt Poller
+  GMAIL_CLIENT_ID?: string;        // Gmail OAuth client ID
+  GMAIL_CLIENT_SECRET?: string;    // Gmail OAuth client secret
+  GMAIL_REFRESH_TOKEN?: string;    // Gmail OAuth refresh token
   // JWT Authentication (Cockpit API)
   JWT_SECRET?: string;             // HS256 secret for development
   JWT_PRIVATE_KEY?: string;        // RS256 private key for production
@@ -99,6 +105,9 @@ export interface Env {
   FREEE_BASE_URL?: string;         // freee API base URL (default: https://api.freee.co.jp/api/1)
   // Highlight API (iOS Shortcut)
   HIGHLIGHT_API_KEY?: string;      // API key for Limitless highlights feature
+  // GitHub Actions Integration (Web Receipt Scraper)
+  GITHUB_TOKEN?: string;           // GitHub Personal Access Token for workflow_dispatch
+  GITHUB_REPO?: string;            // Repository name (default: cursorvers/cloudflare-workers-hub)
 }
 
 /**

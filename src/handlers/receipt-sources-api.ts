@@ -273,14 +273,116 @@ async function handleTriggerSource(env: Env, sourceId: string): Promise<Response
   }
 
   try {
-    // TODO: Trigger GitHub Actions workflow via API
-    // For now, return a placeholder response
+    // Verify source exists and is enabled
+    const source = await env.DB.prepare(
+      'SELECT id, name, enabled FROM web_receipt_sources WHERE id = ?'
+    )
+      .bind(sourceId)
+      .first<{ id: string; name: string; enabled: number }>();
 
+    if (!source) {
+      return new Response(JSON.stringify({ error: 'Source not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (source.enabled !== 1) {
+      return new Response(JSON.stringify({ error: 'Source is disabled' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Create execution log entry
+    const logId = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO web_receipt_source_logs (id, source_id, started_at, status)
+       VALUES (?, ?, datetime('now'), 'running')`
+    )
+      .bind(logId, sourceId)
+      .run();
+
+    // Trigger GitHub Actions workflow
+    const githubToken = env.GITHUB_TOKEN;
+    const githubRepo = env.GITHUB_REPO || 'cursorvers/cloudflare-workers-hub';
+
+    if (!githubToken) {
+      // Fallback: Log the trigger request but don't fail
+      await env.DB.prepare(
+        `UPDATE web_receipt_source_logs
+         SET completed_at = datetime('now'), status = 'failed',
+             error_message = 'GITHUB_TOKEN not configured'
+         WHERE id = ?`
+      )
+        .bind(logId)
+        .run();
+
+      return new Response(
+        JSON.stringify({
+          success: false,
+          message: 'GitHub Actions trigger not configured. Manual workflow_dispatch required.',
+          sourceId,
+          logId,
+        }),
+        {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    // Call GitHub Actions API
+    const workflowId = 'web-receipt-scraper.yml';
+    const githubApiUrl = `https://api.github.com/repos/${githubRepo}/actions/workflows/${workflowId}/dispatches`;
+
+    const githubResponse = await fetch(githubApiUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${githubToken}`,
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ref: 'main',
+        inputs: {
+          source: sourceId,
+        },
+      }),
+    });
+
+    if (!githubResponse.ok) {
+      const errorText = await githubResponse.text();
+      await env.DB.prepare(
+        `UPDATE web_receipt_source_logs
+         SET completed_at = datetime('now'), status = 'failed',
+             error_message = ?
+         WHERE id = ?`
+      )
+        .bind(`GitHub API error: ${githubResponse.status} ${errorText}`, logId)
+        .run();
+
+      return new Response(
+        JSON.stringify({
+          error: 'Failed to trigger GitHub Actions',
+          details: `HTTP ${githubResponse.status}: ${errorText}`,
+        }),
+        {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    // Success: Workflow dispatched
     return new Response(
       JSON.stringify({
         success: true,
         message: 'Scraping triggered. Results will be available in a few minutes.',
         sourceId,
+        logId,
+        note: 'Check GitHub Actions for execution status',
       }),
       {
         status: 202, // Accepted
