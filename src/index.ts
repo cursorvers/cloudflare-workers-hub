@@ -16,6 +16,7 @@ import { authenticateWithAccess, mapAccessUserToInternal } from './utils/cloudfl
 // Durable Objects
 export { TaskCoordinator } from './durable-objects/task-coordinator';
 export { CockpitWebSocket } from './durable-objects/cockpit-websocket';
+export { SystemEvents } from './durable-objects/system-events';
 
 // Handlers
 import { ensureServiceRoleMappings } from './handlers/initialization';
@@ -33,6 +34,9 @@ import { handleLimitlessWebhook } from './handlers/limitless-webhook';
 import { handleScheduled } from './handlers/scheduled';
 import { handleCockpitAPI } from './handlers/cockpit-api';
 import { handleAdvisorAPI } from './handlers/strategic-advisor-api';
+import { handleUsageAPI } from './handlers/usage-api';
+import { handleGoalPlannerAPI } from './handlers/goal-planner';
+import { handlePushQueueBatch } from './handlers/push-queue-consumer';
 
 export type { Env };
 
@@ -104,10 +108,33 @@ const COCKPIT_HTML = `<!DOCTYPE html>
     .badge.clean{background:rgba(34,197,94,0.15);color:#22c55e}
     .badge.dirty{background:rgba(239,68,68,0.15);color:#ef4444}
     .badge.ahead{background:rgba(59,130,246,0.15);color:#3b82f6}
+    .badge.backlog{background:rgba(156,163,175,0.15);color:#9ca3af}
     .badge.pending{background:rgba(245,158,11,0.15);color:#f59e0b}
     .badge.in_progress{background:rgba(59,130,246,0.15);color:#3b82f6}
+    .badge.review{background:rgba(139,92,246,0.15);color:#8b5cf6}
     .badge.completed{background:rgba(34,197,94,0.15);color:#22c55e}
+    .badge.low{background:rgba(156,163,175,0.15);color:#9ca3af}
+    .badge.medium{background:rgba(59,130,246,0.15);color:#3b82f6}
+    .badge.high{background:rgba(245,158,11,0.15);color:#f59e0b}
+    .badge.urgent{background:rgba(239,68,68,0.15);color:#ef4444}
     .daemon-dot{width:6px;height:6px;border-radius:50%;margin-right:8px}
+    .kanban{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:8px}
+    @media(max-width:768px){.kanban{grid-template-columns:repeat(4,minmax(140px,1fr));min-width:600px}}
+    .kanban-col{background:var(--surface);border-radius:8px;border:1px solid var(--border);min-height:120px}
+    .kanban-header{padding:8px 10px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+    .kanban-title{font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.03em}
+    .kanban-count{background:var(--border);color:var(--text-low);padding:1px 6px;border-radius:8px;font-size:0.6rem}
+    .kanban-cards{padding:6px;min-height:60px}
+    .kanban-card{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px;cursor:pointer;transition:transform 0.1s,box-shadow 0.1s}
+    .kanban-card:hover{transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+    .kanban-card:last-child{margin-bottom:0}
+    .kanban-card-title{font-size:0.75rem;font-weight:500;margin-bottom:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .kanban-card-meta{display:flex;justify-content:space-between;align-items:center;font-size:0.6rem;color:var(--text-low)}
+    .kanban-card-executor{display:flex;align-items:center;gap:3px}
+    .kanban-empty{color:var(--text-low);font-size:0.7rem;text-align:center;padding:16px 8px}
+    .view-toggle{display:flex;gap:4px}
+    .view-btn{background:none;border:1px solid var(--border);color:var(--text-low);padding:2px 8px;border-radius:4px;font-size:0.65rem;cursor:pointer}
+    .view-btn.active{background:var(--primary);border-color:var(--primary);color:#fff}
     .daemon-dot.online{background:#22c55e}
     .daemon-dot.offline{background:#ef4444}
     .bottom-sheet{position:fixed;inset:0;z-index:50;display:flex;align-items:flex-end;justify-content:center;pointer-events:none;opacity:0;transition:opacity 0.2s}
@@ -138,7 +165,10 @@ const COCKPIT_HTML = `<!DOCTYPE html>
 <body>
   <div class="header">
     <h1>FUGUE</h1>
-    <div class="status"><div id="statusDot" class="status-dot"></div><span id="statusText">Offline</span></div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <button id="pushNotifBtn" onclick="requestPushPermission()" style="display:none;background:var(--primary);color:#fff;border:none;padding:4px 8px;border-radius:4px;font-size:0.65rem;cursor:pointer" title="Enable push notifications">🔔 Enable Push</button>
+      <div class="status"><div id="statusDot" class="status-dot"></div><span id="statusText">Offline</span></div>
+    </div>
   </div>
 
   <div class="section">
@@ -152,8 +182,26 @@ const COCKPIT_HTML = `<!DOCTYPE html>
   </div>
 
   <div class="section">
-    <div class="section-title"><span>Tasks</span><span id="taskBadge" class="section-badge" style="display:none">0</span></div>
-    <div id="tasks" class="task-list"><div class="no-data">No tasks</div></div>
+    <div class="section-title">
+      <span>Tasks</span>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span id="taskBadge" class="section-badge" style="display:none">0</span>
+        <div class="view-toggle">
+          <button class="view-btn" id="listViewBtn" onclick="setTaskView('list')">List</button>
+          <button class="view-btn active" id="kanbanViewBtn" onclick="setTaskView('kanban')">Board</button>
+        </div>
+        <button class="view-btn" onclick="openNewTaskSheet()" style="background:var(--primary);border-color:var(--primary);color:#fff">+ New</button>
+      </div>
+    </div>
+    <div id="tasksListView" class="task-list" style="display:none"><div class="no-data">No tasks</div></div>
+    <div id="tasksKanbanView" style="overflow-x:auto">
+      <div class="kanban">
+        <div class="kanban-col"><div class="kanban-header"><span class="kanban-title">📋 Backlog</span><span id="backlogCount" class="kanban-count">0</span></div><div id="backlogCards" class="kanban-cards"><div class="kanban-empty">Drop tasks here</div></div></div>
+        <div class="kanban-col"><div class="kanban-header"><span class="kanban-title">🔄 In Progress</span><span id="inProgressCount" class="kanban-count">0</span></div><div id="inProgressCards" class="kanban-cards"><div class="kanban-empty">No tasks</div></div></div>
+        <div class="kanban-col"><div class="kanban-header"><span class="kanban-title">👀 Review</span><span id="reviewCount" class="kanban-count">0</span></div><div id="reviewCards" class="kanban-cards"><div class="kanban-empty">No tasks</div></div></div>
+        <div class="kanban-col"><div class="kanban-header"><span class="kanban-title">✅ Done</span><span id="doneCount" class="kanban-count">0</span></div><div id="doneCards" class="kanban-cards"><div class="kanban-empty">No tasks</div></div></div>
+      </div>
+    </div>
   </div>
 
   <div class="section">
@@ -210,7 +258,22 @@ const COCKPIT_HTML = `<!DOCTYPE html>
 
     function renderRepos(repos){const c=document.getElementById('repos');if(!repos||!repos.length){c.innerHTML='<div class="no-data">No repositories</div>';return}c.innerHTML=repos.map(r=>{const cnt=r.uncommitted_count||r.uncommittedCount||0;const ahead=r.ahead_count||r.aheadCount||0;let status='clean',badge='Clean';if(cnt>0){status='dirty';badge=cnt+' changes'}else if(ahead>0){status='ahead';badge=ahead+' ahead'}return \`<div class="repo-item"><div><div class="repo-name">\${escapeHtml(r.name)}</div><div class="repo-branch">\${escapeHtml(r.branch||'main')}</div></div><span class="badge \${status}">\${badge}</span></div>\`}).join('')}
 
-    function renderTasks(tasks){const c=document.getElementById('tasks');const b=document.getElementById('taskBadge');const active=tasks.filter(t=>t.status!=='completed');b.textContent=active.length;b.style.display=active.length>0?'inline':'none';if(!tasks||!tasks.length){c.innerHTML='<div class="no-data">No tasks</div>';return}c.innerHTML=tasks.slice(0,5).map(t=>{const statusLabel={pending:'Pending',in_progress:'Running',completed:'Done'}[t.status]||escapeHtml(t.status);return \`<div class="task-item"><div><div class="task-name">\${escapeHtml(t.task_type||t.taskType||'Task')}</div><div class="task-meta">\${escapeHtml(t.id?.slice(0,8)||'')}</div></div><span class="badge \${escapeHtml(t.status)}">\${statusLabel}</span></div>\`}).join('')}
+    let allTasks=[],currentTaskView='kanban';
+    function setTaskView(view){currentTaskView=view;document.getElementById('listViewBtn').classList.toggle('active',view==='list');document.getElementById('kanbanViewBtn').classList.toggle('active',view==='kanban');document.getElementById('tasksListView').style.display=view==='list'?'block':'none';document.getElementById('tasksKanbanView').style.display=view==='kanban'?'block':'none';renderTasks(allTasks)}
+    function renderTasks(tasks){allTasks=tasks||[];const b=document.getElementById('taskBadge');const active=allTasks.filter(t=>t.status!=='completed');b.textContent=active.length;b.style.display=active.length>0?'inline':'none';if(currentTaskView==='list'){renderTasksList(allTasks)}else{renderKanban(allTasks)}}
+    function renderTasksList(tasks){const c=document.getElementById('tasksListView');if(!tasks||!tasks.length){c.innerHTML='<div class="no-data">No tasks</div>';return}c.innerHTML=tasks.slice(0,10).map(t=>{const statusLabel={backlog:'Backlog',pending:'Pending',in_progress:'Running',review:'Review',completed:'Done'}[t.status]||escapeHtml(t.status);return \`<div class="task-item" onclick="openTaskDetail('\${escapeHtml(t.id)}')" style="cursor:pointer"><div><div class="task-name">\${escapeHtml(t.title||'Task')}</div><div class="task-meta">\${escapeHtml(t.executor||'')} · \${escapeHtml(t.id?.slice(0,8)||'')}</div></div><span class="badge \${escapeHtml(t.status)}">\${statusLabel}</span></div>\`}).join('')}
+    function renderKanban(tasks){const cols={backlog:[],in_progress:[],review:[],completed:[]};(tasks||[]).forEach(t=>{const s=t.status==='pending'?'backlog':t.status;if(cols[s])cols[s].push(t)});
+    ['backlog','in_progress','review','completed'].forEach((col,i)=>{const cards=cols[col]||[];const container=document.getElementById(['backlogCards','inProgressCards','reviewCards','doneCards'][i]);const countEl=document.getElementById(['backlogCount','inProgressCount','reviewCount','doneCount'][i]);countEl.textContent=cards.length;if(!cards.length){container.innerHTML='<div class="kanban-empty">No tasks</div>';return}
+    container.innerHTML=cards.map(t=>{const execIcon={claude:'🤖','claude-code':'🤖',codex:'⚡',glm:'🧠',subagent:'👥',gemini:'💎'}[t.executor]||'📝';const prioClass=t.priority||'medium';return \`<div class="kanban-card" onclick="openTaskDetail('\${escapeHtml(t.id)}')" draggable="true" data-task-id="\${escapeHtml(t.id)}"><div class="kanban-card-title">\${escapeHtml(t.title)}</div><div class="kanban-card-meta"><span class="kanban-card-executor">\${execIcon} \${escapeHtml(t.executor||'')}</span><span class="badge \${prioClass}" style="padding:1px 4px;font-size:0.55rem">\${escapeHtml(t.priority||'med')}</span></div></div>\`}).join('')})}
+    async function openTaskDetail(taskId){const opts={credentials:'include',headers:token?{Authorization:'Bearer '+token}:{}};try{const r=await fetch('/api/cockpit/tasks/'+taskId,opts);if(!r.ok)return;const d=await r.json();const t=d.task;const statusOpts=['backlog','in_progress','review','completed'].map(s=>\`<option value="\${s}" \${t.status===s?'selected':''}>\${{backlog:'📋 Backlog',in_progress:'🔄 In Progress',review:'👀 Review',completed:'✅ Done'}[s]}</option>\`).join('');const prioOpts=['low','medium','high','urgent'].map(p=>\`<option value="\${p}" \${t.priority===p?'selected':''}>\${{low:'Low',medium:'Medium',high:'High',urgent:'Urgent'}[p]}</option>\`).join('');
+    document.getElementById('sheetBody').innerHTML=\`<span class="sheet-tag">\${escapeHtml(t.executor||'Unassigned')}</span><h2 class="sheet-title">\${escapeHtml(t.title)}</h2><p class="sheet-desc">\${escapeHtml(t.description)||'No description'}</p><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px"><label style="font-size:0.7rem;color:var(--text-low)">Status<select id="taskStatus" style="width:100%;margin-top:4px;padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-high);font-size:0.8rem">\${statusOpts}</select></label><label style="font-size:0.7rem;color:var(--text-low)">Priority<select id="taskPriority" style="width:100%;margin-top:4px;padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-high);font-size:0.8rem">\${prioOpts}</select></label></div>\`;
+    document.getElementById('sheetActions').innerHTML=\`<button class="sheet-btn danger" onclick="deleteTask('\${escapeHtml(t.id)}')">Delete</button><button class="sheet-btn primary" onclick="updateTask('\${escapeHtml(t.id)}')">Save</button>\`;
+    document.getElementById('sheet').classList.add('open')}catch(e){console.error(e)}}
+    async function updateTask(taskId){const status=document.getElementById('taskStatus').value;const priority=document.getElementById('taskPriority').value;const opts={method:'PUT',credentials:'include',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify({status,priority})};try{await fetch('/api/cockpit/tasks/'+taskId,opts);closeSheet();fetchData()}catch(e){console.error(e)}}
+    async function deleteTask(taskId){if(!confirm('Delete this task?'))return;const opts={method:'DELETE',credentials:'include',headers:token?{Authorization:'Bearer '+token}:{}};try{await fetch('/api/cockpit/tasks/'+taskId,opts);closeSheet();fetchData()}catch(e){console.error(e)}}
+    function openNewTaskSheet(){document.getElementById('sheetBody').innerHTML=\`<h2 class="sheet-title">New Task</h2><div style="display:flex;flex-direction:column;gap:12px"><label style="font-size:0.7rem;color:var(--text-low)">Title<input id="newTaskTitle" type="text" placeholder="Task title..." style="width:100%;margin-top:4px;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-high);font-size:0.875rem"></label><label style="font-size:0.7rem;color:var(--text-low)">Description<textarea id="newTaskDesc" placeholder="Optional description..." style="width:100%;margin-top:4px;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-high);font-size:0.8rem;min-height:60px;resize:vertical"></textarea></label><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><label style="font-size:0.7rem;color:var(--text-low)">Executor<select id="newTaskExecutor" style="width:100%;margin-top:4px;padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-high);font-size:0.8rem"><option value="">Unassigned</option><option value="claude-code">🤖 Claude Code</option><option value="codex">⚡ Codex</option><option value="glm">🧠 GLM</option><option value="subagent">👥 Subagent</option><option value="gemini">💎 Gemini</option></select></label><label style="font-size:0.7rem;color:var(--text-low)">Priority<select id="newTaskPriority" style="width:100%;margin-top:4px;padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-high);font-size:0.8rem"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="urgent">Urgent</option></select></label></div></div>\`;
+    document.getElementById('sheetActions').innerHTML=\`<button class="sheet-btn secondary" onclick="closeSheet()">Cancel</button><button class="sheet-btn primary" onclick="createTask()">Create</button>\`;document.getElementById('sheet').classList.add('open');setTimeout(()=>document.getElementById('newTaskTitle').focus(),100)}
+    async function createTask(){const title=document.getElementById('newTaskTitle').value.trim();if(!title){alert('Title is required');return}const body={title,description:document.getElementById('newTaskDesc').value.trim()||undefined,executor:document.getElementById('newTaskExecutor').value||undefined,priority:document.getElementById('newTaskPriority').value,status:'backlog'};const opts={method:'POST',credentials:'include',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify(body)};try{await fetch('/api/cockpit/tasks',opts);closeSheet();fetchData()}catch(e){console.error(e)}}
 
     function renderDaemons(daemons){const c=document.getElementById('daemons');if(!daemons||!daemons.length){c.innerHTML='<div class="no-data">No daemons</div>';return}c.innerHTML=daemons.map(d=>{const online=d.status==='healthy'||d.is_healthy;const ago=d.last_heartbeat?formatAgo(d.last_heartbeat):'Unknown';return \`<div class="daemon-item"><div style="display:flex;align-items:center"><div class="daemon-dot \${online?'online':'offline'}"></div><div><div class="daemon-name">\${escapeHtml(d.daemon_id||d.daemonId||'Local Agent')}</div><div class="daemon-time">Last: \${ago}</div></div></div></div>\`}).join('')}
 
@@ -238,7 +301,17 @@ const COCKPIT_HTML = `<!DOCTYPE html>
 
     async function fetchData(){try{const opts={credentials:'include',headers:token?{Authorization:'Bearer '+token}:{}};const[rr,tr,dr,ir]=await Promise.all([fetch('/api/cockpit/repos',opts),fetch('/api/cockpit/tasks',opts),fetch('/api/daemon/health',opts),fetch('/api/advisor/insights?limit=5',opts)]);if(rr.ok){const d=await rr.json();renderRepos(d.repos||d.data||d)}if(tr.ok){const d=await tr.json();renderTasks(d.tasks||d.data||[])}if(dr.ok){const d=await dr.json();renderDaemons(d.daemons||d.data||[])}if(ir.ok){const d=await ir.json();renderInsights(d.data||[]);showCoachMark()}document.getElementById('updated').textContent='Updated: '+new Date().toLocaleTimeString('ja-JP')}catch(e){console.error(e)}}
     function refresh(){fetchData()}
-    connectWS();fetchData();setInterval(fetchData,30000);
+
+    // PWA Push Notifications initialization
+    async function initPushNotifications(){if(!('serviceWorker' in navigator)||!('PushManager' in window)){console.log('[Push] Not supported');return}try{const reg=await navigator.serviceWorker.register('/sw.js',{scope:'/'});console.log('[Push] SW registered:',reg.scope);await navigator.serviceWorker.ready;const permission=Notification.permission;const btn=document.getElementById('pushNotifBtn');if(permission==='granted'){await subscribeToPush(reg)}else if(permission==='default'){if(btn)btn.style.display='inline-block'}else{console.log('[Push] Permission denied')}}catch(e){console.error('[Push] Init failed:',e)}}
+
+    async function subscribeToPush(reg){try{let sub=await reg.pushManager.getSubscription();if(!sub){const keyRes=await fetch('/api/cockpit/vapid-public-key');if(!keyRes.ok){console.error('[Push] Failed to get VAPID key');return}const{publicKey}=await keyRes.json();const appServerKey=urlBase64ToUint8Array(publicKey);sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:appServerKey});console.log('[Push] New subscription created')}const subData={endpoint:sub.endpoint,keys:{p256dh:sub.toJSON().keys.p256dh,auth:sub.toJSON().keys.auth}};const saveRes=await fetch('/api/cockpit/subscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(subData)});if(saveRes.ok){console.log('[Push] Subscription saved')}else{console.error('[Push] Failed to save subscription')}}catch(e){console.error('[Push] Subscribe failed:',e)}}
+
+    function urlBase64ToUint8Array(base64){const padding='='.repeat((4-(base64.length%4))%4);const b64=(base64+padding).replace(/-/g,'+').replace(/_/g,'/');const raw=window.atob(b64);const arr=new Uint8Array(raw.length);for(let i=0;i<raw.length;++i){arr[i]=raw.charCodeAt(i)}return arr}
+
+    async function requestPushPermission(){if(!('Notification' in window)){alert('Notifications not supported');return}const permission=await Notification.requestPermission();const btn=document.getElementById('pushNotifBtn');if(permission==='granted'){const reg=await navigator.serviceWorker.ready;await subscribeToPush(reg);if(btn)btn.style.display='none';alert('Push notifications enabled!')}else{alert('Permission denied')}}
+
+    connectWS();fetchData();setInterval(fetchData,30000);initPushNotifications();
   </script>
 </body>
 </html>`;
@@ -307,6 +380,140 @@ export default {
       });
     }
 
+    // Service Worker (for PWA Push Notifications)
+    if (path === '/sw.js') {
+      // Inline Service Worker code (Cloudflare Workers compatible)
+      const swCode = `
+// Service Worker for PWA Push Notifications (Phase 2)
+const SW_VERSION = '1.0.0';
+const CACHE_NAME = 'cockpit-pwa-' + SW_VERSION;
+
+self.addEventListener('install', (event) => {
+  console.log('[SW ' + SW_VERSION + '] Installing...');
+  event.waitUntil(self.skipWaiting());
+});
+
+self.addEventListener('activate', (event) => {
+  console.log('[SW ' + SW_VERSION + '] Activating...');
+  event.waitUntil(
+    caches.keys().then((cacheNames) => {
+      return Promise.all(
+        cacheNames.map((cacheName) => {
+          if (cacheName !== CACHE_NAME) {
+            console.log('[SW] Deleting old cache:', cacheName);
+            return caches.delete(cacheName);
+          }
+        })
+      );
+    }).then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('push', (event) => {
+  console.log('[SW] Push received');
+  let notificationData = {
+    title: 'Cockpit Alert',
+    body: 'New notification',
+    icon: '/icon-192.png',
+    badge: '/badge-72.png',
+    tag: 'cockpit-alert',
+    requireInteraction: false,
+  };
+
+  if (event.data) {
+    try {
+      const text = event.data.text();
+      if (!text || text.trim().length === 0) {
+        console.warn('[SW] Push data is empty, using default notification');
+      } else {
+        const payload = JSON.parse(text);
+        console.log('[SW] Push payload:', payload);
+        notificationData = {
+          title: payload.title || notificationData.title,
+          body: payload.message || payload.body || notificationData.body,
+          icon: payload.icon || notificationData.icon,
+          badge: payload.badge || notificationData.badge,
+          tag: payload.id || payload.tag || notificationData.tag,
+          data: {
+            id: payload.id,
+            severity: payload.severity,
+            source: payload.source,
+            actionUrl: payload.actionUrl,
+            timestamp: payload.createdAt || Date.now(),
+          },
+          requireInteraction: payload.severity === 'critical' || payload.severity === 'error',
+        };
+        if (payload.actionUrl) {
+          notificationData.actions = [
+            { action: 'open', title: 'Open' },
+            { action: 'dismiss', title: 'Dismiss' },
+          ];
+        }
+      }
+    } catch (error) {
+      console.error('[SW] Failed to parse push payload:', error);
+      console.log('[SW] Using default notification data');
+    }
+  }
+
+  event.waitUntil(
+    self.registration.showNotification(notificationData.title, notificationData)
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  console.log('[SW] Notification clicked:', event.notification.tag);
+  event.notification.close();
+
+  const notificationData = event.notification.data || {};
+  const actionUrl = notificationData.actionUrl;
+
+  if (event.action === 'dismiss') {
+    return;
+  }
+
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if (client.url.includes('/cockpit') && 'focus' in client) {
+          return client.focus().then((focusedClient) => {
+            if (actionUrl && focusedClient.navigate) {
+              return focusedClient.navigate(actionUrl);
+            }
+            return focusedClient;
+          });
+        }
+      }
+      if (clients.openWindow) {
+        const targetUrl = actionUrl || '/cockpit';
+        return clients.openWindow(targetUrl);
+      }
+    })
+  );
+});
+
+self.addEventListener('message', (event) => {
+  console.log('[SW] Message received:', event.data);
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+  if (event.data && event.data.type === 'GET_VERSION') {
+    event.ports[0].postMessage({ version: SW_VERSION });
+  }
+});
+
+console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
+      `.trim();
+
+      return new Response(swCode, {
+        headers: {
+          'Content-Type': 'application/javascript; charset=utf-8',
+          'Service-Worker-Allowed': '/',
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+        },
+      });
+    }
+
     // Queue API endpoints (for AI Assistant Daemon)
     if (path.startsWith('/api/queue') || path.startsWith('/api/result')) {
       try {
@@ -314,7 +521,16 @@ export default {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const stack = e instanceof Error ? e.stack : undefined;
-        safeLog.error('[Queue] Unhandled error:', { message: msg, stack });
+        const apiKey = request.headers.get('X-API-Key') || request.headers.get('x-api-key') || 'missing';
+        safeLog.error('[Queue] Unhandled error:', {
+          message: msg,
+          stack,
+          path,
+          method: request.method,
+          hasXApiKey: request.headers.has('X-API-Key'),
+          hasLowercaseApiKey: request.headers.has('x-api-key'),
+          apiKeyPrefix: apiKey !== 'missing' ? apiKey.substring(0, 8) : 'missing',
+        });
         return new Response(JSON.stringify({ error: 'Internal error' }), {
           status: 500, headers: { 'Content-Type': 'application/json' },
         });
@@ -341,11 +557,27 @@ export default {
       return handleDaemonAPI(request, env, path);
     }
 
+    // AI Usage API endpoints (for FUGUE agent usage monitoring)
+    if (path.startsWith('/api/usage')) {
+      return handleUsageAPI(request, env, path);
+    }
+
+    // Goal Planner API endpoints (FUGUE Evolution Phase 0.5)
+    if (path.startsWith('/api/goals')) {
+      return handleGoalPlannerAPI(request, env, path);
+    }
+
     // Limitless API endpoints (for Pendant voice recording sync)
     if (path.startsWith('/api/limitless')) {
       // Webhook endpoint for iOS Shortcuts
       if (path === '/api/limitless/webhook-sync' && request.method === 'POST') {
         return handleLimitlessWebhook(request, env);
+      }
+      // Phase 1: Highlight trigger endpoint (iOS Shortcut timestamp mark)
+      // Accept both GET and POST (iOS Shortcut compatibility)
+      if (path === '/api/limitless/highlight-trigger' && (request.method === 'GET' || request.method === 'POST')) {
+        const { handleHighlightTrigger } = await import('./handlers/limitless-highlight');
+        return handleHighlightTrigger(request, env);
       }
       // Other Limitless API endpoints
       return handleLimitlessAPI(request, env, path);
@@ -399,13 +631,14 @@ export default {
       const allowedOrigins = [
         'https://orchestrator-hub.masa-stage1.workers.dev',
         'https://cockpit-pwa.vercel.app',
+        'https://fugue-system-ui.vercel.app',
         'http://localhost:3000',
         'http://localhost:8787',
       ];
       const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
       const corsHeaders = {
         'Access-Control-Allow-Origin': allowOrigin,
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Access-Control-Allow-Credentials': 'true',
       };
@@ -431,6 +664,97 @@ export default {
         newResponse.headers.set(key, value);
       });
       return newResponse;
+    }
+
+    // Notification System API (SystemEvents DO) - for device-independent notifications
+    if (path.startsWith('/api/notifications')) {
+      if (!env.SYSTEM_EVENTS) {
+        return new Response(JSON.stringify({ error: 'Notification system not available' }), {
+          status: 503, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      // CORS support for PWA
+      const origin = request.headers.get('Origin') || '';
+      const allowedOrigins = [
+        'https://orchestrator-hub.masa-stage1.workers.dev',
+        'https://cockpit-pwa.vercel.app',
+        'https://fugue-system-ui.vercel.app',
+        'http://localhost:3000',
+        'http://localhost:8787',
+      ];
+      const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
+      const corsHeaders = {
+        'Access-Control-Allow-Origin': allowOrigin,
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Device-Id, X-API-Key',
+        'Access-Control-Allow-Credentials': 'true',
+      };
+
+      if (request.method === 'OPTIONS') {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+
+      // Authentication: Cloudflare Access or API Key
+      const accessResult = await authenticateWithAccess(request, env);
+      const apiKeyHeader = request.headers.get('X-API-Key');
+      const tokenParam = url.searchParams.get('token');
+      const isApiKeyAuth = env.QUEUE_API_KEY && (apiKeyHeader === env.QUEUE_API_KEY || tokenParam === env.QUEUE_API_KEY);
+
+      if (!accessResult.verified && !isApiKeyAuth) {
+        safeLog.log('[Notifications API] Auth failed', {
+          accessVerified: accessResult.verified,
+          hasApiKey: !!apiKeyHeader,
+          hasToken: !!tokenParam,
+        });
+        return new Response(JSON.stringify({
+          error: 'Unauthorized',
+          message: 'Cloudflare Access or API key required',
+        }), {
+          status: 401,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const doId = env.SYSTEM_EVENTS.idFromName('notifications');
+      const doStub = env.SYSTEM_EVENTS.get(doId);
+
+      // Map API paths to DO endpoints
+      const subPath = path.replace('/api/notifications', '') || '/state';
+      const response = await doStub.fetch(new Request(`http://do${subPath}`, request));
+
+      // Add CORS headers
+      const newResponse = new Response(response.body, response);
+      Object.entries(corsHeaders).forEach(([key, value]) => {
+        newResponse.headers.set(key, value);
+      });
+      return newResponse;
+    }
+
+    // WebSocket upgrade for Notifications (SystemEvents DO)
+    if (path === '/api/notifications/ws' && request.headers.get('Upgrade') === 'websocket') {
+      if (!env.SYSTEM_EVENTS) {
+        return new Response('Notification WebSocket not available', { status: 503 });
+      }
+
+      // Authentication: Cloudflare Access or API Key (via query param for WebSocket)
+      const accessResult = await authenticateWithAccess(request, env);
+      const tokenParam = url.searchParams.get('token');
+      const isApiKeyAuth = env.QUEUE_API_KEY && tokenParam === env.QUEUE_API_KEY;
+
+      if (!accessResult.verified && !isApiKeyAuth) {
+        safeLog.log('[Notifications WS] Auth failed', {
+          accessVerified: accessResult.verified,
+          hasToken: !!tokenParam,
+        });
+        return new Response('Unauthorized: Cloudflare Access or API key required', { status: 401 });
+      }
+
+      const deviceId = url.searchParams.get('deviceId') || `device-${Date.now()}`;
+      const doId = env.SYSTEM_EVENTS.idFromName('notifications');
+      const doStub = env.SYSTEM_EVENTS.get(doId);
+
+      return doStub.fetch(new Request(`http://do/ws?deviceId=${deviceId}`, request));
     }
 
     // WebSocket upgrade for Cockpit (upgrade to DO)
@@ -521,4 +845,9 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     return handleScheduled(controller, env, ctx);
   },
+
+  // Queue consumer (requires paid plan - Cloudflare Queues)
+  // async queue(batch: MessageBatch, env: Env, ctx: ExecutionContext): Promise<void> {
+  //   return handlePushQueueBatch(batch, env);
+  // },
 };
