@@ -1,0 +1,138 @@
+{
+  "$schema": "./web-receipt-sources.schema.json",
+  "sources": [
+    {
+      "id": "stripe",
+      "name": "Stripe",
+      "description": "Stripe invoices and receipts",
+      "enabled": true,
+      "url": "https://dashboard.stripe.com/invoices",
+      "auth": {
+        "type": "email_password",
+        "credentials": {
+          "emailEnvKey": "STRIPE_EMAIL",
+          "passwordEnvKey": "STRIPE_PASSWORD"
+        },
+        "selectors": {
+          "email": "input[type='email']",
+          "password": "input[type='password']",
+          "submit": "button[type='submit']"
+        }
+      },
+      "steps": [
+        {
+          "action": "goto",
+          "url": "https://dashboard.stripe.com/invoices"
+        },
+        {
+          "action": "wait",
+          "selector": ".invoice-row",
+          "timeout": 10000
+        },
+        {
+          "action": "click",
+          "selector": ".invoice-row:first-child .download-button"
+        },
+        {
+          "action": "waitForDownload",
+          "timeout": 30000
+        }
+      ],
+      "schedule": {
+        "frequency": "monthly",
+        "dayOfMonth": 1,
+        "hour": 2
+      },
+      "filters": {
+        "dateRange": "last_month",
+        "status": "paid"
+      }
+    },
+    {
+      "id": "cloudflare",
+      "name": "Cloudflare",
+      "description": "Cloudflare billing invoices",
+      "enabled": false,
+      "url": "https://dash.cloudflare.com/billing",
+      "auth": {
+        "type": "email_password",
+        "credentials": {
+          "emailEnvKey": "CLOUDFLARE_EMAIL",
+          "passwordEnvKey": "CLOUDFLARE_PASSWORD"
+        },
+        "selectors": {
+          "email": "input[name='email']",
+          "password": "input[name='password']",
+          "submit": "button[type='submit']"
+        }
+      },
+      "steps": [
+        {
+          "action": "goto",
+          "url": "https://dash.cloudflare.com/billing"
+        },
+        {
+          "action": "wait",
+          "selector": ".invoice-list",
+          "timeout": 10000
+        },
+        {
+          "action": "click",
+          "selector": ".invoice-list .invoice-row:first-child .download-link"
+        },
+        {
+          "action": "waitForDownload",
+          "timeout": 30000
+        }
+      ],
+      "schedule": {
+        "frequency": "monthly",
+        "dayOfMonth": 5,
+        "hour": 3
+      }
+    },
+    {
+      "id": "aws",
+      "name": "AWS",
+      "description": "AWS billing invoices",
+      "enabled": false,
+      "url": "https://console.aws.amazon.com/billing/home#/bills",
+      "auth": {
+        "type": "email_password",
+        "credentials": {
+          "emailEnvKey": "AWS_EMAIL",
+          "passwordEnvKey": "AWS_PASSWORD"
+        },
+        "selectors": {
+          "email": "input[name='email']",
+          "password": "input[name='password']",
+          "submit": "button#signin_button"
+        }
+      },
+      "steps": [
+        {
+          "action": "goto",
+          "url": "https://console.aws.amazon.com/billing/home#/bills"
+        },
+        {
+          "action": "wait",
+          "selector": ".bill-table",
+          "timeout": 15000
+        },
+        {
+          "action": "click",
+          "selector": ".bill-table tr:first-child .download-pdf"
+        },
+        {
+          "action": "waitForDownload",
+          "timeout": 30000
+        }
+      ],
+      "schedule": {
+        "frequency": "monthly",
+        "dayOfMonth": 3,
+        "hour": 4
+      }
+    }
+  ]
+}

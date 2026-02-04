@@ -39,6 +39,7 @@ import { handleGoalPlannerAPI } from './handlers/goal-planner';
 import { handlePushQueueBatch } from './handlers/push-queue-consumer';
 import { handleReceiptUpload } from './handlers/receipt-upload';
 import { handleReceiptSearch } from './handlers/receipt-search';
+import { handleReceiptSourcesAPI } from './handlers/receipt-sources-api';
 
 export type { Env };
 
@@ -552,6 +553,11 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
     // Receipt Search API endpoint (Electronic Bookkeeping Law compliant)
     if (path === '/api/receipts/search' && request.method === 'GET') {
       return handleReceiptSearch(request, env);
+    }
+
+    // Receipt Sources Management API (Web scraper configuration)
+    if (path.startsWith('/api/receipts/sources')) {
+      return handleReceiptSourcesAPI(request, env, path);
     }
 
     // Cron API endpoints (for scheduled task management)
