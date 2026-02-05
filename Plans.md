@@ -44,7 +44,7 @@ Local Agent (Mac)
 | 5. リアルタイム | ✅ DONE | `CockpitWebSocket` DO |
 | PWA Frontend | ✅ DONE | インライン HTML (`/cockpit`) |
 | **6. Cloudflare Access** | ✅ DONE | `cloudflare-access.ts`, Google SSO |
-| **7. Tunnel 設定** | ⏳ Optional | `local-agent/src/config.ts` (設定済み、cloudflared 未セットアップ) |
+| **7. Tunnel 設定** | ✅ DONE | `mac-mini-agent` Tunnel (nrt10/16), launchd 自動起動設定済み |
 
 ## 次のステップ: Local Agent 起動
 
@@ -69,7 +69,7 @@ npm run dev
 - [x] **Agentic Vision テスト** ✅ (2026-01-30) - Gemini 3 Flash Code Execution で UI 検証動作確認
 
 ### 未完了（オプション）
-- [ ] Cloudflare Tunnel 設定 - NAT 越え接続（外部ネットワークからアクセス時に必要）
+- [x] **Cloudflare Tunnel 設定** ✅ (2026-02-05) - `mac-mini-agent` Tunnel、東京リージョン接続、launchd 自動起動
 - [x] **Push 通知統合** ✅ (2026-02-05) - PushSettings.tsx + usePushNotifications.ts 統合完了
 - [x] **KV 使用量リマインダー** ✅ (2026-02-05) - 毎週月曜にDiscord通知、ダッシュボードリンク付き
 
