@@ -38,15 +38,15 @@ jobs:
           WORKERS_API_URL: ${{ secrets.WORKERS_API_URL }}
           WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
 
-          # Stripe credentials
+          # Stripe credentials (currently enabled)
           STRIPE_EMAIL: ${{ secrets.STRIPE_EMAIL }}
           STRIPE_PASSWORD: ${{ secrets.STRIPE_PASSWORD }}
 
-          # Cloudflare credentials
+          # Cloudflare credentials (optional - only if enabled in config)
           CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
           CLOUDFLARE_PASSWORD: ${{ secrets.CLOUDFLARE_PASSWORD }}
 
-          # AWS credentials
+          # AWS credentials (optional - only if enabled in config)
           AWS_EMAIL: ${{ secrets.AWS_EMAIL }}
           AWS_PASSWORD: ${{ secrets.AWS_PASSWORD }}
         run: node scripts/web-receipt-scraper.js --source ${{ github.event.inputs.source || 'all' }}
