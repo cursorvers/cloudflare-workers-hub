@@ -49,14 +49,14 @@ async function stripeRequest(endpoint, options = {}) {
  * List invoices from Stripe.
  */
 async function listInvoices(options = {}) {
-  const params = new URLSearchParams();
+  const params = [];
 
-  if (options.limit) params.set('limit', options.limit.toString());
-  if (options.status) params.set('status', options.status);
-  if (options.created_gte) params.set('created[gte]', options.created_gte.toString());
-  if (options.created_lte) params.set('created[lte]', options.created_lte.toString());
+  if (options.limit) params.push(`limit=${options.limit}`);
+  if (options.status) params.push(`status=${options.status}`);
+  if (options.created_gte) params.push(`created[gte]=${options.created_gte}`);
+  if (options.created_lte) params.push(`created[lte]=${options.created_lte}`);
 
-  const query = params.toString();
+  const query = params.join('&');
   const endpoint = `/invoices${query ? `?${query}` : ''}`;
 
   return stripeRequest(endpoint);
