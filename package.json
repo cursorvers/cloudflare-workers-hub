@@ -22,13 +22,13 @@
   "license": "MIT",
   "type": "module",
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20241205.0",
-    "@vitest/coverage-v8": "^2.1.9",
+    "@cloudflare/workers-types": "^4.20260203.0",
+    "@vitest/coverage-v8": "^4.0.18",
     "dotenv": "^17.2.3",
     "playwright": "^1.52.0",
     "typescript": "^5.3.3",
-    "vitest": "^2.1.8",
-    "wrangler": "^3.99.0"
+    "vitest": "^4.0.18",
+    "wrangler": "^4.62.0"
   },
   "dependencies": {
     "@sentry/cloudflare": "^10.36.0",
