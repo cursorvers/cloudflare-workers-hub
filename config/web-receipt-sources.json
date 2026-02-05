@@ -15,9 +15,8 @@
         },
         "selectors": {
           "email": "input[type='email']",
-          "continueButton": "text=Continue and confirm",
           "password": "input[type='password']",
-          "submit": "button[type='submit']"
+          "submit": "button[type='submit']:has-text('Sign in'), button[type='submit']"
         }
       },
       "steps": [

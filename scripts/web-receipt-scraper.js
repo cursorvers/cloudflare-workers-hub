@@ -165,10 +165,22 @@ async function performLogin(page, source, credentials) {
   // Submit
   await page.click(selectors.submit);
 
-  // Wait for navigation
-  await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 });
+  // Wait for navigation (use load instead of networkidle for Stripe compatibility)
+  try {
+    await page.waitForNavigation({ waitUntil: 'load', timeout: 30000 });
+  } catch (navError) {
+    // Navigation may not occur if already redirected, check if we're on dashboard
+    console.log(`[${source.id}] Navigation wait ended: ${navError.message}`);
+  }
 
-  console.log(`[${source.id}] Login successful`);
+  // Verify login success by checking URL or dashboard element
+  await page.waitForTimeout(3000);
+  const currentUrl = page.url();
+  if (currentUrl.includes('login') || currentUrl.includes('signin')) {
+    throw new Error('Login failed - still on login page');
+  }
+
+  console.log(`[${source.id}] Login successful, current URL: ${currentUrl}`);
 }
 
 /**
@@ -243,8 +255,14 @@ async function scrapeSource(browser, source) {
       throw new Error('Missing credentials');
     }
 
-    // Navigate to URL
-    await page.goto(source.url, { waitUntil: 'networkidle' });
+    // Navigate to URL (use domcontentloaded instead of networkidle for faster loading)
+    await page.goto(source.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    // Wait for login form to appear
+    if (source.auth?.selectors?.email) {
+      await page.waitForSelector(source.auth.selectors.email, { timeout: 15000 });
+      console.log(`[${source.id}] Login form detected`);
+    }
 
     // Perform login
     await performLogin(page, source, credentials);
