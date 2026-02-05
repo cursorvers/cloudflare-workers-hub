@@ -129,10 +129,26 @@ async function performLogin(page, source, credentials) {
   // Fill email
   await page.waitForSelector(selectors.email, { timeout: 10000 });
   await page.fill(selectors.email, credentials.email);
+  await page.waitForTimeout(1000);
 
-  // Fill password
-  await page.waitForSelector(selectors.password, { timeout: 10000 });
-  await page.fill(selectors.password, credentials.password);
+  // Fill password with retry for dynamic forms
+  let passwordFilled = false;
+  for (let attempt = 0; attempt < 3 && !passwordFilled; attempt++) {
+    try {
+      await page.waitForSelector(selectors.password, { timeout: 10000, state: 'attached' });
+      await page.waitForTimeout(1000); // Wait for form to stabilize
+      await page.fill(selectors.password, credentials.password, { timeout: 5000 });
+      passwordFilled = true;
+      console.log(`[${source.id}] Password filled successfully`);
+    } catch (error) {
+      console.log(`[${source.id}] Password fill attempt ${attempt + 1} failed: ${error.message}`);
+      if (attempt < 2) {
+        await page.waitForTimeout(2000); // Wait before retry
+      } else {
+        throw error;
+      }
+    }
+  }
 
   // Submit
   await page.click(selectors.submit);
