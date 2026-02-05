@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge';
 
 export interface Activity {
   id: string;
-  type: 'task' | 'git' | 'alert' | 'daemon' | 'system' | 'consensus' | 'heartbeat';
+  type: 'task' | 'git' | 'alert' | 'daemon' | 'system' | 'consensus' | 'heartbeat' | 'command';
   action: string;
   message: string;
   timestamp: number;
@@ -25,6 +25,7 @@ const typeIcons: Record<Activity['type'], string> = {
   system: '⚙️',
   consensus: '🗳️',
   heartbeat: '💓',
+  command: '⚡',
 };
 
 const typeColors: Record<Activity['type'], string> = {
@@ -35,6 +36,7 @@ const typeColors: Record<Activity['type'], string> = {
   system: 'bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300',
   consensus: 'bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300',
   heartbeat: 'bg-cyan-100 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-300',
+  command: 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300',
 };
 
 function formatTimeAgo(timestamp: number): string {

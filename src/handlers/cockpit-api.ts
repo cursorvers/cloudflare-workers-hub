@@ -92,6 +92,29 @@ const UnsubscribeSchema = z.object({
   endpoint: z.string().url(),
 });
 
+// Command Center Schema
+const CommandSchema = z.object({
+  command: z.string().min(1).max(2000),
+  context: z.object({
+    currentDir: z.string().optional(),
+    repoPath: z.string().optional(),
+  }).optional(),
+});
+
+// Dangerous operation patterns (require approval)
+const DANGEROUS_PATTERNS = [
+  { pattern: /\brm\s+-rf?\b/i, reason: 'Recursive file deletion' },
+  { pattern: /\bsudo\b/i, reason: 'Elevated privileges' },
+  { pattern: /\bchmod\s+777\b/i, reason: 'World-writable permissions' },
+  { pattern: /--force\b|--hard\b/i, reason: 'Force operation' },
+  { pattern: /\bgit\s+push\s+.*--force\b/i, reason: 'Force push' },
+  { pattern: /\bgit\s+reset\s+--hard\b/i, reason: 'Hard reset' },
+  { pattern: /\bdrop\s+(table|database)\b/i, reason: 'Database deletion' },
+  { pattern: /\btruncate\b/i, reason: 'Data truncation' },
+  { pattern: /\bdelete\s+from\b.*where\s*$/i, reason: 'Unbounded delete' },
+  { pattern: /\bproduction\b|\bprod\b/i, reason: 'Production environment' },
+];
+
 // =============================================================================
 // Helper Functions
 // =============================================================================
@@ -846,6 +869,329 @@ async function handleDeleteTask(request: Request, env: Env, taskId: string): Pro
   }
 }
 
+// =============================================================================
+// Command Center Handlers
+// =============================================================================
+
+/**
+ * Detect dangerous operations in command
+ */
+function detectDangerousOperations(command: string): { isDangerous: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+
+  for (const { pattern, reason } of DANGEROUS_PATTERNS) {
+    if (pattern.test(command)) {
+      reasons.push(reason);
+    }
+  }
+
+  return {
+    isDangerous: reasons.length > 0,
+    reasons,
+  };
+}
+
+/**
+ * Determine executor based on command intent
+ */
+function determineExecutor(command: string): 'codex' | 'glm' | 'claude-code' | 'subagent' {
+  const lowerCommand = command.toLowerCase();
+
+  // Code-related → Codex
+  if (/\b(implement|fix|refactor|test|debug|code|function|class)\b/.test(lowerCommand)) {
+    return 'codex';
+  }
+
+  // Git operations → claude-code (local agent)
+  if (/\b(git|commit|push|pull|merge|branch)\b/.test(lowerCommand)) {
+    return 'claude-code';
+  }
+
+  // Research/analysis → GLM (cost efficient)
+  if (/\b(analyze|summarize|explain|review|check|list|show)\b/.test(lowerCommand)) {
+    return 'glm';
+  }
+
+  // File operations → subagent
+  if (/\b(find|search|grep|read|write|create|delete)\b/.test(lowerCommand)) {
+    return 'subagent';
+  }
+
+  // Default to GLM for cost efficiency
+  return 'glm';
+}
+
+/**
+ * POST /api/cockpit/command
+ * Process natural language command and delegate to appropriate executor
+ */
+async function handleCommand(request: Request, env: Env): Promise<Response> {
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: 'Database not available' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  try {
+    const body = await request.json();
+    const validated = CommandSchema.parse(body);
+    const { command, context } = validated;
+
+    // Detect dangerous operations
+    const dangerCheck = detectDangerousOperations(command);
+
+    // Determine executor
+    const executor = determineExecutor(command);
+
+    // Generate task ID
+    const taskId = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+
+    // Determine initial status
+    const status = dangerCheck.isDangerous ? 'pending' : 'in_progress';
+
+    // Create task in D1
+    await env.DB.prepare(`
+      INSERT INTO cockpit_tasks (id, title, executor, payload, status, priority, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      taskId,
+      command.length > 100 ? command.substring(0, 97) + '...' : command,
+      executor,
+      JSON.stringify({
+        command,
+        context,
+        dangerCheck,
+        createdVia: 'command-center',
+      }),
+      status,
+      dangerCheck.isDangerous ? 'high' : 'medium',
+      now,
+      now
+    ).run();
+
+    safeLog.log('[CockpitAPI] Command task created', {
+      taskId,
+      executor,
+      isDangerous: dangerCheck.isDangerous,
+      status,
+    });
+
+    // Broadcast to WebSocket clients
+    if (env.COCKPIT_WS) {
+      try {
+        const doId = env.COCKPIT_WS.idFromName('cockpit');
+        const doStub = env.COCKPIT_WS.get(doId);
+
+        await doStub.fetch(new Request('http://do/broadcast-task', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: dangerCheck.isDangerous ? 'approval_required' : 'task_created',
+            task: {
+              id: taskId,
+              title: command.length > 100 ? command.substring(0, 97) + '...' : command,
+              executor,
+              status,
+              priority: dangerCheck.isDangerous ? 'high' : 'medium',
+              dangerReasons: dangerCheck.reasons,
+            },
+          }),
+        }));
+      } catch (error) {
+        safeLog.warn('[CockpitAPI] Failed to broadcast command task', {
+          taskId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    // If not dangerous, queue for execution (future: actual execution)
+    // For now, just return the task info
+
+    return new Response(JSON.stringify({
+      success: true,
+      taskId,
+      executor,
+      status,
+      requiresApproval: dangerCheck.isDangerous,
+      dangerReasons: dangerCheck.reasons,
+      message: dangerCheck.isDangerous
+        ? 'Command requires approval due to: ' + dangerCheck.reasons.join(', ')
+        : 'Command queued for execution',
+    }), {
+      status: 201,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return new Response(JSON.stringify({
+        error: 'Validation failed',
+        details: error.errors,
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    safeLog.error('[CockpitAPI] Failed to process command', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return new Response(JSON.stringify({ error: 'Internal error' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+}
+
+/**
+ * POST /api/cockpit/command/:id/approve
+ * Approve a pending command
+ */
+async function handleApproveCommand(request: Request, env: Env, taskId: string): Promise<Response> {
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: 'Database not available' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  try {
+    // Get task
+    const task = await env.DB.prepare(`
+      SELECT * FROM cockpit_tasks WHERE id = ? AND status = 'pending'
+    `).bind(taskId).first();
+
+    if (!task) {
+      return new Response(JSON.stringify({ error: 'Task not found or not pending approval' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Update status to in_progress
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(`
+      UPDATE cockpit_tasks SET status = 'in_progress', updated_at = ? WHERE id = ?
+    `).bind(now, taskId).run();
+
+    safeLog.log('[CockpitAPI] Command approved', { taskId });
+
+    // Broadcast approval
+    if (env.COCKPIT_WS) {
+      try {
+        const doId = env.COCKPIT_WS.idFromName('cockpit');
+        const doStub = env.COCKPIT_WS.get(doId);
+
+        await doStub.fetch(new Request('http://do/broadcast-task', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'command_approved',
+            taskId,
+          }),
+        }));
+      } catch (error) {
+        safeLog.warn('[CockpitAPI] Failed to broadcast command approval', {
+          taskId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      taskId,
+      message: 'Command approved and queued for execution',
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    safeLog.error('[CockpitAPI] Failed to approve command', {
+      taskId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return new Response(JSON.stringify({ error: 'Internal error' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+}
+
+/**
+ * POST /api/cockpit/command/:id/reject
+ * Reject a pending command
+ */
+async function handleRejectCommand(request: Request, env: Env, taskId: string): Promise<Response> {
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: 'Database not available' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  try {
+    // Get task
+    const task = await env.DB.prepare(`
+      SELECT * FROM cockpit_tasks WHERE id = ? AND status = 'pending'
+    `).bind(taskId).first();
+
+    if (!task) {
+      return new Response(JSON.stringify({ error: 'Task not found or not pending approval' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Delete the task (rejected commands are not kept)
+    await env.DB.prepare(`
+      DELETE FROM cockpit_tasks WHERE id = ?
+    `).bind(taskId).run();
+
+    safeLog.log('[CockpitAPI] Command rejected', { taskId });
+
+    // Broadcast rejection
+    if (env.COCKPIT_WS) {
+      try {
+        const doId = env.COCKPIT_WS.idFromName('cockpit');
+        const doStub = env.COCKPIT_WS.get(doId);
+
+        await doStub.fetch(new Request('http://do/broadcast-task', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'command_rejected',
+            taskId,
+          }),
+        }));
+      } catch (error) {
+        safeLog.warn('[CockpitAPI] Failed to broadcast command rejection', {
+          taskId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      taskId,
+      message: 'Command rejected',
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    safeLog.error('[CockpitAPI] Failed to reject command', {
+      taskId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return new Response(JSON.stringify({ error: 'Internal error' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+}
+
 /**
  * GET /api/cockpit/repos
  * List git repositories
@@ -1090,6 +1436,21 @@ export async function handleCockpitAPI(request: Request, env: Env, path: string)
   const ackMatch = path.match(/^\/api\/cockpit\/alerts\/ack\/([^/]+)$/);
   if (ackMatch && request.method === 'POST') {
     return handleAckAlert(request, env, ackMatch[1]);
+  }
+
+  // Command Center endpoints
+  if (path === '/api/cockpit/command' && request.method === 'POST') {
+    return handleCommand(request, env);
+  }
+
+  const commandApproveMatch = path.match(/^\/api\/cockpit\/command\/([^/]+)\/approve$/);
+  if (commandApproveMatch && request.method === 'POST') {
+    return handleApproveCommand(request, env, commandApproveMatch[1]);
+  }
+
+  const commandRejectMatch = path.match(/^\/api\/cockpit\/command\/([^/]+)\/reject$/);
+  if (commandRejectMatch && request.method === 'POST') {
+    return handleRejectCommand(request, env, commandRejectMatch[1]);
   }
 
   return new Response(JSON.stringify({ error: 'Not found' }), {

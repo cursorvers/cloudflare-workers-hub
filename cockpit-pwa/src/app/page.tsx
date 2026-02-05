@@ -15,6 +15,7 @@ import { PushSettings } from '@/components/PushSettings';
 import { SystemMetrics } from '@/components/SystemMetrics';
 import { ActivityFeed, type Activity } from '@/components/ActivityFeed';
 import { QuickActions } from '@/components/QuickActions';
+import { ApprovalQueue, type PendingCommand } from '@/components/ApprovalQueue';
 // TODO: Re-enable after Server Actions migration to API routes
 // import { D1KanbanBoard } from '@/components/D1KanbanBoard';
 import type { HeartbeatInfo, RealtimeHeartbeatMap } from '@/types/heartbeat';
@@ -79,6 +80,7 @@ export default function Dashboard() {
   const [realtimeHeartbeats, setRealtimeHeartbeats] = useState<RealtimeHeartbeatMap>(
     new Map<string, HeartbeatInfo>()
   );
+  const [pendingCommands, setPendingCommands] = useState<PendingCommand[]>([]);
 
   // Track if initial connection toast has been shown
   const hasShownInitialToast = useRef(false);
@@ -309,6 +311,42 @@ export default function Dashboard() {
         }
         break;
 
+      case 'command_pending':
+        if (message.payload) {
+          const pendingCmd = message.payload as PendingCommand;
+          setPendingCommands((prev) => {
+            if (prev.some((c) => c.id === pendingCmd.id)) return prev;
+            return [pendingCmd, ...prev];
+          });
+          if (pendingCmd.requiresApproval) {
+            toast.warning('承認が必要です', {
+              description: pendingCmd.command.slice(0, 50),
+              duration: 10000,
+            });
+          }
+          addLogEntry('system', `承認待ち: ${pendingCmd.command.slice(0, 30)}...`);
+          addActivity('command', '承認待ち', pendingCmd.command.slice(0, 50));
+        }
+        break;
+
+      case 'command_approved':
+        if (message.payload) {
+          const { taskId } = message.payload as { taskId: string };
+          setPendingCommands((prev) =>
+            prev.map((c) => (c.id === taskId ? { ...c, status: 'approved' as const } : c))
+          );
+          addLogEntry('response', `コマンド承認: ${taskId}`);
+        }
+        break;
+
+      case 'command_rejected':
+        if (message.payload) {
+          const { taskId } = message.payload as { taskId: string };
+          setPendingCommands((prev) => prev.filter((c) => c.id !== taskId));
+          addLogEntry('system', `コマンド拒否: ${taskId}`);
+        }
+        break;
+
       default:
         // Unknown message types are logged but not shown to user
         break;
@@ -500,6 +538,60 @@ export default function Dashboard() {
     reconnect();
   }, [reconnect]);
 
+  // Handle command approval
+  const handleApproveCommand = useCallback(async (commandId: string): Promise<boolean> => {
+    const headers: HeadersInit = {
+      'Content-Type': 'application/json',
+    };
+    if (API_KEY) {
+      headers['Authorization'] = `Bearer ${API_KEY}`;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/cockpit/command/${commandId}/approve`, {
+        method: 'POST',
+        headers,
+      });
+
+      if (res.ok) {
+        setPendingCommands((prev) =>
+          prev.map((c) => (c.id === commandId ? { ...c, status: 'approved' as const } : c))
+        );
+        addActivity('command', '承認', commandId);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }, [addActivity]);
+
+  // Handle command rejection
+  const handleRejectCommand = useCallback(async (commandId: string): Promise<boolean> => {
+    const headers: HeadersInit = {
+      'Content-Type': 'application/json',
+    };
+    if (API_KEY) {
+      headers['Authorization'] = `Bearer ${API_KEY}`;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/cockpit/command/${commandId}/reject`, {
+        method: 'POST',
+        headers,
+      });
+
+      if (res.ok) {
+        setPendingCommands((prev) => prev.filter((c) => c.id !== commandId));
+        addActivity('command', '拒否', commandId);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }, [addActivity]);
+
   const isConnected = displayState === 'connected';
 
   return (
@@ -525,6 +617,13 @@ export default function Dashboard() {
 
       {/* Main content */}
       <main className="flex-1 overflow-y-auto px-4 py-4 pb-32 space-y-4">
+        {/* Approval Queue (top priority - dangerous commands) */}
+        <ApprovalQueue
+          commands={pendingCommands}
+          onApprove={handleApproveCommand}
+          onReject={handleRejectCommand}
+        />
+
         {/* Quick Actions */}
         <QuickActions onAction={handleCommand} disabled={!isConnected} />
 
