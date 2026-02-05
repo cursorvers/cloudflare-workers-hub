@@ -18,7 +18,7 @@ const __dirname = path.dirname(__filename);
 // ============================================================================
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
-const WORKERS_API_URL = process.env.WORKERS_API_URL || 'https://orchestrator-hub.masa-stage1.workers.dev';
+const WORKERS_API_URL = process.env.WORKERS_API_URL || 'https://orchestrator-hub-production.masa-stage1.workers.dev';
 const WORKERS_API_KEY = process.env.WORKERS_API_KEY;
 const DOWNLOADS_DIR = path.join(__dirname, '../downloads');
 
