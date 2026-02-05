@@ -131,6 +131,18 @@ async function performLogin(page, source, credentials) {
   await page.fill(selectors.email, credentials.email);
   await page.waitForTimeout(1000);
 
+  // Click continue button if it exists (for two-step login flows)
+  if (selectors.continueButton) {
+    try {
+      await page.waitForSelector(selectors.continueButton, { timeout: 5000 });
+      await page.click(selectors.continueButton);
+      console.log(`[${source.id}] Clicked continue button`);
+      await page.waitForTimeout(2000); // Wait for password field to appear
+    } catch (error) {
+      console.log(`[${source.id}] No continue button found, proceeding to password`);
+    }
+  }
+
   // Fill password with retry for dynamic forms
   let passwordFilled = false;
   for (let attempt = 0; attempt < 3 && !passwordFilled; attempt++) {

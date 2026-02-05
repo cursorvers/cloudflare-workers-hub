@@ -15,6 +15,7 @@
         },
         "selectors": {
           "email": "input[type='email']",
+          "continueButton": "button:has-text('Continue and confirm')",
           "password": "input[type='password']",
           "submit": "button[type='submit']"
         }
