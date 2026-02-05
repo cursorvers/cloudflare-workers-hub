@@ -40,6 +40,7 @@ export function TaskList({ tasks, isLoading, onTaskTap }: TaskListProps) {
   // Auto-expand when new tasks arrive
   useEffect(() => {
     if (tasks.length > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Auto-expand UX pattern
       setIsExpanded(true);
     }
   }, [tasks.length]);

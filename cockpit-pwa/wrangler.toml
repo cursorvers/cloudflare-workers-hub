@@ -1,0 +1,11 @@
+name = "cockpit-pwa"
+compatibility_date = "2024-11-01"
+
+# Pages build output directory (required for wrangler pages)
+pages_build_output_dir = "out"
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "cockpit-db"
+database_id = "8f84fb6a-7ec8-48d9-8d45-6c78b5d325cc"

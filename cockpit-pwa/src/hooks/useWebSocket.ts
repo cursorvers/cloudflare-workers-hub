@@ -87,6 +87,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const retryDelayRef = useRef(INITIAL_RETRY_DELAY);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const mountedRef = useRef(true);
+  const connectRef = useRef<() => void>(() => {});
 
   // Cleanup function
   const cleanup = useCallback(() => {
@@ -161,7 +162,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               retryDelayRef.current * BACKOFF_MULTIPLIER,
               MAX_RETRY_DELAY
             );
-            connect();
+            connectRef.current();
           }, nextRetryDelay);
         } else if (retryCountRef.current >= maxRetries) {
           setState('disconnected');
@@ -213,6 +214,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       onError?.(errorDetail);
     }
   }, [url, onMessage, onOpen, onClose, onError, onReconnecting, onMaxRetriesReached, shouldReconnect, maxRetries, cleanup]);
+
+  // Keep connectRef in sync (must be in useEffect for React 19)
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   // Send function with validation - returns success status
   const send = useCallback((message: WebSocketMessage): boolean => {

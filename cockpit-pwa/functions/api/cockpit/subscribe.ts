@@ -15,7 +15,10 @@ export async function onRequestPost(context: {
   env: Env;
 }) {
   try {
-    const body = await context.request.json();
+    const body = await context.request.json() as {
+      subscription?: { endpoint?: string; keys?: { auth?: string; p256dh?: string } };
+      userId?: string;
+    };
 
     // Validate subscription format
     if (!body.subscription?.endpoint || !body.subscription?.keys) {

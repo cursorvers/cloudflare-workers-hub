@@ -15,7 +15,8 @@ import { PushSettings } from '@/components/PushSettings';
 import { SystemMetrics } from '@/components/SystemMetrics';
 import { ActivityFeed, type Activity } from '@/components/ActivityFeed';
 import { QuickActions } from '@/components/QuickActions';
-import { D1KanbanBoard } from '@/components/D1KanbanBoard';
+// TODO: Re-enable after Server Actions migration to API routes
+// import { D1KanbanBoard } from '@/components/D1KanbanBoard';
 import type { HeartbeatInfo, RealtimeHeartbeatMap } from '@/types/heartbeat';
 
 // WebSocket URL with API key fallback for authentication
@@ -566,7 +567,8 @@ export default function Dashboard() {
             </h2>
           </div>
           <div className="p-4">
-            <D1KanbanBoard apiKey={API_KEY} />
+            {/* TODO: Re-enable after Server Actions migration to API routes */}
+            <p className="text-sm text-zinc-500">Kanban Board is temporarily disabled (Server Actions → API migration pending)</p>
           </div>
         </section>
 

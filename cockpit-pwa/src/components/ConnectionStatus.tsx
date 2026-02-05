@@ -42,6 +42,7 @@ export function ConnectionStatus({ state, onReconnect, reconnectState }: Connect
     }
 
     // Immediately show 'connected' state (good news should be instant)
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Debounce pattern requires synchronous setState for immediate feedback
     if (state === 'connected') {
       setDisplayState(state);
       return;
