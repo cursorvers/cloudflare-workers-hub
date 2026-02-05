@@ -6,9 +6,13 @@
  * Uploads to Cloudflare Workers API for processing.
  */
 
-const { chromium } = require('playwright');
-const fs = require('fs').promises;
-const path = require('path');
+import { chromium } from 'playwright';
+import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // ============================================================================
 // Configuration
