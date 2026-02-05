@@ -9,11 +9,18 @@
  * - DO stores lease state (lease:{taskId}) with atomic operations
  * - Each DO instance serializes claim/release/renew operations
  *
+ * ## Mac Mini SPOF Mitigation
+ * - Daemon sends heartbeat every 120s via POST /heartbeat
+ * - alarm() checks heartbeat every 60s
+ * - If no heartbeat for >5min, logs CRITICAL warning
+ * - TODO (Phase 2): DO takes over task processing when daemon down
+ *
  * ## Internal API (via fetch)
  * - POST /claim-next - Atomically claim first available task
  * - POST /release - Release a lease
  * - POST /renew - Renew/extend a lease
  * - GET /leases - Get all active leases (monitoring)
+ * - POST /heartbeat - Record daemon heartbeat (SPOF mitigation)
  * - DELETE /task/:taskId - Delete lease for a task
  */
 
@@ -114,6 +121,11 @@ export class TaskCoordinator extends DurableObject<Env> {
       // GET /leases - Get all active leases
       if (path === '/leases' && request.method === 'GET') {
         return await this.handleGetLeases();
+      }
+
+      // POST /heartbeat - Record daemon heartbeat
+      if (path === '/heartbeat' && request.method === 'POST') {
+        return await this.handleHeartbeat();
       }
 
       // DELETE /task/:taskId - Delete lease for a task
@@ -359,14 +371,33 @@ export class TaskCoordinator extends DurableObject<Env> {
   }
 
   /**
-   * Periodic alarm to clean up expired leases
+   * Record daemon heartbeat (Mac Mini SPOF mitigation)
+   * Daemon calls this every 120s to signal it's alive.
+   */
+  private async handleHeartbeat(): Promise<Response> {
+    const now = Date.now();
+    await this.ctx.storage.put('daemon:heartbeat', now);
+    safeLog.log('[TaskCoordinator] Heartbeat recorded', { timestamp: now });
+
+    return new Response(JSON.stringify({
+      success: true,
+      timestamp: now,
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  /**
+   * Periodic alarm to clean up expired leases and monitor daemon health
    * Fires every 60 seconds
    */
   async alarm(): Promise<void> {
-    safeLog.log('[TaskCoordinator] Alarm triggered, cleaning up expired leases');
+    safeLog.log('[TaskCoordinator] Alarm triggered');
 
-    const allEntries = await this.ctx.storage.list<LeaseRecord>({ prefix: 'lease:' });
     const now = Date.now();
+
+    // 1. Clean up expired leases
+    const allEntries = await this.ctx.storage.list<LeaseRecord>({ prefix: 'lease:' });
     const expiredKeys: string[] = [];
 
     for (const [key, lease] of allEntries) {
@@ -381,8 +412,35 @@ export class TaskCoordinator extends DurableObject<Env> {
     if (expiredKeys.length > 0) {
       await this.ctx.storage.delete(expiredKeys);
       safeLog.log('[TaskCoordinator] Cleaned up expired leases via alarm', { count: expiredKeys.length });
+    }
+
+    // 2. Check daemon heartbeat (Mac Mini SPOF mitigation)
+    const lastHeartbeat = await this.ctx.storage.get<number>('daemon:heartbeat');
+
+    if (lastHeartbeat) {
+      const elapsedSec = Math.floor((now - lastHeartbeat) / 1000);
+      const HEARTBEAT_TIMEOUT_SEC = 5 * 60; // 5 minutes
+
+      if (elapsedSec > HEARTBEAT_TIMEOUT_SEC) {
+        // Daemon unresponsive for >5 minutes
+        console.warn('[TaskCoordinator] CRITICAL: Mac Mini daemon unresponsive', {
+          lastHeartbeat: new Date(lastHeartbeat).toISOString(),
+          elapsedSec,
+          threshold: HEARTBEAT_TIMEOUT_SEC,
+        });
+
+        // TODO (Phase 2): DO takes over task processing
+        // await this.claimAndProcessTasks();
+      } else if (elapsedSec > 180) {
+        // Warning: daemon hasn't checked in for >3 minutes (but <5 minutes)
+        safeLog.log('[TaskCoordinator] Warning: Daemon heartbeat delayed', {
+          elapsedSec,
+          lastHeartbeat: new Date(lastHeartbeat).toISOString(),
+        });
+      }
     } else {
-      safeLog.log('[TaskCoordinator] No expired leases to clean');
+      // No heartbeat recorded yet (daemon hasn't started or first run)
+      safeLog.log('[TaskCoordinator] No daemon heartbeat recorded yet');
     }
 
     // Schedule next alarm in 60 seconds

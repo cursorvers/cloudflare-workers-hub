@@ -21,12 +21,13 @@ import {
 } from './scheduled-digest';
 import { handlePhiVerificationCron } from './phi-verification-cron';
 import { handleLimitlessPollerCron } from './limitless-poller';
+import { handleGmailReceiptPolling } from './receipt-gmail-poller';
 
 // ============================================================================
 // Cron Expression Constants
 // ============================================================================
 
-const CRON_HOURLY_SYNC = '0 * * * *';
+const CRON_15MIN_MULTI = '*/15 * * * *'; // Every 15min (Gmail polling + hourly Limitless sync)
 const CRON_DAILY_ACTIONS = '0 21 * * *';   // 21:00 UTC = 06:00 JST
 const CRON_WEEKLY_DIGEST = '0 0 * * SUN';  // Sun 00:00 UTC = Sun 09:00 JST
 const CRON_PHI_VERIFICATION = '0 */6 * * *'; // Every 6 hours (Phase 6.2)
@@ -120,15 +121,29 @@ export async function handleScheduled(
   }
 
   switch (controller.cron) {
-    case CRON_HOURLY_SYNC:
-      // Run all tasks independently with separate locks
-      await Promise.all([
-        handleLimitlessSync(env),
-        handleDaemonHealthCheck(env, withLock),
-        handleLimitlessPollerCron(env).catch((error) => {
-          safeLog.error('[Scheduled] Limitless poller failed', { error: String(error) });
+    case CRON_15MIN_MULTI:
+      // Every 15 minutes: Gmail polling
+      // Every hour (0min): Limitless sync + Daemon health check
+      const tasks: Promise<void>[] = [
+        // Gmail polling runs every 15 minutes
+        withLock(env.CACHE!, 'gmail:polling_lock', 300, async () => {
+          await handleGmailReceiptPolling(env);
         }),
-      ]);
+      ];
+
+      // Limitless sync and daemon check only run at 0 minutes (hourly)
+      const minute = scheduledTime.getMinutes();
+      if (minute === 0) {
+        tasks.push(
+          handleLimitlessSync(env),
+          handleDaemonHealthCheck(env, withLock),
+          handleLimitlessPollerCron(env).catch((error) => {
+            safeLog.error('[Scheduled] Limitless poller failed', { error: String(error) });
+          })
+        );
+      }
+
+      await Promise.all(tasks);
       return;
 
     case CRON_DAILY_ACTIONS:

@@ -246,72 +246,65 @@ export function sanitizeObject<T>(obj: T, depth = 0): T {
 /**
  * 安全なログ出力ラッパー（構造化JSONログ対応）
  */
-export const safeLog = {
-  log: (message: string, context?: unknown): void => {
-    const contextObj = typeof context === 'object' && context !== null && !Array.isArray(context)
-      ? (context as Record<string, unknown>)
-      : {};
-    const structured = {
-      timestamp: new Date().toISOString(),
-      level: 'info',
-      message: sanitize(message),
-      ...sanitizeObject(contextObj),
-    };
-    console.log(JSON.stringify(structured));
-  },
+type LogLevel = 'info' | 'warn' | 'error' | 'debug';
 
-  info: (message: string, context?: unknown): void => {
-    const contextObj = typeof context === 'object' && context !== null && !Array.isArray(context)
-      ? (context as Record<string, unknown>)
-      : {};
-    const structured = {
-      timestamp: new Date().toISOString(),
-      level: 'info',
-      message: sanitize(message),
-      ...sanitizeObject(contextObj),
-    };
-    console.info(JSON.stringify(structured));
-  },
+function isLogLevel(value: unknown): value is LogLevel {
+  return value === 'info' || value === 'warn' || value === 'error' || value === 'debug';
+}
 
-  warn: (message: string, context?: unknown): void => {
-    const contextObj = typeof context === 'object' && context !== null && !Array.isArray(context)
-      ? (context as Record<string, unknown>)
-      : {};
-    const structured = {
-      timestamp: new Date().toISOString(),
-      level: 'warn',
-      message: sanitize(message),
-      ...sanitizeObject(contextObj),
-    };
-    console.warn(JSON.stringify(structured));
-  },
+function emitLog(level: LogLevel, message: string, context?: unknown): void {
+  const contextObj = typeof context === 'object' && context !== null && !Array.isArray(context)
+    ? (context as Record<string, unknown>)
+    : {};
+  const structured = {
+    timestamp: new Date().toISOString(),
+    level,
+    message: sanitize(message),
+    ...sanitizeObject(contextObj),
+  };
+  const payload = JSON.stringify(structured);
+  if (level === 'error') {
+    console.error(payload);
+  } else if (level === 'warn') {
+    console.warn(payload);
+  } else if (level === 'debug') {
+    console.debug(payload);
+  } else {
+    console.info(payload);
+  }
+}
 
-  error: (message: string, context?: unknown): void => {
-    const contextObj = typeof context === 'object' && context !== null && !Array.isArray(context)
-      ? (context as Record<string, unknown>)
-      : {};
-    const structured = {
-      timestamp: new Date().toISOString(),
-      level: 'error',
-      message: sanitize(message),
-      ...sanitizeObject(contextObj),
-    };
-    console.error(JSON.stringify(structured));
-  },
-
-  debug: (message: string, context?: unknown): void => {
-    const contextObj = typeof context === 'object' && context !== null && !Array.isArray(context)
-      ? (context as Record<string, unknown>)
-      : {};
-    const structured = {
-      timestamp: new Date().toISOString(),
-      level: 'debug',
-      message: sanitize(message),
-      ...sanitizeObject(contextObj),
-    };
-    console.debug(JSON.stringify(structured));
-  },
+type SafeLogCallable = {
+  (level: LogLevel, message: string, context?: unknown): void;
+  (env: unknown, level: LogLevel, message: string, context?: unknown): void;
+  log: (message: string, context?: unknown) => void;
+  info: (message: string, context?: unknown) => void;
+  warn: (message: string, context?: unknown) => void;
+  error: (message: string, context?: unknown) => void;
+  debug: (message: string, context?: unknown) => void;
 };
+
+export const safeLog: SafeLogCallable = ((
+  arg1: unknown,
+  arg2?: unknown,
+  arg3?: unknown,
+  arg4?: unknown
+) => {
+  if (typeof arg1 === 'string' && isLogLevel(arg1) && typeof arg2 === 'string') {
+    emitLog(arg1, arg2, arg3);
+    return;
+  }
+
+  if (isLogLevel(arg2) && typeof arg3 === 'string') {
+    emitLog(arg2, arg3, arg4);
+  }
+}) as SafeLogCallable;
+
+safeLog.log = (message: string, context?: unknown): void => emitLog('info', message, context);
+safeLog.info = (message: string, context?: unknown): void => emitLog('info', message, context);
+safeLog.warn = (message: string, context?: unknown): void => emitLog('warn', message, context);
+safeLog.error = (message: string, context?: unknown): void => emitLog('error', message, context);
+safeLog.debug = (message: string, context?: unknown): void => emitLog('debug', message, context);
 
 /**
  * リクエストの識別子を安全に抽出（ログ用）

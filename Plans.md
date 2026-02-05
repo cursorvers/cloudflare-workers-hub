@@ -7,7 +7,7 @@
 
 ## デプロイ情報
 - URL: https://orchestrator-hub.masa-stage1.workers.dev
-- Version ID: 78e92ffb-5e20-4cce-a4a1-b4bf7b95cd17 (2026-02-03)
+- Version ID: bf635275-c231-434a-ba7d-010a4c98c241 (2026-02-05)
 - Previous: 5a33bb54-aa97-48cf-a2da-4207b36b717c (2026-01-29)
 
 ---

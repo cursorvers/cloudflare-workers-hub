@@ -343,6 +343,7 @@ async function handleTriggerSource(env: Env, sourceId: string): Promise<Response
         'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28',
         'Content-Type': 'application/json',
+        'User-Agent': 'Cloudflare-Workers-Receipt-System/1.0',
       },
       body: JSON.stringify({
         ref: 'main',

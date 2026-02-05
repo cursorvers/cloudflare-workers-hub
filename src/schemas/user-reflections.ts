@@ -189,6 +189,43 @@ export type SendNotificationRequest = z.infer<typeof SendNotificationRequestSche
 // Validation Helpers
 // ============================================================================
 
+// ============================================================================
+// Metrics Models
+// ============================================================================
+
+/**
+ * Supported metrics periods
+ */
+export const LimitlessMetricsPeriodSchema = z.enum(['7d', '30d', '90d']);
+
+export type LimitlessMetricsPeriod = z.infer<typeof LimitlessMetricsPeriodSchema>;
+
+/**
+ * Metrics API response
+ */
+export const LimitlessMetricsResponseSchema = z.object({
+  reflection_rate: z.object({
+    total_highlights: z.number().int().nonnegative(),
+    with_reflection: z.number().int().nonnegative(),
+    percentage: z.number().min(0).max(100),
+  }),
+  phi_detection: z.object({
+    total_scanned: z.number().int().nonnegative(),
+    phi_detected: z.number().int().nonnegative(),
+    false_positive_rate: z.number().min(0).max(100),
+  }),
+  response_time: z.object({
+    avg_hours: z.number().nonnegative(),
+    within_48h_percentage: z.number().min(0).max(100),
+  }),
+  period: z.object({
+    start: z.string().datetime(),
+    end: z.string().datetime(),
+  }),
+});
+
+export type LimitlessMetricsResponse = z.infer<typeof LimitlessMetricsResponseSchema>;
+
 /**
  * Validate reflection text for PHI patterns
  * Returns true if text likely contains PHI

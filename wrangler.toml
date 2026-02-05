@@ -18,6 +18,10 @@ database_id = "4164f0fc-d6bb-4e78-86d1-2601d762d6de"
 binding = "CACHE"
 id = "378a478680ec41d280737181530f58a9"
 
+[[kv_namespaces]]
+binding = "USAGE_CACHE"
+id = "378a478680ec41d280737181530f58a9"
+
 # KV Namespace for AI classification cache (30-day TTL)
 [[kv_namespaces]]
 binding = "KV"
@@ -59,6 +63,10 @@ new_sqlite_classes = ["SystemEvents"]
 binding = "R2"
 bucket_name = "receipt-worm-storage"
 
+[[r2_buckets]]
+binding = "RECEIPTS"
+bucket_name = "receipt-worm-storage"
+
 # Vectorize for semantic search
 [[vectorize]]
 binding = "KNOWLEDGE_INDEX"
@@ -79,7 +87,7 @@ index_name = "obsidian-knowledge"
 
 # Cron Triggers (Free plan limit: 5, currently using 5)
 [triggers]
-crons = ["0 * * * *", "0 */6 * * *", "0 2 * * *", "0 21 * * *", "0 0 * * SUN"]  # Hourly sync, PHI verification (every 6h), Subscription cleanup (11AM JST), Daily actions (6AM JST), Weekly digest (Sun 9AM JST)
+crons = ["*/15 * * * *", "0 */6 * * *", "0 2 * * *", "0 21 * * *", "0 0 * * SUN"]  # Every 15min (Gmail polling + hourly Limitless sync), PHI verification (every 6h), Subscription cleanup (11AM JST), Daily actions (6AM JST), Weekly digest (Sun 9AM JST)
 
 # Environment variables
 [vars]
@@ -118,6 +126,10 @@ binding = "CACHE"
 id = "378a478680ec41d280737181530f58a9"
 
 [[env.production.kv_namespaces]]
+binding = "USAGE_CACHE"
+id = "378a478680ec41d280737181530f58a9"
+
+[[env.production.kv_namespaces]]
 binding = "KV"
 id = "378a478680ec41d280737181530f58a9"
 
@@ -138,6 +150,10 @@ crons = []
 # [[env.production.r2_buckets]]
 # binding = "OBSIDIAN_VAULT"
 # bucket_name = "obsidian-vault"
+
+[[env.production.r2_buckets]]
+binding = "RECEIPTS"
+bucket_name = "receipt-worm-storage"
 
 [[env.production.vectorize]]
 binding = "KNOWLEDGE_INDEX"

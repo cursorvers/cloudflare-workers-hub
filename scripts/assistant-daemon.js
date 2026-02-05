@@ -930,8 +930,33 @@ async function pollLoop() {
 }
 
 // ============================================
-// ハートビート（5分ごと）
+// ハートビート（TaskCoordinator DO への生存報告）
 // ============================================
+async function sendHeartbeat() {
+  try {
+    const url = `${CONFIG.WORKERS_URL}/api/queue/heartbeat`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': CONFIG.API_KEY,
+      },
+      body: JSON.stringify({
+        workerId: CONFIG.WORKER_ID,
+      }),
+    });
+
+    if (!response.ok) {
+      logger.warn('[Heartbeat] Failed to send', { status: response.status });
+    } else {
+      logger.log('[Heartbeat] Sent successfully');
+    }
+  } catch (error) {
+    logger.warn('[Heartbeat] Error', { error: error.message });
+  }
+}
+
 async function heartbeat() {
   const interval = 5 * 60 * 1000;
 
@@ -941,6 +966,9 @@ async function heartbeat() {
     if (!shouldStop) {
       const status = isProcessing ? `処理中: ${currentTaskId}` : '待機中';
       logger.log(`[Heartbeat] ${status}`);
+
+      // Send heartbeat to TaskCoordinator DO (Mac Mini SPOF mitigation)
+      await sendHeartbeat();
     }
   }
 }

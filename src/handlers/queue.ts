@@ -166,6 +166,22 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     return renewViaKV(kv, taskId, body.workerId, extendDuration);
   }
 
+  // POST /api/queue/heartbeat - Record daemon heartbeat (Mac Mini SPOF mitigation)
+  if (path === '/api/queue/heartbeat' && request.method === 'POST') {
+    if (!coordinator) {
+      return new Response(JSON.stringify({
+        error: 'Durable Objects not available',
+        message: 'Heartbeat requires TaskCoordinator DO'
+      }), {
+        status: 503, headers: JSON_HEADERS,
+      });
+    }
+
+    const { status, data } = await coordinatorFetch(coordinator, '/heartbeat', 'POST', undefined, env);
+    safeLog.log('[Queue API] Heartbeat recorded');
+    return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
+  }
+
   // GET /api/queue/:taskId - Get specific task (KV only)
   const taskMatch = path.match(/^\/api\/queue\/([^/]+)$/);
   if (taskMatch && request.method === 'GET') {

@@ -22,6 +22,7 @@ export interface Env {
   AI: Ai;
   DB?: D1Database;
   CACHE?: KVNamespace;
+  USAGE_CACHE?: KVNamespace;
   KV?: KVNamespace; // AI classification cache
   TASK_COORDINATOR?: DurableObjectNamespace;
   COCKPIT_WS?: DurableObjectNamespace;

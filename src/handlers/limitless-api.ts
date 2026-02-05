@@ -60,6 +60,12 @@ export async function handleLimitlessAPI(
     return handleGetConfig(env);
   }
 
+  // Phase 5: Metrics API
+  if (path === '/api/limitless/metrics' && request.method === 'GET') {
+    const { handleLimitlessMetricsAPI } = await import('./limitless-metrics');
+    return handleLimitlessMetricsAPI(request, env);
+  }
+
   // Phase 5: Reflection API
   if (path.startsWith('/api/limitless/reflection') || path.startsWith('/api/limitless/pending-reviews')) {
     const { handleLimitlessReflectionAPI } = await import('./limitless-reflection');

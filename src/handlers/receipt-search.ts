@@ -269,7 +269,11 @@ export async function handleReceiptDetail(
 
   // Get R2 signed URL (5-minute expiry for security)
   const r2Key = receipt.r2_object_key as string;
-  const signedUrl = await env.R2.get(r2Key, {
+  const bucket = env.RECEIPTS ?? env.R2;
+  if (!bucket) {
+    return new Response('Receipt storage not configured', { status: 500 });
+  }
+  const signedUrl = await bucket.get(r2Key, {
     onlyIf: { etagMatches: receipt.file_hash as string },
   });
 
