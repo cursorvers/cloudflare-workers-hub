@@ -104,8 +104,6 @@ async function uploadToWorkers(filePath, metadata = {}) {
   formData.append('metadata', JSON.stringify(metadata));
 
   const uploadUrl = `${WORKERS_API_URL}/api/receipts/upload`;
-  console.log(`[stripe] Uploading to: ${uploadUrl}`);
-  console.log(`[stripe] API Key length: ${WORKERS_API_KEY?.length || 0}`);
 
   const response = await fetch(uploadUrl, {
     method: 'POST',
