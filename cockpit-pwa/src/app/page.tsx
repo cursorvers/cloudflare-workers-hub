@@ -16,8 +16,7 @@ import { SystemMetrics } from '@/components/SystemMetrics';
 import { ActivityFeed, type Activity } from '@/components/ActivityFeed';
 import { QuickActions } from '@/components/QuickActions';
 import { ApprovalQueue, type PendingCommand } from '@/components/ApprovalQueue';
-// TODO: Re-enable after Server Actions migration to API routes
-// import { D1KanbanBoard } from '@/components/D1KanbanBoard';
+import { D1KanbanBoard } from '@/components/D1KanbanBoard';
 import type { HeartbeatInfo, RealtimeHeartbeatMap } from '@/types/heartbeat';
 
 // WebSocket URL with API key fallback for authentication
@@ -347,6 +346,55 @@ export default function Dashboard() {
         }
         break;
 
+      case 'command_progress':
+        if (message.payload) {
+          const progress = message.payload as {
+            commandId: string;
+            executor: string;
+            progress: number;
+            logs?: string;
+            status: 'running' | 'paused';
+          };
+          addLogEntry('system', `実行中: ${progress.executor} (${progress.progress}%)`);
+          if (progress.logs) {
+            addLogEntry('response', progress.logs.slice(-200));
+          }
+          addActivity('command', '実行中', `${progress.executor}: ${progress.progress}%`);
+        }
+        break;
+
+      case 'command_completed':
+        if (message.payload) {
+          const result = message.payload as {
+            commandId: string;
+            executor: string;
+            success: boolean;
+            output?: string;
+            error?: string;
+            duration?: number;
+          };
+          if (result.success) {
+            toast.success(`${result.executor} 完了`, {
+              description: result.output?.slice(0, 100) || 'コマンド成功',
+              duration: 5000,
+            });
+            addLogEntry('response', `完了: ${result.executor}${result.duration ? ` (${result.duration}ms)` : ''}`);
+            if (result.output) {
+              addLogEntry('response', result.output.slice(0, 500));
+            }
+          } else {
+            toast.error(`${result.executor} 失敗`, {
+              description: result.error?.slice(0, 100) || 'コマンドエラー',
+              duration: 10000,
+            });
+            addLogEntry('error', `失敗: ${result.executor} - ${result.error || 'Unknown error'}`);
+          }
+          addActivity('command', result.success ? '完了' : '失敗', result.executor);
+          // Remove from pending if exists
+          setPendingCommands((prev) => prev.filter((c) => c.id !== result.commandId));
+        }
+        break;
+
       default:
         // Unknown message types are logged but not shown to user
         break;
@@ -658,16 +706,10 @@ export default function Dashboard() {
           }}
         />
 
-        {/* D1 Kanban Board */}
+        {/* D1 Kanban Board (Phase 5: API routes) */}
         <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-          <div className="px-4 py-2 border-b border-zinc-200 dark:border-zinc-800">
-            <h2 className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
-              D1 Kanban Board
-            </h2>
-          </div>
           <div className="p-4">
-            {/* TODO: Re-enable after Server Actions migration to API routes */}
-            <p className="text-sm text-zinc-500">Kanban Board is temporarily disabled (Server Actions → API migration pending)</p>
+            <D1KanbanBoard />
           </div>
         </section>
 

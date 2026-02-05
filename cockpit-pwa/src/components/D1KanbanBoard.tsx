@@ -4,17 +4,34 @@ import { useState, useEffect, useTransition, useCallback } from 'react';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { getTasks, updateTaskStatus, type ActionResult } from '@/actions/task-actions';
-import type { Task } from '@/db/schema';
 
 /**
  * D1-backed Kanban Board
  *
- * Implements Phase 2: Server Actions integration with D1 Repository
+ * Phase 5: Migrated from Server Actions to API routes
  * Uses shadcn/ui components (cockpit-pwa exception: system monitoring dashboard)
  */
 
+// Task type (matching D1 schema)
+interface Task {
+  id: number;
+  title: string;
+  description: string | null;
+  status: 'todo' | 'in_progress' | 'done' | 'blocked';
+  priority: 'low' | 'medium' | 'high' | 'urgent';
+  assignee: string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}
+
 type TaskStatus = 'todo' | 'in_progress' | 'done' | 'blocked';
+
+interface ApiResponse<T> {
+  success: boolean;
+  data?: T;
+  error?: string;
+  message?: string;
+}
 
 const statusConfig: Record<
   TaskStatus,
@@ -30,6 +47,23 @@ const statusConfig: Record<
   blocked: { label: 'Blocked', icon: '🚫', badgeVariant: 'outline' },
 };
 
+// API client functions
+const API_BASE = '/api/d1/tasks';
+
+async function fetchTasks(): Promise<ApiResponse<Task[]>> {
+  const response = await fetch(API_BASE);
+  return response.json();
+}
+
+async function updateTaskStatusApi(taskId: number, status: TaskStatus): Promise<ApiResponse<Task>> {
+  const response = await fetch(`${API_BASE}/${taskId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+  });
+  return response.json();
+}
+
 interface D1KanbanBoardProps {
   apiKey?: string;
 }
@@ -41,20 +75,20 @@ export function D1KanbanBoard({ apiKey }: D1KanbanBoardProps) {
   const [isPending, startTransition] = useTransition();
   const [retryCount, setRetryCount] = useState(0);
 
-  // Load tasks from D1 with retry logic
+  // Load tasks from D1 via API with retry logic
   const loadTasks = useCallback(async () => {
     try {
       setIsLoading(true);
       setError(null);
 
-      const result = await getTasks();
+      const result = await fetchTasks();
 
       if (!result.success) {
-        setError(result.error);
+        setError(result.error || 'Unknown error');
         return;
       }
 
-      setTasks(result.data);
+      setTasks(result.data || []);
       setRetryCount(0); // Reset retry count on success
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to load tasks';
@@ -78,27 +112,27 @@ export function D1KanbanBoard({ apiKey }: D1KanbanBoardProps) {
   // Helper: Check if error is transient
   const isTransientError = (err: unknown): boolean => {
     if (!(err instanceof Error)) return false;
-    const transientPatterns = ['timeout', 'network', 'SQLITE_BUSY'];
+    const transientPatterns = ['timeout', 'network', 'SQLITE_BUSY', 'fetch'];
     return transientPatterns.some((p) =>
       err.message.toLowerCase().includes(p.toLowerCase())
     );
   };
 
-  // Handle drag & drop status update
+  // Handle status change via API
   const handleStatusChange = async (taskId: number, newStatus: TaskStatus) => {
     startTransition(async () => {
       try {
-        const result = await updateTaskStatus(taskId, newStatus);
+        const result = await updateTaskStatusApi(taskId, newStatus);
 
         if (!result.success) {
-          setError(result.error);
+          setError(result.error || 'Failed to update task');
           return;
         }
 
         if (result.data) {
           // Optimistic update
           setTasks((prev) =>
-            prev.map((t) => (t.id === taskId ? result.data : t))
+            prev.map((t) => (t.id === taskId ? result.data! : t))
           );
         }
       } catch (err) {
