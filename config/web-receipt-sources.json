@@ -4,8 +4,8 @@
     {
       "id": "stripe",
       "name": "Stripe",
-      "description": "Stripe invoices and receipts",
-      "enabled": true,
+      "description": "Stripe invoices and receipts (USE API INSTEAD - see stripe-invoice-fetcher.js)",
+      "enabled": false,
       "url": "https://dashboard.stripe.com/invoices",
       "auth": {
         "type": "email_password",
