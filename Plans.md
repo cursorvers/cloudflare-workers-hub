@@ -70,8 +70,8 @@ npm run dev
 
 ### 未完了（オプション）
 - [ ] Cloudflare Tunnel 設定 - NAT 越え接続（外部ネットワークからアクセス時に必要）
-- [ ] Push 通知統合 - VAPID 設定済み、フロントエンド連携待ち
-- [ ] KV 使用量閾値通知 - 80%で Slack 通知（課金判断用）
+- [x] **Push 通知統合** ✅ (2026-02-05) - PushSettings.tsx + usePushNotifications.ts 統合完了
+- [x] **KV 使用量リマインダー** ✅ (2026-02-05) - 毎週月曜にDiscord通知、ダッシュボードリンク付き
 
 ---
 

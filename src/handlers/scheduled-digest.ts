@@ -243,7 +243,47 @@ export async function handleDailyActionCheck(
     // Limitless Phase 5: Send reflection notifications for pending highlights
     // Run independently to avoid blocking action item report
     await handleReflectionNotifications(env, withLock);
+
+    // KV Usage Reminder: Weekly check (Monday only)
+    const dayOfWeek = new Date().getDay();
+    if (dayOfWeek === 1) {
+      await sendKvUsageReminder(env);
+    }
   });
+}
+
+// ============================================================================
+// Handler: KV Usage Reminder (Weekly)
+// ============================================================================
+
+async function sendKvUsageReminder(env: Env): Promise<void> {
+  const dashboardUrl = 'https://dash.cloudflare.com/?to=/:account/workers/kv/namespaces';
+
+  const notification: Notification = {
+    type: 'info',
+    title: '📊 Weekly KV Usage Check',
+    message: [
+      '**Cloudflare KV 使用量を確認してください**',
+      '',
+      '🔗 [Cloudflare Dashboard](' + dashboardUrl + ')',
+      '',
+      '**Free プラン制限:**',
+      '- Read: 100,000/日',
+      '- Put: 1,000/日',
+      '',
+      '⚠️ **80%超過時はPaid Plan($5/月)移行を検討**',
+    ].join('\n'),
+    source: 'kv-monitor',
+  };
+
+  try {
+    await sendDiscordNotification(env, notification);
+    safeLog.info('[KvReminder] Weekly reminder sent');
+  } catch (error) {
+    safeLog.warn('[KvReminder] Failed to send reminder', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 // ============================================================================
