@@ -98,9 +98,9 @@ export async function handleReceiptUpload(
     const fileKey = `receipts/${source}/${timestamp}-${file.name}`;
 
     // Store file in R2 (if available)
-    if (env.RECEIPTS) {
+    if (env.R2) {
       const arrayBuffer = await file.arrayBuffer();
-      await env.RECEIPTS.put(fileKey, arrayBuffer, {
+      await env.R2.put(fileKey, arrayBuffer, {
         httpMetadata: {
           contentType: file.type || 'application/pdf',
         },

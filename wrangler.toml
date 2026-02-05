@@ -142,3 +142,8 @@ crons = []
 [[env.production.vectorize]]
 binding = "KNOWLEDGE_INDEX"
 index_name = "obsidian-knowledge"
+
+# R2 bucket for receipt WORM storage
+[[env.production.r2_buckets]]
+binding = "R2"
+bucket_name = "receipt-worm-storage"
