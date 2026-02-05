@@ -15,6 +15,7 @@
         },
         "selectors": {
           "email": "input[type='email']",
+          "usePasswordLink": "text=Use your password instead",
           "password": "input[type='password']",
           "submit": "button[type='submit']:has-text('Sign in'), button[type='submit']"
         }

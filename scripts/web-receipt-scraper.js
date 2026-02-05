@@ -143,6 +143,23 @@ async function performLogin(page, source, credentials) {
     }
   }
 
+  // Handle passkey-preferred accounts (Stripe): click "Use your password instead" link
+  if (selectors.usePasswordLink) {
+    try {
+      // First, trigger the email field to show authentication options
+      await page.press(selectors.email, 'Tab');
+      await page.waitForTimeout(2000);
+
+      // Try to click "Use your password instead" if passkey is preferred
+      await page.waitForSelector(selectors.usePasswordLink, { timeout: 5000 });
+      await page.click(selectors.usePasswordLink);
+      console.log(`[${source.id}] Clicked 'Use your password instead' link`);
+      await page.waitForTimeout(2000);
+    } catch (error) {
+      console.log(`[${source.id}] No 'Use your password instead' link found, proceeding directly`);
+    }
+  }
+
   // Fill password with retry for dynamic forms
   let passwordFilled = false;
   for (let attempt = 0; attempt < 3 && !passwordFilled; attempt++) {
