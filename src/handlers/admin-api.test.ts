@@ -74,7 +74,7 @@ describe('Admin API Handler', () => {
     const { checkRateLimit, createRateLimitResponse } = await import('../utils/rate-limiter');
     const { verifyAPIKey, hashAPIKey } = await import('../utils/api-auth');
 
-    vi.mocked(checkRateLimit).mockResolvedValue({ allowed: true });
+    vi.mocked(checkRateLimit).mockResolvedValue({ allowed: true, remaining: 100, resetAt: new Date() });
     vi.mocked(verifyAPIKey).mockImplementation((request: Request, envParam: Env, scope?: string) => {
       const apiKey = request.headers.get('X-API-Key');
       return apiKey === 'admin-key' && scope === 'admin';
@@ -96,7 +96,7 @@ describe('Admin API Handler', () => {
       const response = await handleAdminAPI(request, env, '/api/admin/apikey/mapping');
 
       expect(response.status).toBe(401);
-      const data = await response.json();
+      const data = await response.json() as { error: string };
       expect(data.error).toBe('Unauthorized');
     });
 
@@ -170,7 +170,7 @@ describe('Admin API Handler', () => {
 
     it('should reject when rate limit exceeded', async () => {
       const { checkRateLimit } = await import('../utils/rate-limiter');
-      vi.mocked(checkRateLimit).mockResolvedValueOnce({ allowed: false, retryAfter: 60 });
+      vi.mocked(checkRateLimit).mockResolvedValueOnce({ allowed: false, remaining: 0, resetAt: new Date(), retryAfter: 60 });
 
       const request = new Request('https://example.com/api/admin/apikey/mapping', {
         method: 'POST',
@@ -209,7 +209,7 @@ describe('Admin API Handler', () => {
       const response = await handleAdminAPI(request, env, '/api/admin/apikey/mapping');
 
       expect(response.status).toBe(201);
-      const data = await response.json();
+      const data = await response.json() as { success: boolean; userId: string; role: string; keyHash: string };
       expect(data.success).toBe(true);
       expect(data.userId).toBe('user123');
       expect(data.role).toBe('user');
@@ -250,7 +250,7 @@ describe('Admin API Handler', () => {
 
       await handleAdminAPI(request, env, '/api/admin/apikey/mapping');
 
-      expect(env.CACHE.put).toHaveBeenCalledWith(
+      expect(env.CACHE!.put).toHaveBeenCalledWith(
         expect.stringMatching(/^apikey:mapping:hashed_/),
         expect.stringContaining('user123')
       );
@@ -294,7 +294,7 @@ describe('Admin API Handler', () => {
       const response = await handleAdminAPI(request, env, '/api/admin/apikey/mapping');
 
       expect(response.status).toBe(200);
-      const data = await response.json();
+      const data = await response.json() as { success: boolean; keyHash: string };
       expect(data.success).toBe(true);
       expect(data.keyHash).toBeDefined();
     });
