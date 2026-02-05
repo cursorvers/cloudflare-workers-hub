@@ -69,6 +69,13 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: deploy --env production
 
+      - name: Set Worker Secrets
+        run: echo "$QUEUE_API_KEY" | npx wrangler secret put QUEUE_API_KEY --env production
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          QUEUE_API_KEY: ${{ secrets.QUEUE_API_KEY }}
+
       - name: Deployment Summary
         run: |
           echo "## Production Deployment" >> $GITHUB_STEP_SUMMARY
