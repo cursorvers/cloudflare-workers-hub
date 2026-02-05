@@ -25,29 +25,21 @@ function validateApiKey(request: Request, env: Env): boolean {
   const apiKey = request.headers.get('X-API-Key') || request.headers.get('x-api-key');
   const authHeader = request.headers.get('Authorization');
 
-  // Check X-API-Key header
-  if (apiKey) {
-    // Accept RECEIPTS_API_KEY or QUEUE_API_KEY (fallback)
-    if (env.RECEIPTS_API_KEY && apiKey === env.RECEIPTS_API_KEY) {
-      return true;
-    }
-    if (env.QUEUE_API_KEY && apiKey === env.QUEUE_API_KEY) {
-      return true;
-    }
+  // Get token from either header
+  const token = apiKey || (authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null);
+
+  if (!token) {
+    return false;
   }
 
-  // Check Bearer token in Authorization header
-  if (authHeader?.startsWith('Bearer ')) {
-    const token = authHeader.substring(7);
-    if (env.RECEIPTS_API_KEY && token === env.RECEIPTS_API_KEY) {
-      return true;
-    }
-    if (env.QUEUE_API_KEY && token === env.QUEUE_API_KEY) {
-      return true;
-    }
-  }
+  // Accept any of: RECEIPTS_API_KEY, QUEUE_API_KEY, WORKERS_API_KEY
+  const validKeys = [
+    env.RECEIPTS_API_KEY,
+    env.QUEUE_API_KEY,
+    env.WORKERS_API_KEY,
+  ].filter(Boolean);
 
-  return false;
+  return validKeys.includes(token);
 }
 
 // ============================================================================

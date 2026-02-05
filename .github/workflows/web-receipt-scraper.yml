@@ -39,7 +39,7 @@ jobs:
         env:
           STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
           WORKERS_API_URL: ${{ secrets.WORKERS_API_URL }}
-          QUEUE_API_KEY: ${{ secrets.QUEUE_API_KEY }}
+          WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
         run: node scripts/stripe-invoice-fetcher.js --range=last_90_days --limit=10
 
       # Use web scraper for other sources (Cloudflare, AWS, etc.)

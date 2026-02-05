@@ -57,6 +57,7 @@ export interface Env {
   ADMIN_API_KEY?: string;          // /api/admin endpoints (future)
   MONITORING_API_KEY?: string;     // /health, /metrics endpoints
   RECEIPTS_API_KEY?: string;       // /api/receipts endpoints
+  WORKERS_API_KEY?: string;        // Legacy API key (accepts all endpoints)
   // Limitless.ai Integration
   LIMITLESS_API_KEY?: string;      // Limitless.ai API key for Pendant sync
   LIMITLESS_USER_ID?: string;      // User ID for automatic sync

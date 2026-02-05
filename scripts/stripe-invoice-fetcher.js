@@ -19,7 +19,7 @@ const __dirname = path.dirname(__filename);
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const WORKERS_API_URL = process.env.WORKERS_API_URL || 'https://orchestrator-hub.masa-stage1.workers.dev';
-const QUEUE_API_KEY = process.env.QUEUE_API_KEY;
+const WORKERS_API_KEY = process.env.WORKERS_API_KEY;
 const DOWNLOADS_DIR = path.join(__dirname, '../downloads');
 
 // ============================================================================
@@ -90,8 +90,8 @@ async function downloadInvoicePdf(invoice) {
  * Upload file to Workers API.
  */
 async function uploadToWorkers(filePath, metadata = {}) {
-  if (!QUEUE_API_KEY) {
-    console.warn('[stripe] QUEUE_API_KEY not set, skipping upload');
+  if (!WORKERS_API_KEY) {
+    console.warn('[stripe] WORKERS_API_KEY not set, skipping upload');
     return null;
   }
 
@@ -106,7 +106,7 @@ async function uploadToWorkers(filePath, metadata = {}) {
   const response = await fetch(`${WORKERS_API_URL}/api/receipts/upload`, {
     method: 'POST',
     headers: {
-      'X-API-Key': QUEUE_API_KEY,
+      'X-API-Key': WORKERS_API_KEY,
     },
     body: formData,
   });
