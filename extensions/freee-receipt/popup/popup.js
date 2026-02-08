@@ -43,10 +43,17 @@ async function loadRecentUploads() {
   recentUploads.forEach((entry) => {
     const item = document.createElement("li");
     const date = new Date(entry.date).toLocaleString("ja-JP");
-    item.innerHTML = `
-      <div class="recent-name">${entry.fileName}</div>
-      <div class="recent-meta">${date} ・ ${entry.status}</div>
-    `;
+
+    const nameDiv = document.createElement("div");
+    nameDiv.className = "recent-name";
+    nameDiv.textContent = entry.fileName || "receipt.pdf";
+
+    const metaDiv = document.createElement("div");
+    metaDiv.className = "recent-meta";
+    metaDiv.textContent = `${date} ・ ${entry.status}`;
+
+    item.appendChild(nameDiv);
+    item.appendChild(metaDiv);
     recentList.appendChild(item);
   });
 }

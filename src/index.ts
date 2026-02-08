@@ -889,8 +889,15 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
       return handleReceiptSearch(request, env);
     }
 
-    // Receipt Sources API (web receipt scraper orchestration)
+    // Receipt Sources API (web receipt scraper orchestration) — admin only
     if (path.startsWith('/api/receipts/sources')) {
+      const { verifyAPIKey } = await import('./utils/api-auth');
+      if (!verifyAPIKey(request, env, 'admin')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
       return handleReceiptSourcesAPI(request, env, path);
     }
 
