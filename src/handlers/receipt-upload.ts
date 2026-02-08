@@ -232,9 +232,9 @@ export async function handleReceiptUpload(
     const fileHash = await calculateSha256(fileBuffer);
 
     const duplicate = await env.DB.prepare(
-      'SELECT id FROM receipts WHERE file_hash = ? LIMIT 1'
+      'SELECT id FROM receipts WHERE tenant_id = ? AND file_hash = ? LIMIT 1'
     )
-      .bind(fileHash)
+      .bind(tenantId, fileHash)
       .first<{ id: string }>();
 
     if (duplicate?.id) {

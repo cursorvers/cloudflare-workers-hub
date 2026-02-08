@@ -4,7 +4,7 @@
     {
       "id": "stripe",
       "name": "Stripe",
-      "description": "Stripe invoices and receipts (USE API INSTEAD - see stripe-invoice-fetcher.js)",
+      "description": "Stripe invoices (USE API: scripts/stripe-invoice-fetcher.js)",
       "enabled": false,
       "url": "https://dashboard.stripe.com/invoices",
       "auth": {
@@ -95,44 +95,41 @@
     {
       "id": "aws",
       "name": "AWS",
-      "description": "AWS billing invoices",
+      "description": "AWS billing (USE API: scripts/aws-invoice-fetcher.js — Cost Explorer API)",
       "enabled": false,
       "url": "https://console.aws.amazon.com/billing/home#/bills",
       "auth": {
-        "type": "email_password",
+        "type": "api",
         "credentials": {
-          "emailEnvKey": "AWS_EMAIL",
-          "passwordEnvKey": "AWS_PASSWORD"
-        },
-        "selectors": {
-          "email": "input[name='email']",
-          "password": "input[name='password']",
-          "submit": "button#signin_button"
+          "accessKeyEnvKey": "AWS_ACCESS_KEY_ID",
+          "secretKeyEnvKey": "AWS_SECRET_ACCESS_KEY"
         }
       },
-      "steps": [
-        {
-          "action": "goto",
-          "url": "https://console.aws.amazon.com/billing/home#/bills"
-        },
-        {
-          "action": "wait",
-          "selector": ".bill-table",
-          "timeout": 15000
-        },
-        {
-          "action": "click",
-          "selector": ".bill-table tr:first-child .download-pdf"
-        },
-        {
-          "action": "waitForDownload",
-          "timeout": 30000
-        }
-      ],
+      "steps": [],
       "schedule": {
         "frequency": "monthly",
         "dayOfMonth": 3,
         "hour": 4
+      }
+    },
+    {
+      "id": "gcp",
+      "name": "Google Cloud Platform",
+      "description": "GCP billing (USE API: scripts/gcp-invoice-fetcher.js — Cloud Billing API)",
+      "enabled": false,
+      "url": "https://console.cloud.google.com/billing",
+      "auth": {
+        "type": "service_account",
+        "credentials": {
+          "serviceAccountEnvKey": "GOOGLE_APPLICATION_CREDENTIALS",
+          "billingAccountEnvKey": "GCP_BILLING_ACCOUNT_ID"
+        }
+      },
+      "steps": [],
+      "schedule": {
+        "frequency": "monthly",
+        "dayOfMonth": 5,
+        "hour": 5
       }
     }
   ]

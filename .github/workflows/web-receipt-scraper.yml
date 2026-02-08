@@ -2,19 +2,19 @@ name: Web Receipt Scraper
 
 on:
   schedule:
-    # Run daily at 2:00 AM JST (17:00 UTC previous day)
-    - cron: '0 17 * * *'
+    # Run monthly on the 3rd at 2:00 AM JST (17:00 UTC previous day)
+    - cron: '0 17 3 * *'
   workflow_dispatch:
     inputs:
       source:
-        description: 'Source ID to scrape (e.g., stripe, cloudflare)'
+        description: 'Source to fetch (stripe, aws, gcp, all)'
         required: false
         default: 'all'
 
 jobs:
-  scrape-receipts:
+  fetch-invoices:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - name: Checkout code
@@ -29,50 +29,49 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Playwright browsers
-        if: github.event.inputs.source != 'stripe'
-        run: npx playwright install chromium
-
-      # Use Stripe API directly (avoids CAPTCHA issues)
-      - name: Fetch Stripe invoices via API
-        if: github.event.inputs.source == 'stripe' || github.event.inputs.source == 'all' || github.event.inputs.source == ''
+      # Stripe: API-based fetching (avoids CAPTCHA)
+      - name: Fetch Stripe invoices
+        if: >-
+          github.event.inputs.source == 'stripe' ||
+          github.event.inputs.source == 'all' ||
+          github.event.inputs.source == ''
         env:
           STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
           WORKERS_API_URL: ${{ secrets.WORKERS_API_URL }}
           WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
         run: node scripts/stripe-invoice-fetcher.js --range=last_90_days --limit=10
+        continue-on-error: true
 
-      # Use web scraper for other sources (Cloudflare, AWS, etc.)
-      - name: Run web receipt scraper (non-Stripe)
-        if: github.event.inputs.source != 'stripe'
+      # AWS: Cost Explorer API (requires IAM credentials)
+      - name: Fetch AWS invoices
+        if: >-
+          (github.event.inputs.source == 'aws' ||
+          github.event.inputs.source == 'all' ||
+          github.event.inputs.source == '') &&
+          env.AWS_ACCESS_KEY_ID != ''
         env:
-          # Workers API
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
           WORKERS_API_URL: ${{ secrets.WORKERS_API_URL }}
           WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
+        run: node scripts/aws-invoice-fetcher.js
+        continue-on-error: true
 
-          # Cloudflare credentials (optional - only if enabled in config)
-          CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
-          CLOUDFLARE_PASSWORD: ${{ secrets.CLOUDFLARE_PASSWORD }}
+      # GCP: Cloud Billing API (requires service account)
+      - name: Fetch GCP invoices
+        if: >-
+          (github.event.inputs.source == 'gcp' ||
+          github.event.inputs.source == 'all' ||
+          github.event.inputs.source == '') &&
+          env.GCP_BILLING_ACCOUNT_ID != ''
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON_PATH }}
+          GCP_BILLING_ACCOUNT_ID: ${{ secrets.GCP_BILLING_ACCOUNT_ID }}
+          WORKERS_API_URL: ${{ secrets.WORKERS_API_URL }}
+          WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
+        run: node scripts/gcp-invoice-fetcher.js
+        continue-on-error: true
 
-          # AWS credentials (optional - only if enabled in config)
-          AWS_EMAIL: ${{ secrets.AWS_EMAIL }}
-          AWS_PASSWORD: ${{ secrets.AWS_PASSWORD }}
-        run: |
-          # Skip stripe in web scraper since we use API
-          node scripts/web-receipt-scraper.js --source ${{ github.event.inputs.source || 'all' }} --skip-stripe
-
-      - name: Upload artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-screenshots
-          path: |
-            screenshots/
-            playwright-report/
-          retention-days: 7
-
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "Web receipt scraper failed. Check artifacts for details."
-          # TODO: Add Discord/Slack notification
+      - name: Summary
+        run: echo "Invoice fetching complete. Check individual step logs for results."
