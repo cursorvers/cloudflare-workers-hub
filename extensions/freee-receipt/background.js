@@ -1,7 +1,7 @@
 import { uploadReceipt, checkHealthDirect } from "./lib/api-client.js";
 import { calculateSHA256 } from "./lib/hash.js";
 
-const TARGET_HOSTS = new Set([
+const DEFAULT_TARGET_HOSTS = new Set([
   "dash.cloudflare.com",
   "vercel.com",
   "dashboard.heroku.com"
@@ -14,6 +14,40 @@ const STORAGE_KEYS = {
   recentUploads: "recentUploads",
   hashCache: "hashCache"
 };
+
+let genericModeEnabled = false;
+let customTargetHosts = new Set();
+
+/**
+ * Load settings from chrome.storage.
+ */
+async function loadSettings() {
+  const settings = await new Promise((resolve) => {
+    chrome.storage.local.get(
+      { genericMode: false, customBillingRules: [] },
+      (items) => resolve(items)
+    );
+  });
+
+  genericModeEnabled = settings.genericMode;
+
+  // Build custom host set from user-defined rules
+  customTargetHosts = new Set(
+    (settings.customBillingRules || [])
+      .filter((r) => r.host)
+      .map((r) => r.host)
+  );
+}
+
+// Load on startup
+loadSettings();
+
+// Reload when settings change
+chrome.storage.onChanged.addListener((changes) => {
+  if (changes.genericMode || changes.customBillingRules) {
+    loadSettings();
+  }
+});
 
 function storageGet(keys) {
   return new Promise((resolve) => {
@@ -39,7 +73,10 @@ function createNotification(title, message) {
 function isTargetUrl(url) {
   try {
     const parsed = new URL(url);
-    return TARGET_HOSTS.has(parsed.hostname);
+    if (DEFAULT_TARGET_HOSTS.has(parsed.hostname)) return true;
+    if (customTargetHosts.has(parsed.hostname)) return true;
+    if (genericModeEnabled) return true;
+    return false;
   } catch (error) {
     return false;
   }
@@ -71,7 +108,7 @@ function buildFileNameFromUrl(url) {
 
 async function updateRecentUploads(entry) {
   const { recentUploads = [] } = await storageGet(STORAGE_KEYS.recentUploads);
-  const updated = [entry, ...recentUploads].slice(0, 5);
+  const updated = [entry, ...recentUploads].slice(0, 10);
   await storageSet({ [STORAGE_KEYS.recentUploads]: updated });
 }
 
@@ -87,6 +124,33 @@ async function storeHash(hash) {
   }
   const updated = [hash, ...hashCache].slice(0, 50);
   await storageSet({ [STORAGE_KEYS.hashCache]: updated });
+}
+
+/**
+ * Validate that a URL is safe to fetch (HTTPS only, no internal/private).
+ * @param {string} url
+ * @returns {boolean}
+ */
+function isSafeUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+    // Block localhost and private IPs
+    const host = parsed.hostname;
+    if (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "0.0.0.0" ||
+      host.startsWith("10.") ||
+      host.startsWith("172.") ||
+      host.startsWith("192.168.")
+    ) {
+      return false;
+    }
+    return true;
+  } catch (error) {
+    return false;
+  }
 }
 
 /**
@@ -142,15 +206,56 @@ async function uploadFile(file, metadata) {
 
 /**
  * Fetch a PDF from URL using the user's session cookies, then upload.
+ * Validates URL safety and response Content-Type before upload.
  * @param {string} url
  * @param {object} metadata
  */
 async function uploadFromUrl(url, metadata) {
-  const response = await fetch(url, { credentials: "include" });
+  if (!isSafeUrl(url)) {
+    throw new Error(`安全でないURLです: ${url}`);
+  }
+
+  const response = await fetch(url, {
+    credentials: "include",
+    redirect: "manual"
+  });
+
+  // Block redirects to different hosts
+  if (response.type === "opaqueredirect") {
+    throw new Error("リダイレクト先が検証できないためスキップしました。");
+  }
+
   if (!response.ok) {
     throw new Error(`ダウンロードに失敗しました (${response.status})`);
   }
+
+  // Validate Content-Type
+  const contentType = (response.headers.get("Content-Type") || "").toLowerCase();
+  const allowedTypes = [
+    "application/pdf",
+    "application/octet-stream",
+    "binary/octet-stream"
+  ];
+  const isAllowedType = allowedTypes.some((t) => contentType.includes(t));
+  const urlLooksLikePdf = url.toLowerCase().includes(".pdf");
+
+  if (!isAllowedType && !urlLooksLikePdf) {
+    throw new Error(`PDF以外のコンテンツです (${contentType})`);
+  }
+
+  // Size check (10MB max)
+  const contentLength = parseInt(response.headers.get("Content-Length") || "0", 10);
+  if (contentLength > 10 * 1024 * 1024) {
+    throw new Error(`ファイルサイズが大きすぎます (${Math.round(contentLength / 1024 / 1024)}MB)`);
+  }
+
   const arrayBuffer = await response.arrayBuffer();
+
+  // Double-check actual size
+  if (arrayBuffer.byteLength > 10 * 1024 * 1024) {
+    throw new Error(`ファイルサイズが大きすぎます (${Math.round(arrayBuffer.byteLength / 1024 / 1024)}MB)`);
+  }
+
   const fileName = metadata.fileName || buildFileNameFromUrl(url);
   const file = new File([arrayBuffer], fileName, { type: "application/pdf" });
   return uploadFile(file, metadata);
@@ -180,6 +285,26 @@ async function handleDetectedLinks(message) {
   return { uploaded };
 }
 
+/**
+ * Inject content script into the active tab for generic mode scanning.
+ * @param {number} tabId
+ */
+async function injectAndScan(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["content-scripts/detector.js"]
+    });
+    // After injection, send scan message
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: "scanCurrentPage"
+    });
+    return response;
+  } catch (error) {
+    return { links: [], site: "Unknown", error: error.message };
+  }
+}
+
 // Message handler from content scripts and popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
@@ -196,12 +321,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
+      if (message.type === "noPdfFound") {
+        createNotification(
+          "PDFが見つかりません",
+          `${message.site} のページにPDFリンクが検出されませんでした。`
+        );
+        sendResponse({ ok: true });
+        return;
+      }
+
       if (message.type === "manualUpload") {
         const { file, metadata = {} } = message;
         const result = await uploadFile(file, {
           ...metadata,
           source: "manual"
         });
+        sendResponse({ ok: true, result });
+        return;
+      }
+
+      if (message.type === "scanTab") {
+        const result = await injectAndScan(message.tabId);
         sendResponse({ ok: true, result });
         return;
       }
@@ -216,7 +356,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-// Monitor downloads from billing domains
+// Monitor downloads from target domains
 function searchDownloadItem(id) {
   return new Promise((resolve) => {
     chrome.downloads.search({ id }, (items) => resolve(items?.[0]));

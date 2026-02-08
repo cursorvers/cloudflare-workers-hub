@@ -8,6 +8,12 @@ const apiTokenInput = document.getElementById("api-token");
 const saveButton = document.getElementById("save-button");
 const saveStatus = document.getElementById("save-status");
 const canaryWarning = document.getElementById("canary-warning");
+const genericModeCheckbox = document.getElementById("generic-mode");
+const customRulesList = document.getElementById("custom-rules-list");
+const addRuleButton = document.getElementById("add-rule-button");
+const newRuleSite = document.getElementById("new-rule-site");
+const newRuleHost = document.getElementById("new-rule-host");
+const newRulePattern = document.getElementById("new-rule-pattern");
 
 function setStatus(message, isError = false) {
   saveStatus.textContent = message;
@@ -36,28 +42,63 @@ function maybeShowCanaryWarning(apiUrl) {
   setCanaryWarning("");
 }
 
+function renderCustomRules(rules) {
+  customRulesList.innerHTML = "";
+
+  if (!rules.length) {
+    const empty = document.createElement("p");
+    empty.className = "hint muted";
+    empty.textContent = "カスタムサイトはまだ登録されていません。";
+    customRulesList.appendChild(empty);
+    return;
+  }
+
+  rules.forEach((rule, index) => {
+    const row = document.createElement("div");
+    row.className = "rule-row";
+
+    const info = document.createElement("span");
+    info.className = "rule-info";
+    info.textContent = `${rule.site} (${rule.host})`;
+
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "link-button danger";
+    removeBtn.textContent = "削除";
+    removeBtn.addEventListener("click", () => removeCustomRule(index));
+
+    row.appendChild(info);
+    row.appendChild(removeBtn);
+    customRulesList.appendChild(row);
+  });
+}
+
 async function loadSettings() {
-  const { apiUrl, apiToken } = await new Promise((resolve) => {
+  const settings = await new Promise((resolve) => {
     chrome.storage.local.get(
       {
         apiUrl: DEFAULT_API_URL,
-        apiToken: ""
+        apiToken: "",
+        genericMode: false,
+        customBillingRules: []
       },
       (items) => resolve(items)
     );
   });
 
-  apiUrlInput.value = apiUrl || DEFAULT_API_URL;
-  apiTokenInput.value = apiToken || "";
+  apiUrlInput.value = settings.apiUrl || DEFAULT_API_URL;
+  apiTokenInput.value = settings.apiToken || "";
+  genericModeCheckbox.checked = settings.genericMode;
   maybeShowCanaryWarning(apiUrlInput.value);
+  renderCustomRules(settings.customBillingRules);
 }
 
 async function saveSettings() {
   const apiUrl = apiUrlInput.value.trim() || DEFAULT_API_URL;
   const apiToken = apiTokenInput.value.trim();
+  const genericMode = genericModeCheckbox.checked;
 
   await new Promise((resolve) => {
-    chrome.storage.local.set({ apiUrl, apiToken }, () => resolve());
+    chrome.storage.local.set({ apiUrl, apiToken, genericMode }, () => resolve());
   });
 
   const health = await checkHealth();
@@ -68,8 +109,94 @@ async function saveSettings() {
   }
 }
 
+async function addCustomRule() {
+  const site = newRuleSite.value.trim();
+  const host = newRuleHost.value.trim();
+  const pattern = newRulePattern.value.trim() || "\\/billing(\\/|$)";
+
+  if (!site || !host) {
+    return;
+  }
+
+  // Validate pattern is valid regex
+  try {
+    new RegExp(pattern);
+  } catch (error) {
+    setStatus(`無効な正規表現: ${error.message}`, true);
+    return;
+  }
+
+  const { customBillingRules = [] } = await new Promise((resolve) => {
+    chrome.storage.local.get({ customBillingRules: [] }, (items) => resolve(items));
+  });
+
+  // Prevent duplicate hosts
+  if (customBillingRules.some((r) => r.host === host)) {
+    setStatus(`${host} は既に登録されています。`, true);
+    return;
+  }
+
+  const updatedRules = [
+    ...customBillingRules,
+    { site, host, patterns: [pattern] }
+  ];
+
+  await new Promise((resolve) => {
+    chrome.storage.local.set({ customBillingRules: updatedRules }, () => resolve());
+  });
+
+  newRuleSite.value = "";
+  newRuleHost.value = "";
+  newRulePattern.value = "";
+  renderCustomRules(updatedRules);
+  setStatus(`${site} を追加しました。`, false);
+}
+
+async function removeCustomRule(index) {
+  const { customBillingRules = [] } = await new Promise((resolve) => {
+    chrome.storage.local.get({ customBillingRules: [] }, (items) => resolve(items));
+  });
+
+  const removed = customBillingRules[index];
+  const updatedRules = customBillingRules.filter((_, i) => i !== index);
+
+  await new Promise((resolve) => {
+    chrome.storage.local.set({ customBillingRules: updatedRules }, () => resolve());
+  });
+
+  renderCustomRules(updatedRules);
+  if (removed) {
+    setStatus(`${removed.site} を削除しました。`, false);
+  }
+}
+
+// Generic mode toggle - save immediately
+genericModeCheckbox.addEventListener("change", async () => {
+  const genericMode = genericModeCheckbox.checked;
+  await new Promise((resolve) => {
+    chrome.storage.local.set({ genericMode }, () => resolve());
+  });
+
+  if (genericMode) {
+    // Request optional host permission for all HTTPS sites
+    chrome.permissions.request(
+      { origins: ["https://*/*"] },
+      (granted) => {
+        if (!granted) {
+          genericModeCheckbox.checked = false;
+          chrome.storage.local.set({ genericMode: false });
+          setStatus("権限が付与されませんでした。汎用モードを無効にしました。", true);
+        } else {
+          setStatus("汎用モードを有効にしました。", false);
+        }
+      }
+    );
+  } else {
+    setStatus("汎用モードを無効にしました。", false);
+  }
+});
+
 apiUrlInput.addEventListener("input", () => {
-  // Non-blocking UX hint only.
   maybeShowCanaryWarning(apiUrlInput.value);
 });
 
@@ -82,6 +209,17 @@ saveButton.addEventListener("click", async () => {
     setStatus(error.message, true);
   } finally {
     saveButton.disabled = false;
+  }
+});
+
+addRuleButton.addEventListener("click", async () => {
+  addRuleButton.disabled = true;
+  try {
+    await addCustomRule();
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    addRuleButton.disabled = false;
   }
 });
 

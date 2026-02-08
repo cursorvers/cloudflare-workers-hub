@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "SaaS領収書アップローダー",
-  "version": "1.0.0",
-  "description": "SaaSの請求書PDFを検出してアップロードします。",
+  "version": "1.1.0",
+  "description": "SaaSの請求書PDFを検出してアップロードします。汎用モードで任意のサイトに対応。",
   "permissions": [
     "storage",
     "downloads",
     "activeTab",
-    "notifications"
+    "notifications",
+    "scripting"
   ],
   "host_permissions": [
     "https://dash.cloudflare.com/*",
@@ -15,6 +16,9 @@
     "https://dashboard.heroku.com/*",
     "https://orchestrator-hub.masa-stage1.workers.dev/*",
     "https://orchestrator-hub-canary.masa-stage1.workers.dev/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
   ],
   "background": {
     "service_worker": "background.js",

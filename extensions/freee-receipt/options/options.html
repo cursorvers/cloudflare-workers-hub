@@ -26,6 +26,38 @@
       <p id="save-status" class="hint"></p>
     </section>
 
+    <section class="section">
+      <h2>汎用モード</h2>
+      <p class="hint">有効にすると、登録サイト以外でもPDFリンクを検出してアップロードできます。</p>
+      <label class="toggle-label">
+        <input id="generic-mode" type="checkbox" />
+        <span>汎用モードを有効にする</span>
+      </label>
+    </section>
+
+    <section class="section">
+      <h2>対応サイト</h2>
+      <p class="hint">デフォルト: Cloudflare, Vercel, Heroku。追加サイトを登録できます。</p>
+
+      <div id="custom-rules-list"></div>
+
+      <div class="add-rule-form">
+        <label class="field">
+          <span>サイト名</span>
+          <input id="new-rule-site" type="text" placeholder="例: AWS" />
+        </label>
+        <label class="field">
+          <span>ホスト名</span>
+          <input id="new-rule-host" type="text" placeholder="例: console.aws.amazon.com" />
+        </label>
+        <label class="field">
+          <span>パスパターン (正規表現)</span>
+          <input id="new-rule-pattern" type="text" placeholder="例: \/billing(\/|$)" />
+        </label>
+        <button id="add-rule-button" class="secondary">サイトを追加</button>
+      </div>
+    </section>
+
     <script type="module" src="options.js"></script>
   </body>
 </html>

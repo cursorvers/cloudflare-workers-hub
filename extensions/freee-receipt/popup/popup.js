@@ -7,6 +7,8 @@ const manualFile = document.getElementById("manual-file");
 const uploadButton = document.getElementById("upload-button");
 const uploadStatus = document.getElementById("upload-status");
 const optionsLink = document.getElementById("options-link");
+const scanButton = document.getElementById("scan-button");
+const scanStatus = document.getElementById("scan-status");
 
 function setStatus(ok, message) {
   statusDot.classList.toggle("ok", ok);
@@ -17,6 +19,11 @@ function setStatus(ok, message) {
 function setUploadStatus(message, isError = false) {
   uploadStatus.textContent = message;
   uploadStatus.classList.toggle("error", isError);
+}
+
+function setScanStatus(message, isError = false) {
+  scanStatus.textContent = message;
+  scanStatus.classList.toggle("error", isError);
 }
 
 function sendMessage(message) {
@@ -66,6 +73,68 @@ async function refreshStatus() {
     setStatus(false, result.message || "接続NG");
   }
 }
+
+async function scanCurrentPage() {
+  scanButton.disabled = true;
+  setScanStatus("スキャン中...", false);
+
+  try {
+    // Get the active tab
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.id) {
+      setScanStatus("タブが取得できません。", true);
+      return;
+    }
+
+    // Inject content script and scan
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ["content-scripts/detector.js"]
+      });
+    } catch (error) {
+      // Script may already be injected, continue
+    }
+
+    // Small delay to let the script initialize
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // Request scan results
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      type: "scanCurrentPage"
+    });
+
+    if (!response || !response.links || response.links.length === 0) {
+      setScanStatus("PDFリンクが見つかりませんでした。", true);
+      return;
+    }
+
+    setScanStatus(`${response.links.length}件のPDFを検出中...`, false);
+
+    // Send links to background for upload
+    const uploadResult = await sendMessage({
+      type: "detectedLinks",
+      site: response.site,
+      pageUrl: response.pageUrl,
+      links: response.links,
+      reason: "popup-scan"
+    });
+
+    if (uploadResult?.ok) {
+      const count = uploadResult.result?.uploaded || 0;
+      setScanStatus(`${count}件アップロードしました。`, false);
+      await loadRecentUploads();
+    } else {
+      setScanStatus(uploadResult?.error || "アップロードに失敗しました。", true);
+    }
+  } catch (error) {
+    setScanStatus(error.message || "スキャンに失敗しました。", true);
+  } finally {
+    scanButton.disabled = false;
+  }
+}
+
+scanButton.addEventListener("click", scanCurrentPage);
 
 uploadButton.addEventListener("click", async () => {
   const file = manualFile.files?.[0];
