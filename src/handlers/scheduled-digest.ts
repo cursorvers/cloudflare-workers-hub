@@ -277,7 +277,8 @@ async function sendKvUsageReminder(env: Env): Promise<void> {
   };
 
   try {
-    await sendDiscordNotification(env, notification);
+    if (!env.DISCORD_WEBHOOK_URL) return;
+    await sendDiscordNotification(env.DISCORD_WEBHOOK_URL, notification);
     safeLog.info('[KvReminder] Weekly reminder sent');
   } catch (error) {
     safeLog.warn('[KvReminder] Failed to send reminder', {

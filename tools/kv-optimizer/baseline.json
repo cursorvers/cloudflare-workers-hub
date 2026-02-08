@@ -1,0 +1,1153 @@
+{
+  "generatedAt": "2026-02-08T03:49:27.417Z",
+  "root": "/Users/masayuki/Dev/cloudflare-workers-hub",
+  "summary": {
+    "totalHits": 108,
+    "puts": 45,
+    "gets": 29,
+    "deletes": 24,
+    "lists": 10,
+    "putsWithTTL": 35,
+    "putsWithoutTTL": 10,
+    "byBinding": [
+      [
+        "kv(var)",
+        57
+      ],
+      [
+        "CACHE",
+        47
+      ],
+      [
+        "USAGE_CACHE",
+        2
+      ],
+      [
+        "KV",
+        2
+      ]
+    ],
+    "byOp": [
+      [
+        "put",
+        45
+      ],
+      [
+        "get",
+        29
+      ],
+      [
+        "delete",
+        24
+      ],
+      [
+        "list",
+        10
+      ]
+    ],
+    "byPrefix": [
+      [
+        "daemon",
+        21
+      ],
+      [
+        "queue",
+        16
+      ],
+      [
+        "orchestrator",
+        5
+      ],
+      [
+        "classification",
+        2
+      ],
+      [
+        "${_cacheVersion}",
+        1
+      ]
+    ]
+  },
+  "hits": [
+    {
+      "file": "src/adapters/commhub.ts",
+      "line": 240,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await kv.put(queueKey, JSON.stringify({"
+    },
+    {
+      "file": "src/adapters/commhub.ts",
+      "line": 502,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": "orchestrator:result:${requestId}",
+      "keyPrefix": "orchestrator",
+      "hasTTL": true,
+      "text": "await this.kv.put(`orchestrator:result:${requestId}`, JSON.stringify(result), {"
+    },
+    {
+      "file": "src/adapters/commhub.ts",
+      "line": 507,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": "queue:task:${requestId}",
+      "keyPrefix": "queue",
+      "hasTTL": null,
+      "text": "await this.kv.delete(`queue:task:${requestId}`);"
+    },
+    {
+      "file": "src/adapters/commhub.ts",
+      "line": 510,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": "queue:lease:${requestId}",
+      "keyPrefix": "queue",
+      "hasTTL": null,
+      "text": "await this.kv.delete(`queue:lease:${requestId}`);"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.test.ts",
+      "line": 118,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:ever_registered",
+      "keyPrefix": "daemon",
+      "hasTTL": false,
+      "text": "await env.CACHE!.put('daemon:ever_registered', 'true');"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.test.ts",
+      "line": 134,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:ever_registered",
+      "keyPrefix": "daemon",
+      "hasTTL": false,
+      "text": "await env.CACHE!.put('daemon:ever_registered', 'true');"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.test.ts",
+      "line": 136,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:alert:last",
+      "keyPrefix": "daemon",
+      "hasTTL": false,
+      "text": "await env.CACHE!.put('daemon:alert:last', new Date(Date.now() - 10 * 60 * 1000).toISOString());"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.test.ts",
+      "line": 150,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:ever_registered",
+      "keyPrefix": "daemon",
+      "hasTTL": false,
+      "text": "await env.CACHE!.put('daemon:ever_registered', 'true');"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.test.ts",
+      "line": 152,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:alert:last",
+      "keyPrefix": "daemon",
+      "hasTTL": false,
+      "text": "await env.CACHE!.put('daemon:alert:last', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString());"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.test.ts",
+      "line": 169,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:ever_registered",
+      "keyPrefix": "daemon",
+      "hasTTL": false,
+      "text": "await env.CACHE!.put('daemon:ever_registered', 'true');"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.test.ts",
+      "line": 191,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:ever_registered",
+      "keyPrefix": "daemon",
+      "hasTTL": false,
+      "text": "await env.CACHE!.put('daemon:ever_registered', 'true');"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.test.ts",
+      "line": 216,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:ever_registered",
+      "keyPrefix": "daemon",
+      "hasTTL": false,
+      "text": "await env.CACHE!.put('daemon:ever_registered', 'true');"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.test.ts",
+      "line": 234,
+      "op": "delete",
+      "binding": "CACHE",
+      "key": "daemon:alert:last",
+      "keyPrefix": "daemon",
+      "hasTTL": null,
+      "text": "await env.CACHE!.delete('daemon:alert:last');"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.test.ts",
+      "line": 246,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:ever_registered",
+      "keyPrefix": "daemon",
+      "hasTTL": false,
+      "text": "await env.CACHE!.put('daemon:ever_registered', 'true');"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.test.ts",
+      "line": 274,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:ever_registered",
+      "keyPrefix": "daemon",
+      "hasTTL": false,
+      "text": "await env.CACHE!.put('daemon:ever_registered', 'true');"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.ts",
+      "line": 44,
+      "op": "get",
+      "binding": "CACHE",
+      "key": "daemon:ever_registered",
+      "keyPrefix": "daemon",
+      "hasTTL": null,
+      "text": "const everRegistered = await env.CACHE!.get('daemon:ever_registered');"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.ts",
+      "line": 53,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:ever_registered",
+      "keyPrefix": "daemon",
+      "hasTTL": true,
+      "text": "await env.CACHE!.put('daemon:ever_registered', 'true', { expirationTtl: 180 * 24 * 60 * 60 });"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.ts",
+      "line": 63,
+      "op": "delete",
+      "binding": "CACHE",
+      "key": "daemon:alert:consecutive",
+      "keyPrefix": "daemon",
+      "hasTTL": null,
+      "text": "await env.CACHE!.delete('daemon:alert:consecutive');"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.ts",
+      "line": 68,
+      "op": "get",
+      "binding": "CACHE",
+      "key": "daemon:alert:last",
+      "keyPrefix": "daemon",
+      "hasTTL": null,
+      "text": "const lastAlertTime = await env.CACHE!.get('daemon:alert:last');"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.ts",
+      "line": 81,
+      "op": "get",
+      "binding": "CACHE",
+      "key": "daemon:alert:consecutive",
+      "keyPrefix": "daemon",
+      "hasTTL": null,
+      "text": "const consecutiveRaw = await env.CACHE!.get('daemon:alert:consecutive');"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.ts",
+      "line": 83,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:alert:consecutive",
+      "keyPrefix": "daemon",
+      "hasTTL": true,
+      "text": "await env.CACHE!.put('daemon:alert:consecutive', String(consecutive), { expirationTtl: 86400 });"
+    },
+    {
+      "file": "src/handlers/daemon-monitor.ts",
+      "line": 110,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:alert:last",
+      "keyPrefix": "daemon",
+      "hasTTL": true,
+      "text": "await env.CACHE!.put('daemon:alert:last', new Date().toISOString(), {"
+    },
+    {
+      "file": "src/handlers/daemon.ts",
+      "line": 70,
+      "op": "put",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await env.CACHE.put(key, JSON.stringify(state), { expirationTtl: DAEMON_TTL_SEC });"
+    },
+    {
+      "file": "src/handlers/daemon.ts",
+      "line": 121,
+      "op": "put",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await env.CACHE.put(key, JSON.stringify(updated), { expirationTtl: DAEMON_TTL_SEC });"
+    },
+    {
+      "file": "src/handlers/daemon.ts",
+      "line": 206,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:active",
+      "keyPrefix": "daemon",
+      "hasTTL": true,
+      "text": "await env.CACHE.put('daemon:active', JSON.stringify(activeList), { expirationTtl: 3600 });"
+    },
+    {
+      "file": "src/handlers/daemon.ts",
+      "line": 218,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:active",
+      "keyPrefix": "daemon",
+      "hasTTL": true,
+      "text": "await env.CACHE.put('daemon:active', JSON.stringify(filtered), { expirationTtl: 3600 });"
+    },
+    {
+      "file": "src/handlers/daemon.ts",
+      "line": 231,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "daemon:active",
+      "keyPrefix": "daemon",
+      "hasTTL": true,
+      "text": "await env.CACHE.put('daemon:active', JSON.stringify(filtered), { expirationTtl: 3600 });"
+    },
+    {
+      "file": "src/handlers/generic-webhook.ts",
+      "line": 52,
+      "op": "put",
+      "binding": "CACHE",
+      "key": "${_cacheVersion}:event:${event.id}",
+      "keyPrefix": "${_cacheVersion}",
+      "hasTTL": true,
+      "text": "await env.CACHE.put(`${_cacheVersion}:event:${event.id}`, JSON.stringify(event), { expirationTtl: 3600 });"
+    },
+    {
+      "file": "src/handlers/goal-planner.ts",
+      "line": 329,
+      "op": "get",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const goalsData = await env.CACHE.get(GOALS_KEY);"
+    },
+    {
+      "file": "src/handlers/goal-planner.ts",
+      "line": 334,
+      "op": "get",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const plansData = await env.CACHE.get(PLANS_KEY);"
+    },
+    {
+      "file": "src/handlers/goal-planner.ts",
+      "line": 394,
+      "op": "get",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const goalsData = await env.CACHE.get(GOALS_KEY);"
+    },
+    {
+      "file": "src/handlers/goal-planner.ts",
+      "line": 397,
+      "op": "put",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await env.CACHE.put(GOALS_KEY, JSON.stringify(goals.slice(-100)), { expirationTtl: 30 * 24 * 60 * 60 });"
+    },
+    {
+      "file": "src/handlers/goal-planner.ts",
+      "line": 400,
+      "op": "get",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const plansData = await env.CACHE.get(PLANS_KEY);"
+    },
+    {
+      "file": "src/handlers/goal-planner.ts",
+      "line": 403,
+      "op": "put",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await env.CACHE.put(PLANS_KEY, JSON.stringify(plans.slice(-100)), { expirationTtl: 30 * 24 * 60 * 60 });"
+    },
+    {
+      "file": "src/handlers/goal-planner.ts",
+      "line": 444,
+      "op": "get",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const plansData = await env.CACHE.get(PLANS_KEY);"
+    },
+    {
+      "file": "src/handlers/goal-planner.ts",
+      "line": 466,
+      "op": "put",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await env.CACHE.put(PLANS_KEY, JSON.stringify(plans), { expirationTtl: 30 * 24 * 60 * 60 });"
+    },
+    {
+      "file": "src/handlers/limitless-metrics.ts",
+      "line": 47,
+      "op": "get",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const cached = await env.CACHE.get(cacheKey);"
+    },
+    {
+      "file": "src/handlers/limitless-metrics.ts",
+      "line": 66,
+      "op": "put",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await env.CACHE.put(cacheKey, JSON.stringify(data), {"
+    },
+    {
+      "file": "src/handlers/limitless-webhook.ts",
+      "line": 296,
+      "op": "get",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const lastSyncData = await env.CACHE.get(lastSyncKey);"
+    },
+    {
+      "file": "src/handlers/limitless-webhook.ts",
+      "line": 339,
+      "op": "put",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await env.CACHE.put(lastSyncKey, now, {"
+    },
+    {
+      "file": "src/handlers/limitless-webhook.ts",
+      "line": 345,
+      "op": "get",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const existingStats = await env.CACHE.get(statsKey, 'json');"
+    },
+    {
+      "file": "src/handlers/limitless-webhook.ts",
+      "line": 353,
+      "op": "put",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await env.CACHE.put(statsKey, JSON.stringify(stats), {"
+    },
+    {
+      "file": "src/handlers/migration-api.ts",
+      "line": 115,
+      "op": "list",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const newTasks = await kv.list({ prefix: 'queue:task:' });"
+    },
+    {
+      "file": "src/handlers/migration-api.ts",
+      "line": 116,
+      "op": "list",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const newLeases = await kv.list({ prefix: 'queue:lease:' });"
+    },
+    {
+      "file": "src/handlers/migration-api.ts",
+      "line": 122,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "await kv.delete(key.name);"
+    },
+    {
+      "file": "src/handlers/migration-api.ts",
+      "line": 128,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "await kv.delete(key.name);"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 295,
+      "op": "get",
+      "binding": "kv(var)",
+      "key": "queue:task:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": null,
+      "text": "const task = await kv.get(`queue:task:${taskId}`, 'json') as Record<string, unknown> | null;"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 298,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": "queue:task:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": true,
+      "text": "await kv.put(`queue:task:${taskId}`, JSON.stringify(updatedTask), { expirationTtl: 3600 });"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 333,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": "queue:task:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": null,
+      "text": "await kv.delete(`queue:task:${taskId}`);"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 334,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": "queue:lease:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": null,
+      "text": "await kv.delete(`queue:lease:${taskId}`);"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 344,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": "orchestrator:result:${taskId}",
+      "keyPrefix": "orchestrator",
+      "hasTTL": true,
+      "text": "await kv.put(`orchestrator:result:${taskId}`, JSON.stringify(validation.data), { expirationTtl: 3600 });"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 345,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": "queue:task:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": null,
+      "text": "await kv.delete(`queue:task:${taskId}`);"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 346,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": "queue:lease:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": null,
+      "text": "await kv.delete(`queue:lease:${taskId}`);"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 369,
+      "op": "get",
+      "binding": "kv(var)",
+      "key": "orchestrator:result:${taskId}",
+      "keyPrefix": "orchestrator",
+      "hasTTL": null,
+      "text": "const result = await kv.get(`orchestrator:result:${taskId}`, 'json');"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 400,
+      "op": "get",
+      "binding": "kv(var)",
+      "key": "queue:task:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": null,
+      "text": "const task = await kv.get(`queue:task:${taskId}`, 'json');"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 426,
+      "op": "list",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const activeLeasesResult = await kv.list({ prefix: 'queue:lease:' });"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 442,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": "queue:lease:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": true,
+      "text": "await kv.put(`queue:lease:${taskId}`, JSON.stringify(leaseData), { expirationTtl: leaseDuration });"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 450,
+      "op": "get",
+      "binding": "kv(var)",
+      "key": "queue:task:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": null,
+      "text": "const task = await kv.get(`queue:task:${taskId}`, 'json');"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 452,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": "queue:lease:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": null,
+      "text": "await kv.delete(`queue:lease:${taskId}`);"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 473,
+      "op": "get",
+      "binding": "kv(var)",
+      "key": "queue:lease:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": null,
+      "text": "const leaseData = await kv.get(`queue:lease:${taskId}`, 'json') as { workerId: string } | null;"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 486,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": "queue:lease:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": null,
+      "text": "await kv.delete(`queue:lease:${taskId}`);"
+    },
+    {
+      "file": "src/handlers/queue.ts",
+      "line": 511,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": "queue:lease:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": true,
+      "text": "await kv.put(`queue:lease:${taskId}`, JSON.stringify(renewedLease), { expirationTtl: extendDuration });"
+    },
+    {
+      "file": "src/handlers/receipt-gmail-poller.ts",
+      "line": 432,
+      "op": "put",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await env.CACHE.put("
+    },
+    {
+      "file": "src/handlers/receipt-gmail-poller.ts",
+      "line": 556,
+      "op": "get",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const existing = await env.CACHE.get(processedAttachmentKey(messageId, attachmentId));"
+    },
+    {
+      "file": "src/handlers/scheduled.ts",
+      "line": 50,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await kv.put(lockKey, lockValue, {"
+    },
+    {
+      "file": "src/handlers/scheduled.ts",
+      "line": 54,
+      "op": "get",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const verifyValue = await kv.get(lockKey);"
+    },
+    {
+      "file": "src/handlers/scheduled.ts",
+      "line": 72,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "await kv.delete(lockKey);"
+    },
+    {
+      "file": "src/handlers/usage-api.ts",
+      "line": 31,
+      "op": "get",
+      "binding": "USAGE_CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const cached = await env.USAGE_CACHE.get(USAGE_CACHE_KEY);"
+    },
+    {
+      "file": "src/handlers/usage-api.ts",
+      "line": 44,
+      "op": "put",
+      "binding": "USAGE_CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await env.USAGE_CACHE.put(USAGE_CACHE_KEY, JSON.stringify(data), {"
+    },
+    {
+      "file": "src/services/ai-receipt-classifier.ts",
+      "line": 240,
+      "op": "get",
+      "binding": "KV",
+      "key": "classification:v2:${cacheKey}",
+      "keyPrefix": "classification",
+      "hasTTL": null,
+      "text": "cached = await env.KV.get(`classification:v2:${cacheKey}`);"
+    },
+    {
+      "file": "src/services/ai-receipt-classifier.ts",
+      "line": 259,
+      "op": "put",
+      "binding": "KV",
+      "key": "classification:v2:${cacheKey}",
+      "keyPrefix": "classification",
+      "hasTTL": true,
+      "text": "await env.KV.put(`classification:v2:${cacheKey}`, JSON.stringify(result), {"
+    },
+    {
+      "file": "src/services/feedback-learning.ts",
+      "line": 82,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await kv.put(key, JSON.stringify(trimmed), {"
+    },
+    {
+      "file": "src/services/feedback-learning.ts",
+      "line": 201,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await kv.put(key, JSON.stringify(profile), {"
+    },
+    {
+      "file": "src/services/freee-master-cache.ts",
+      "line": 178,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await kv.put(key, JSON.stringify(value), {"
+    },
+    {
+      "file": "src/services/freee-master-cache.ts",
+      "line": 204,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "await kv.delete(key);"
+    },
+    {
+      "file": "src/services/receipt-dedup.ts",
+      "line": 69,
+      "op": "get",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const existing = await this.kv.get(key, 'json');"
+    },
+    {
+      "file": "src/services/receipt-dedup.ts",
+      "line": 111,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await this.kv.put(key, JSON.stringify(record), {"
+    },
+    {
+      "file": "src/services/receipt-dedup.ts",
+      "line": 128,
+      "op": "get",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "return this.kv.get(key, 'json');"
+    },
+    {
+      "file": "src/services/receipt-dedup.ts",
+      "line": 136,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "await this.kv.delete(key);"
+    },
+    {
+      "file": "src/services/reflection-notifier.ts",
+      "line": 386,
+      "op": "get",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const lastNotification = await env.CACHE.get(key);"
+    },
+    {
+      "file": "src/services/reflection-notifier.ts",
+      "line": 431,
+      "op": "put",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await env.CACHE.put(key, timestamp, {"
+    },
+    {
+      "file": "src/services/strategic-context.ts",
+      "line": 271,
+      "op": "get",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const cached = await env.CACHE.get(CONTEXT_CACHE_KEY);"
+    },
+    {
+      "file": "src/services/strategic-context.ts",
+      "line": 304,
+      "op": "put",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await env.CACHE.put(CONTEXT_CACHE_KEY, JSON.stringify(context), {"
+    },
+    {
+      "file": "src/services/strategic-context.ts",
+      "line": 508,
+      "op": "delete",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "await env.CACHE.delete(CONTEXT_CACHE_KEY);"
+    },
+    {
+      "file": "src/utils/cloudflare-access.ts",
+      "line": 83,
+      "op": "get",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const cached = await env.CACHE.get(cacheKey);"
+    },
+    {
+      "file": "src/utils/cloudflare-access.ts",
+      "line": 114,
+      "op": "put",
+      "binding": "CACHE",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await env.CACHE.put(cacheKey, certs, {"
+    },
+    {
+      "file": "src/utils/queue-kv-to-d1.ts",
+      "line": 84,
+      "op": "list",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const listed = await kv.list({ prefix: 'queue:task:', cursor: opts.cursor, limit: opts.limit });"
+    },
+    {
+      "file": "src/utils/queue-kv-to-d1.ts",
+      "line": 102,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "await kv.delete(name);"
+    },
+    {
+      "file": "src/utils/queue-kv-to-d1.ts",
+      "line": 103,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": "queue:lease:${taskId}",
+      "keyPrefix": "queue",
+      "hasTTL": null,
+      "text": "await kv.delete(`queue:lease:${taskId}`);"
+    },
+    {
+      "file": "src/utils/queue-kv-to-d1.ts",
+      "line": 112,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "await kv.delete(TASK_INDEX_KEY);"
+    },
+    {
+      "file": "src/utils/queue-kv-to-d1.ts",
+      "line": 149,
+      "op": "list",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const listed = await kv.list({ prefix: 'orchestrator:result:', cursor: opts.cursor, limit: opts.limit });"
+    },
+    {
+      "file": "src/utils/queue-kv-to-d1.ts",
+      "line": 163,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "await kv.delete(name);"
+    },
+    {
+      "file": "src/utils/queue-migration.ts",
+      "line": 58,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await kv.put(newKey, JSON.stringify(taskData), { expirationTtl: 3600 });"
+    },
+    {
+      "file": "src/utils/queue-migration.ts",
+      "line": 61,
+      "op": "get",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const verified = await kv.get(newKey);"
+    },
+    {
+      "file": "src/utils/queue-migration.ts",
+      "line": 67,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "await kv.delete(oldKey);"
+    },
+    {
+      "file": "src/utils/queue-migration.ts",
+      "line": 81,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": "orchestrator:pending",
+      "keyPrefix": "orchestrator",
+      "hasTTL": null,
+      "text": "await kv.delete('orchestrator:pending');"
+    },
+    {
+      "file": "src/utils/queue-migration.ts",
+      "line": 115,
+      "op": "list",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const oldLeases = await kv.list({ prefix: 'orchestrator:lease:' });"
+    },
+    {
+      "file": "src/utils/queue-migration.ts",
+      "line": 121,
+      "op": "get",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const leaseData = await kv.get(key.name, 'json');"
+    },
+    {
+      "file": "src/utils/queue-migration.ts",
+      "line": 136,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await kv.put(newKey, JSON.stringify(leaseData), { expirationTtl: ttl });"
+    },
+    {
+      "file": "src/utils/queue-migration.ts",
+      "line": 139,
+      "op": "get",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const verified = await kv.get(newKey);"
+    },
+    {
+      "file": "src/utils/queue-migration.ts",
+      "line": 145,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "await kv.delete(key.name);"
+    },
+    {
+      "file": "src/utils/queue-migration.ts",
+      "line": 174,
+      "op": "get",
+      "binding": "kv(var)",
+      "key": "orchestrator:pending",
+      "keyPrefix": "orchestrator",
+      "hasTTL": null,
+      "text": "const oldPending = await kv.get('orchestrator:pending');"
+    },
+    {
+      "file": "src/utils/queue-migration.ts",
+      "line": 190,
+      "op": "list",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const newTasks = await kv.list({ prefix: 'queue:task:' });"
+    },
+    {
+      "file": "src/utils/queue-migration.ts",
+      "line": 191,
+      "op": "list",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const oldLeases = await kv.list({ prefix: 'orchestrator:lease:' });"
+    },
+    {
+      "file": "src/utils/queue-migration.ts",
+      "line": 192,
+      "op": "list",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const newLeases = await kv.list({ prefix: 'queue:lease:' });"
+    },
+    {
+      "file": "src/utils/task-index.ts",
+      "line": 48,
+      "op": "list",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "const taskKeys = await kv.list({ prefix: 'queue:task:' });"
+    },
+    {
+      "file": "src/utils/task-index.ts",
+      "line": 52,
+      "op": "put",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": true,
+      "text": "await kv.put(TASK_INDEX_KEY, JSON.stringify({"
+    },
+    {
+      "file": "src/utils/task-index.ts",
+      "line": 101,
+      "op": "delete",
+      "binding": "kv(var)",
+      "key": null,
+      "keyPrefix": null,
+      "hasTTL": null,
+      "text": "await kv.delete(TASK_INDEX_KEY);"
+    }
+  ]
+}

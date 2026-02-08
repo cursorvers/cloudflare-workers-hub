@@ -2,6 +2,9 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    // Core test suite for this Workers project.
+    // (The repo also contains `openclaw/` which has its own vitest configs and long-running tests.)
+    include: ['src/**/*.test.ts', 'src/**/*.spec.ts'],
     globals: true,
     environment: 'node',
     coverage: {

@@ -10,8 +10,6 @@
  */
 
 import { z } from 'zod';
-import { homedir } from 'node:os';
-import { createSign } from 'node:crypto';
 
 // ============================================================================
 // Schemas
@@ -60,9 +58,6 @@ const ProjectInfoSchema = z.object({
 
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const GOOGLE_CLOUDRESOURCEMANAGER_API = 'https://cloudresourcemanager.googleapis.com/v1/projects';
-const DEFAULT_SLIDES_CRED_PATH = `${homedir()}/.config/gcloud/slides-credentials.json`;
-const DEFAULT_SA_KEY_PATH = `${homedir()}/.config/gcloud/slides-generator-key.json`;
-const DEFAULT_ADC_PATH = `${homedir()}/.config/gcloud/application_default_credentials.json`;
 
 /** Default scopes for Slides + Drive (sharing) + Calendar (read-only) + Gmail (read-only) */
 const DEFAULT_SCOPES = [
@@ -89,14 +84,28 @@ const DEFAULT_SCOPES = [
 export async function loadGoogleCredentials(
   credentialsPath?: string
 ): Promise<GoogleCredentials> {
+  // This helper is primarily for local/dev usage (file I/O). In Workers you should
+  // build credentials from env vars (authorized_user refresh token flow).
   const { readFile, access } = await import('node:fs/promises');
+  const googleCredentialsPath = (globalThis as any)?.process?.env?.GOOGLE_CREDENTIALS_PATH as string | undefined;
+
+  let defaults: string[] = [];
+  try {
+    const { homedir } = await import('node:os');
+    const home = homedir();
+    defaults = [
+      `${home}/.config/gcloud/slides-credentials.json`,
+      `${home}/.config/gcloud/slides-generator-key.json`,
+      `${home}/.config/gcloud/application_default_credentials.json`,
+    ];
+  } catch {
+    defaults = [];
+  }
 
   const candidates = [
     credentialsPath,
-    process.env.GOOGLE_CREDENTIALS_PATH,
-    DEFAULT_SLIDES_CRED_PATH,
-    DEFAULT_SA_KEY_PATH,
-    DEFAULT_ADC_PATH,
+    googleCredentialsPath,
+    ...defaults,
   ].filter((p): p is string => !!p);
 
   for (const filePath of candidates) {
@@ -226,9 +235,8 @@ async function getAccessTokenViaJWT(
   const payload = base64url(JSON.stringify(payloadData));
 
   const signatureInput = `${header}.${payload}`;
-  const sign = createSign('RSA-SHA256');
-  sign.update(signatureInput);
-  const signature = base64url(sign.sign(credentials.private_key));
+  const signatureBytes = await signRs256(credentials.private_key, signatureInput);
+  const signature = base64urlFromBytes(signatureBytes);
 
   const jwt = `${signatureInput}.${signature}`;
 
@@ -289,7 +297,40 @@ async function getAccessTokenViaRefresh(
 // ============================================================================
 
 /** Base64URL encode (no padding) */
-function base64url(input: string | Buffer): string {
-  const buf = typeof input === 'string' ? Buffer.from(input) : input;
-  return buf.toString('base64url');
+function base64url(input: string): string {
+  return base64urlFromBytes(new TextEncoder().encode(input));
+}
+
+function base64urlFromBytes(bytes: Uint8Array): string {
+  // Avoid Buffer. This works in Workers and Node.
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const base64 = btoa(binary);
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function pemToDerBytes(pem: string): Uint8Array {
+  const b64 = pem
+    .replace(/-----BEGIN [^-]+-----/g, '')
+    .replace(/-----END [^-]+-----/g, '')
+    .replace(/\s+/g, '');
+  const raw = atob(b64);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return bytes;
+}
+
+async function signRs256(privateKeyPem: string, data: string): Promise<Uint8Array> {
+  const keyData = pemToDerBytes(privateKeyPem);
+  const keyBuf = new ArrayBuffer(keyData.byteLength);
+  new Uint8Array(keyBuf).set(keyData);
+  const key = await crypto.subtle.importKey(
+    'pkcs8',
+    keyBuf,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(data));
+  return new Uint8Array(sig);
 }

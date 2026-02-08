@@ -13,8 +13,12 @@ import type { Env } from '../types';
 import { safeLog, maskUserId } from '../utils/log-sanitizer';
 import { authenticateWithAccess, mapAccessUserToInternal } from '../utils/cloudflare-access';
 import { getTenantContext } from '../utils/tenant-isolation';
-import { createFreeeClient } from '../services/freee-client';
+import { verifyAPIKey } from '../utils/api-auth';
+import { createFreeeClient, ApiError } from '../services/freee-client';
 import { createStateMachine } from '../services/workflow-state-machine';
+import { createDealFromReceipt } from '../services/freee-deal-service';
+import type { ReceiptInput } from '../services/freee-deal-service';
+import { isFreeeIntegrationEnabled } from '../utils/freee-integration';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
@@ -51,6 +55,35 @@ function jsonResponse(payload: Record<string, unknown>, status = 200): Response 
 
 function getReceiptBucket(env: Env): R2Bucket | null {
   return env.RECEIPTS ?? env.R2 ?? null;
+}
+
+async function hasFreeeAuthTokens(env: Env): Promise<boolean> {
+  // Prefer D1 (current). Fallback to KV (legacy) if present.
+  if (env.DB) {
+    try {
+      const row = await env.DB.prepare(
+        `SELECT encrypted_refresh_token
+         FROM external_oauth_tokens
+         WHERE provider = 'freee'
+         LIMIT 1`
+      ).first() as { encrypted_refresh_token?: string | null } | null;
+      if (row?.encrypted_refresh_token) return true;
+    } catch {
+      // ignore (fail-open to KV check below)
+    }
+  }
+
+  if (env.KV) {
+    try {
+      // kv-optimizer:ignore-next
+      const token = await env.KV.get('freee:refresh_token');
+      return Boolean(token);
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
 }
 
 function normalizeFileName(fileName: string, fallback: string): string {
@@ -104,17 +137,9 @@ async function authenticateReceiptUpload(
     }
   }
 
-  const apiKey = request.headers.get('X-API-Key');
-  if (apiKey && env.RECEIPTS_API_KEY && apiKey === env.RECEIPTS_API_KEY) {
-    return {
-      authenticated: true,
-      userId: 'system',
-      role: 'service',
-      tenantId: 'default',
-    };
-  }
-
-  if (apiKey && env.ASSISTANT_API_KEY && apiKey === env.ASSISTANT_API_KEY) {
+  // Support both `X-API-Key` and `Authorization: Bearer <key>` for compatibility
+  // with existing scripts/clients (including the Chrome extension).
+  if (verifyAPIKey(request, env, 'receipts')) {
     return {
       authenticated: true,
       userId: 'system',
@@ -132,6 +157,13 @@ export async function handleReceiptUpload(
 ): Promise<Response> {
   const startTime = Date.now();
   const contentType = request.headers.get('Content-Type') || '';
+  const freeeEnabled = isFreeeIntegrationEnabled(env);
+  const freeeSecretsConfigured = Boolean(
+    freeeEnabled &&
+      env.FREEE_CLIENT_ID &&
+      env.FREEE_CLIENT_SECRET &&
+      env.FREEE_ENCRYPTION_KEY
+  );
 
   if (!env.DB) {
     return jsonResponse({ error: 'Database not configured' }, 500);
@@ -151,16 +183,8 @@ export async function handleReceiptUpload(
     return jsonResponse({ error: 'Content-Type must be multipart/form-data' }, 415);
   }
 
-  if (
-    !env.KV ||
-    !env.FREEE_CLIENT_ID ||
-    !env.FREEE_CLIENT_SECRET ||
-    !env.FREEE_COMPANY_ID ||
-    !env.FREEE_REDIRECT_URI ||
-    !env.FREEE_ENCRYPTION_KEY
-  ) {
-    return jsonResponse({ error: 'freee integration not configured' }, 500);
-  }
+  // Note: freee integration is optional. If it is not configured, the handler will
+  // still store the file in R2 WORM and register the receipt in D1, then return success.
 
   let formData: FormData;
   try {
@@ -292,33 +316,270 @@ export async function handleReceiptUpload(
       size: fileEntry.size,
     });
 
-    await workflow.transition('submitting_freee', { fileName: safeFileName });
+    if (!freeeEnabled) {
+      safeLog.warn('[Receipts] freee integration disabled; stored in R2 only', {
+        receiptId,
+        r2Key,
+        tenantId,
+        userId: maskUserId(userId),
+        durationMs: Date.now() - startTime,
+      });
 
-    const freeeClient = createFreeeClient(env);
-    const freeeResult = await freeeClient.uploadReceipt(
-      fileEntry,
-      safeFileName,
-      fileHash
-    );
+      return jsonResponse({
+        success: true,
+        receipt_id: receiptId,
+        r2_object_key: r2Key,
+        freee_status: 'skipped_not_configured',
+        freee_status_detail: 'disabled_by_flag',
+      });
+    }
 
-    await workflow.complete(String(freeeResult.receipt.id));
+    if (!freeeSecretsConfigured) {
+      safeLog.warn('[Receipts] freee integration not configured (missing secrets); stored in R2 only', {
+        receiptId,
+        r2Key,
+        tenantId,
+        userId: maskUserId(userId),
+        durationMs: Date.now() - startTime,
+      });
 
-    safeLog.info('[Receipts] Upload completed', {
-      receiptId,
-      freeeReceiptId: freeeResult.receipt.id,
-      r2Key,
-      tenantId,
-      userId: maskUserId(userId),
-      size: fileEntry.size,
-      durationMs: Date.now() - startTime,
-    });
+      return jsonResponse({
+        success: true,
+        receipt_id: receiptId,
+        r2_object_key: r2Key,
+        freee_status: 'skipped_not_configured',
+      });
+    }
 
-    return jsonResponse({
-      success: true,
-      receipt_id: receiptId,
-      freee_receipt_id: freeeResult.receipt.id,
-      r2_object_key: r2Key,
-    });
+    const freeeAuthenticated = await hasFreeeAuthTokens(env);
+    if (!freeeAuthenticated) {
+      safeLog.warn('[Receipts] freee secrets configured but not authenticated; stored in R2 only', {
+        receiptId,
+        r2Key,
+        tenantId,
+        userId: maskUserId(userId),
+        durationMs: Date.now() - startTime,
+      });
+
+      return jsonResponse({
+        success: true,
+        receipt_id: receiptId,
+        r2_object_key: r2Key,
+        freee_status: 'skipped_not_authenticated',
+      });
+    }
+
+    try {
+      await workflow.transition('submitting_freee', { fileName: safeFileName });
+
+      const freeeClient = createFreeeClient(env);
+      const freeeResult = await freeeClient.uploadReceipt(
+        fileEntry,
+        safeFileName,
+        fileHash
+      );
+
+      // Transition to freee_uploaded (File Box upload complete)
+      await workflow.transition('freee_uploaded', {
+        freeeReceiptId: freeeResult.receipt.id,
+      });
+
+      // Persist freee_receipt_id to receipts table for deal linking
+      await env.DB.prepare(
+        "UPDATE receipts SET freee_receipt_id = ?, updated_at = datetime('now') WHERE id = ?"
+      )
+        .bind(String(freeeResult.receipt.id), receiptId)
+        .run();
+
+      // === Deal Automation (Phase 5) ===
+      // Skip deal creation for 0-amount receipts (evidence-only)
+      if (metadata.amount === 0) {
+        await workflow.complete(String(freeeResult.receipt.id));
+
+        safeLog.info('[Receipts] Upload completed (evidence-only, amount=0)', {
+          receiptId,
+          freeeReceiptId: freeeResult.receipt.id,
+          r2Key,
+          tenantId,
+          userId: maskUserId(userId),
+          durationMs: Date.now() - startTime,
+        });
+
+        return jsonResponse({
+          success: true,
+          receipt_id: receiptId,
+          freee_receipt_id: freeeResult.receipt.id,
+          r2_object_key: r2Key,
+          deal_status: 'skipped_zero_amount',
+        });
+      }
+
+      // Attempt automatic deal creation
+      const receiptInput: ReceiptInput = {
+        id: receiptId,
+        freee_receipt_id: freeeResult.receipt.id,
+        file_hash: fileHash,
+        vendor_name: metadata.vendor_name,
+        amount: metadata.amount,
+        transaction_date: metadata.transaction_date,
+        account_category: extractString(formData.get('account_category')) ?? null,
+        classification_confidence: 1, // Manual upload = full confidence
+        tenant_id: tenantId,
+      };
+
+      try {
+        const dealResult = await createDealFromReceipt(env, receiptInput);
+
+        if (dealResult.status === 'needs_review') {
+          // Low confidence - needs manual review
+          await workflow.transition('needs_review', {
+            reason: 'Low account mapping confidence',
+            confidence: dealResult.mappingConfidence,
+          });
+
+          // Persist suggested mapping fields for audit/review UI (even when we don't create a deal).
+          try {
+            await env.DB.prepare(
+              `UPDATE receipts
+               SET account_item_id = ?, tax_code = ?,
+                   account_mapping_confidence = ?, account_mapping_method = ?,
+                   updated_at = datetime('now')
+               WHERE id = ?`
+            )
+              .bind(
+                dealResult.accountItemId ?? null,
+                dealResult.taxCode ?? null,
+                dealResult.mappingConfidence ?? null,
+                dealResult.mappingMethod ?? null,
+                receiptId
+              )
+              .run();
+          } catch {
+            // non-fatal
+          }
+
+          safeLog.info('[Receipts] Upload completed, deal needs review', {
+            receiptId,
+            freeeReceiptId: freeeResult.receipt.id,
+            mappingConfidence: dealResult.mappingConfidence,
+            tenantId,
+            userId: maskUserId(userId),
+            durationMs: Date.now() - startTime,
+          });
+
+          return jsonResponse({
+            success: true,
+            receipt_id: receiptId,
+            freee_receipt_id: freeeResult.receipt.id,
+            r2_object_key: r2Key,
+            deal_status: 'needs_review',
+            mapping_confidence: dealResult.mappingConfidence,
+          });
+        }
+
+        // Deal created successfully - update receipts table
+        await env.DB.prepare(
+          `UPDATE receipts
+           SET freee_deal_id = ?, freee_partner_id = ?,
+               account_item_id = ?, tax_code = ?,
+               account_mapping_confidence = ?,
+               account_mapping_method = ?,
+               updated_at = datetime('now')
+           WHERE id = ?`
+        )
+          .bind(
+            dealResult.dealId,
+            dealResult.partnerId,
+            dealResult.accountItemId ?? null,
+            dealResult.taxCode ?? null,
+            dealResult.mappingConfidence,
+            dealResult.mappingMethod ?? null,
+            receiptId
+          )
+          .run();
+
+        await workflow.complete(String(freeeResult.receipt.id));
+
+        safeLog.info('[Receipts] Upload and deal creation completed', {
+          receiptId,
+          freeeReceiptId: freeeResult.receipt.id,
+          dealId: dealResult.dealId,
+          partnerId: dealResult.partnerId,
+          mappingConfidence: dealResult.mappingConfidence,
+          r2Key,
+          tenantId,
+          userId: maskUserId(userId),
+          durationMs: Date.now() - startTime,
+        });
+
+        return jsonResponse({
+          success: true,
+          receipt_id: receiptId,
+          freee_receipt_id: freeeResult.receipt.id,
+          freee_deal_id: dealResult.dealId,
+          freee_partner_id: dealResult.partnerId,
+          r2_object_key: r2Key,
+          deal_status: 'created',
+          mapping_confidence: dealResult.mappingConfidence,
+        });
+      } catch (dealError: unknown) {
+        // Deal creation failed - receipt is still in File Box (safe)
+        // Complete the receipt upload, log the deal error for retry
+        const dealMessage = dealError instanceof Error ? dealError.message : String(dealError);
+
+        safeLog.warn('[Receipts] Deal creation failed, receipt saved', {
+          receiptId,
+          freeeReceiptId: freeeResult.receipt.id,
+          dealError: dealMessage,
+          tenantId,
+          userId: maskUserId(userId),
+        });
+
+        try {
+          await workflow.recordError(dealMessage, 'DEAL_CREATION_FAILED', { receiptId });
+          await workflow.transition('needs_review', {
+            reason: 'Deal creation failed',
+            error: dealMessage,
+          });
+        } catch (workflowError) {
+          // Fallback: at minimum complete the receipt
+          await workflow.complete(String(freeeResult.receipt.id));
+        }
+
+        return jsonResponse({
+          success: true,
+          receipt_id: receiptId,
+          freee_receipt_id: freeeResult.receipt.id,
+          r2_object_key: r2Key,
+          deal_status: 'failed',
+          deal_error: dealMessage,
+        });
+      }
+    } catch (freeeError: unknown) {
+      // Fail-open: the receipt is already stored durably in R2+D1.
+      const freeeMessage = freeeError instanceof Error ? freeeError.message : String(freeeError);
+      safeLog.warn('[Receipts] freee upload failed (receipt stored)', {
+        receiptId,
+        r2Key,
+        tenantId,
+        userId: maskUserId(userId),
+        freeeError: freeeMessage,
+        durationMs: Date.now() - startTime,
+      });
+      try {
+        await workflow.recordError(freeeMessage, 'FREEE_UPLOAD_FAILED', { receiptId });
+        await workflow.transition('failed', { reason: 'freee upload failed' });
+      } catch {
+        // ignore
+      }
+      return jsonResponse({
+        success: true,
+        receipt_id: receiptId,
+        r2_object_key: r2Key,
+        freee_status: 'failed',
+        freee_error: freeeMessage,
+      });
+    }
   } catch (error: any) {
     const message = error instanceof Error ? error.message : String(error);
     safeLog.error('[Receipts] Upload failed', {

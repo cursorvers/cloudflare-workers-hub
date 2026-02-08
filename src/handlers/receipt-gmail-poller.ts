@@ -16,21 +16,62 @@ import {
   fetchReceiptEmails,
   type GmailReceiptEmail,
   type GmailReceiptAttachment,
+  type ShouldDownloadAttachment,
 } from '../services/gmail-receipt-client';
 import { classifyReceipt } from '../services/ai-receipt-classifier';
+import type { ClassificationResult } from '../services/ai-receipt-classifier';
 import { createFreeeClient } from '../services/freee-client';
+import { createDealFromReceipt } from '../services/freee-deal-service';
+import type { ReceiptInput } from '../services/freee-deal-service';
+import { isFreeeIntegrationEnabled } from '../utils/freee-integration';
 import { createStateMachine } from '../services/workflow-state-machine';
 import { withLock } from './scheduled';
 import { backupToGoogleDrive, type FreeeReceiptBackup } from '../services/google-drive-backup';
+import { maybeExtractPdfTextForClassification } from '../services/pdf-text-extraction';
 
 const LOCK_KEY = 'gmail:polling';
 const LOCK_TTL_SECONDS = 300;
 const RETENTION_YEARS = 7;
 const DEFAULT_TENANT_ID = 'default';
 const MAX_RESULTS = 15;
+// Rate limit safety: freee allows 300 req/hr. Each deal creation uses ~4-6 API calls:
+// getAccountItems (cached), getTaxes (cached), findPartner, POST /deals, PUT /receipts/:id,
+// possibly createPartner. Plus receipt uploads (~1 call each).
+// Budget: 4 cron runs/hr × MAX_DEALS_PER_RUN × 6 calls + 15 uploads = must stay well under 300.
+// 4 × 8 × 6 = 192 + 60 uploads = 252 (~84% utilization, safe margin for retries).
+const MAX_DEALS_PER_RUN = 8;
 
 function getReceiptBucket(env: Env): R2Bucket | null {
   return env.RECEIPTS ?? env.R2 ?? null;
+}
+
+async function hasFreeeAuthTokens(env: Env): Promise<boolean> {
+  // Prefer D1 (current). Fallback to KV (legacy) if present.
+  if (env.DB) {
+    try {
+      const row = await env.DB.prepare(
+        `SELECT encrypted_refresh_token
+         FROM external_oauth_tokens
+         WHERE provider = 'freee'
+         LIMIT 1`
+      ).first() as { encrypted_refresh_token?: string | null } | null;
+      if (row?.encrypted_refresh_token) return true;
+    } catch {
+      // ignore
+    }
+  }
+
+  if (env.KV) {
+    try {
+      // kv-optimizer:ignore-next
+      const token = await env.KV.get('freee:refresh_token');
+      return Boolean(token);
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
 }
 
 function normalizeFileName(fileName: string, fallback: string): string {
@@ -52,10 +93,15 @@ function toIsoDate(date: Date | undefined): string {
 }
 
 async function calculateSha256(data: ArrayBuffer | ArrayBufferView): Promise<string> {
-  const buffer = data instanceof ArrayBuffer
-    ? data
-    : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+  const bytes = data instanceof ArrayBuffer
+    ? new Uint8Array(data)
+    : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+
+  // Ensure we hand SubtleCrypto a concrete ArrayBuffer (not SharedArrayBuffer).
+  const buf = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buf).set(bytes);
+
+  const hashBuffer = await crypto.subtle.digest('SHA-256', buf);
   return Array.from(new Uint8Array(hashBuffer))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
@@ -72,7 +118,12 @@ async function delay(ms: number): Promise<void> {
 
 async function fetchReceiptEmailsWithRetry(
   env: Env,
-  options: { query?: string; maxResults?: number; newerThan?: string } = {}
+  options: {
+    query?: string;
+    maxResults?: number;
+    newerThan?: string;
+    shouldDownloadAttachment?: ShouldDownloadAttachment;
+  } = {}
 ): Promise<GmailReceiptEmail[]> {
   const config = {
     clientId: env.GMAIL_CLIENT_ID!,
@@ -104,16 +155,29 @@ function buildIdempotencyKey(messageId: string, attachmentId: string): string {
   return `gmail:${messageId}:${attachmentId}`;
 }
 
-function buildClassificationText(
+function processedAttachmentKey(messageId: string, attachmentId: string): string {
+  return `gmail:processed:${messageId}:${attachmentId}`;
+}
+
+export function buildClassificationText(
   email: GmailReceiptEmail,
-  attachment: GmailReceiptAttachment
+  attachment: GmailReceiptAttachment,
+  extractedPdfText?: string
 ): string {
-  return [
+  const parts = [
     `Subject: ${email.subject}`,
     `From: ${email.from}`,
     `Date: ${email.date.toISOString()}`,
     `Attachment: ${attachment.filename}`,
-  ].join('\n');
+  ];
+  if (extractedPdfText && extractedPdfText.trim().length > 0) {
+    parts.push('');
+    parts.push('PDF Text (extracted):');
+    parts.push('---BEGIN PDF TEXT---');
+    parts.push(extractedPdfText);
+    parts.push('---END PDF TEXT---');
+  }
+  return parts.join('\n');
 }
 
 async function hasDuplicateHash(env: Env, fileHash: string): Promise<string | null> {
@@ -132,7 +196,16 @@ async function processAttachment(
   freeeClient: ReturnType<typeof createFreeeClient>,
   email: GmailReceiptEmail,
   attachment: GmailReceiptAttachment,
-  metrics: { processed: number; skipped: number; failed: number }
+  metrics: { processed: number; skipped: number; failed: number },
+  pdfTextMetrics: {
+    attempted: number;
+    extracted: number;
+    failed: number;
+    skipped: number;
+    notAttempted: number;
+    reasons: Record<string, number>;
+    totalElapsedMs: number;
+  }
 ): Promise<void> {
   const attachmentId = attachment.attachmentId;
   const receiptId = crypto.randomUUID().replace(/-/g, '');
@@ -202,18 +275,67 @@ async function processAttachment(
       attachmentId,
     });
 
-    let classificationResult;
+    let classificationResult: ClassificationResult;
     try {
-      classificationResult = await classifyReceipt(
+      const extracted = await maybeExtractPdfTextForClassification(
         env,
-        buildClassificationText(email, attachment),
+        attachment.data,
         {
+          receiptId,
           messageId: email.messageId,
           attachmentId,
-          subject: email.subject,
-          from: email.from,
-          emailDate: email.date.toISOString(),
+          fileName: attachment.filename,
         }
+      );
+
+      const useExtractedTextForClassification = env.PDF_TEXT_EXTRACTION_USE_FOR_CLASSIFICATION === 'true';
+      const classificationMetadata: Record<string, unknown> = {
+        // Keep prompt/cache stable: avoid volatile per-message identifiers.
+        tenantId: DEFAULT_TENANT_ID,
+        source: 'gmail',
+        subject: email.subject,
+        from: email.from,
+        attachmentFileName: attachment.filename,
+      };
+      // Only attach pdfText* metadata when we actually use it for classification.
+      // Otherwise we'd fragment the KV classification cache for no benefit.
+      if (useExtractedTextForClassification && extracted.attempted) {
+        classificationMetadata.pdfTextExtracted = extracted.extracted;
+        classificationMetadata.pdfTextPages = extracted.totalPages;
+        classificationMetadata.pdfTextElapsedMs = extracted.elapsedMs;
+        classificationMetadata.pdfTextReason = extracted.reason;
+      }
+
+      // PDF text extraction metrics (aggregate per poll run)
+      if (extracted.reason) {
+        pdfTextMetrics.reasons[extracted.reason] = (pdfTextMetrics.reasons[extracted.reason] || 0) + 1;
+      }
+      if (extracted.attempted) {
+        pdfTextMetrics.attempted += 1;
+        if (extracted.extracted) {
+          pdfTextMetrics.extracted += 1;
+          pdfTextMetrics.totalElapsedMs += extracted.elapsedMs ?? 0;
+        } else {
+          pdfTextMetrics.failed += extracted.reason === 'error' ? 1 : 0;
+          pdfTextMetrics.skipped += extracted.reason === 'error' ? 0 : 1;
+        }
+      } else {
+        // disabled/sampled_out/empty/too_large/not_pdf all return attempted=false.
+        if (extracted.reason === 'disabled' || extracted.reason === 'sampled_out') {
+          pdfTextMetrics.notAttempted += 1;
+        } else {
+          pdfTextMetrics.skipped += 1;
+        }
+      }
+
+      classificationResult = await classifyReceipt(
+        env,
+        buildClassificationText(
+          email,
+          attachment,
+          useExtractedTextForClassification && extracted.extracted ? extracted.text : undefined
+        ),
+        classificationMetadata
       );
     } catch (classificationError) {
       safeLog.warn('[Gmail Poller] Classification failed, using fallback', {
@@ -239,6 +361,9 @@ async function processAttachment(
         amount: 0,
         currency: 'JPY',
         transaction_date: fallbackDate,
+        account_category: undefined,
+        tax_type: undefined,
+        department: undefined,
         confidence: 0,
         method: 'ai_assisted',
         cache_hit: false,
@@ -324,7 +449,10 @@ async function processAttachment(
       idempotencyKey,
     });
 
-    const fileBlob = new Blob([attachment.data], {
+    // Ensure BlobPart uses a concrete ArrayBuffer (not SharedArrayBuffer) for TS + runtime safety.
+    const fileBuf = new ArrayBuffer(attachment.data.byteLength);
+    new Uint8Array(fileBuf).set(attachment.data);
+    const fileBlob = new Blob([fileBuf], {
       type: attachment.mimeType || 'application/pdf',
     });
     const freeeResult = await freeeClient.uploadReceipt(
@@ -333,7 +461,110 @@ async function processAttachment(
       idempotencyKey
     );
 
+    // Attempt automatic deal creation (fail-open: receipt is already in freee File Box)
+    // Rate limit guard: cap deal creation per run to stay within freee 300 req/hr
+    let dealStatus: 'created' | 'needs_review' | 'skipped' | 'failed' = 'skipped';
+    try {
+      if (classificationResult.amount > 0 && metrics.dealsCreated < MAX_DEALS_PER_RUN) {
+        const receiptInput: ReceiptInput = {
+          id: receiptId,
+          freee_receipt_id: freeeResult.receipt.id,
+          file_hash: fileHash,
+          vendor_name: classificationResult.vendor_name,
+          amount: classificationResult.amount,
+          transaction_date: classificationResult.transaction_date,
+          account_category: classificationResult.account_category ?? null,
+          classification_confidence: classificationResult.confidence ?? null,
+          tenant_id: DEFAULT_TENANT_ID,
+        };
+
+        const dealResult = await createDealFromReceipt(env, receiptInput);
+        dealStatus = dealResult.status;
+
+        // Update receipts D1 record with deal fields
+        try {
+          await env.DB!.prepare(
+            `UPDATE receipts
+             SET freee_deal_id = ?, freee_partner_id = ?,
+                 account_item_id = ?, tax_code = ?,
+                 account_mapping_confidence = ?,
+                 account_mapping_method = ?,
+                 updated_at = datetime('now')
+             WHERE id = ?`
+          )
+            .bind(
+              dealResult.dealId,
+              dealResult.partnerId,
+              dealResult.accountItemId ?? null,
+              dealResult.taxCode ?? null,
+              dealResult.mappingConfidence,
+              dealResult.mappingMethod ?? null,
+              receiptId
+            )
+            .run();
+        } catch (dbError) {
+          // non-fatal: deal was created, D1 update is best-effort
+          safeLog.warn('[Gmail Poller] Failed to update receipt with deal info', {
+            receiptId,
+            error: dbError instanceof Error ? dbError.message : String(dbError),
+          });
+        }
+
+        if (dealResult.status === 'needs_review') {
+          safeLog.info('[Gmail Poller] Deal needs review', {
+            receiptId,
+            mappingConfidence: dealResult.mappingConfidence,
+            provider: dealResult.selectionProvider,
+          });
+        } else {
+          safeLog.info('[Gmail Poller] Deal created', {
+            receiptId,
+            dealId: dealResult.dealId,
+            partnerId: dealResult.partnerId,
+            mappingConfidence: dealResult.mappingConfidence,
+          });
+          metrics.dealsCreated += 1;
+        }
+      } else if (classificationResult.amount <= 0) {
+        dealStatus = 'skipped';
+        safeLog.info('[Gmail Poller] Deal skipped (zero amount)', { receiptId });
+      } else {
+        dealStatus = 'skipped';
+        safeLog.info('[Gmail Poller] Deal skipped (rate limit cap reached)', {
+          receiptId,
+          dealsCreated: metrics.dealsCreated,
+          maxDealsPerRun: MAX_DEALS_PER_RUN,
+        });
+      }
+    } catch (dealError) {
+      dealStatus = 'failed';
+      safeLog.warn('[Gmail Poller] Deal creation failed (receipt saved)', {
+        receiptId,
+        freeeReceiptId: freeeResult.receipt.id,
+        error: dealError instanceof Error ? dealError.message : String(dealError),
+      });
+    }
+
     await workflow.complete(String(freeeResult.receipt.id));
+
+    // Mark this attachment as processed to avoid re-downloading it in subsequent polls.
+    // Best-effort: failure here should not fail the pipeline.
+    try {
+      if (env.CACHE) {
+        await env.CACHE.put(
+          processedAttachmentKey(email.messageId, attachmentId),
+          '1',
+          { expirationTtl: 60 * 60 * 24 * 30 } // 30 days
+        );
+      }
+    } catch (markError) {
+      safeLog.warn('[Gmail Poller] Failed to mark attachment as processed (continuing)', {
+        receiptId,
+        messageId: email.messageId,
+        attachmentId,
+        error: markError instanceof Error ? markError.message : String(markError),
+      });
+    }
 
     // Backup to Google Drive (non-blocking)
     try {
@@ -381,17 +612,19 @@ async function processAttachment(
       error: message,
     });
 
-    try {
-      await workflow.recordError(message, 'GMAIL_POLL_FAILED', {
-        messageId: email.messageId,
-        attachmentId,
-      });
-      await workflow.transition('failed', { reason: message });
-    } catch (workflowError) {
-      safeLog.warn('[Gmail Poller] Failed to record workflow error', {
-        receiptId,
-        error: workflowError instanceof Error ? workflowError.message : String(workflowError),
-      });
+    if (workflow) {
+      try {
+        await workflow.recordError(message, 'GMAIL_POLL_FAILED', {
+          messageId: email.messageId,
+          attachmentId,
+        });
+        await workflow.transition('failed', { reason: message });
+      } catch (workflowError) {
+        safeLog.warn('[Gmail Poller] Failed to record workflow error', {
+          receiptId,
+          error: workflowError instanceof Error ? workflowError.message : String(workflowError),
+        });
+      }
     }
   }
 }
@@ -417,14 +650,18 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
     return;
   }
 
-  if (
-    !env.FREEE_CLIENT_ID ||
-    !env.FREEE_CLIENT_SECRET ||
-    !env.FREEE_COMPANY_ID ||
-    !env.FREEE_REDIRECT_URI ||
-    !env.FREEE_ENCRYPTION_KEY
-  ) {
-    safeLog.warn('[Gmail Poller] freee integration not configured, skipping');
+  if (!isFreeeIntegrationEnabled(env)) {
+    safeLog.warn('[Gmail Poller] freee integration disabled, skipping');
+    return;
+  }
+
+  if (!env.FREEE_CLIENT_ID || !env.FREEE_CLIENT_SECRET || !env.FREEE_ENCRYPTION_KEY) {
+    safeLog.warn('[Gmail Poller] freee integration not configured (missing secrets), skipping');
+    return;
+  }
+
+  if (!(await hasFreeeAuthTokens(env))) {
+    safeLog.warn('[Gmail Poller] freee not authenticated (no tokens found), skipping');
     return;
   }
 
@@ -434,9 +671,27 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
 
     let emails: GmailReceiptEmail[] = [];
     try {
+      let cacheReadFailed = false;
       emails = await fetchReceiptEmailsWithRetry(env, {
         maxResults: MAX_RESULTS,
         newerThan: '1d',
+        // Avoid re-downloading already-processed attachments.
+        shouldDownloadAttachment: async ({ messageId, attachmentId }) => {
+          if (!env.CACHE) return true;
+          try {
+            const existing = await env.CACHE.get(processedAttachmentKey(messageId, attachmentId));
+            return !existing;
+          } catch (error) {
+            // Fail-open: if KV is rate-limited or quota exceeded, download and rely on D1 idempotency.
+            if (!cacheReadFailed) {
+              cacheReadFailed = true;
+              safeLog.warn('[Gmail Poller] CACHE read failed (will download anyway)', {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+            return true;
+          }
+        },
       });
     } catch (error) {
       safeLog.error('[Gmail Poller] Failed to fetch Gmail receipts', {
@@ -451,18 +706,41 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
     }
 
     const freeeClient = createFreeeClient(env);
-    const metrics = { processed: 0, skipped: 0, failed: 0 };
+    const metrics = { processed: 0, skipped: 0, failed: 0, dealsCreated: 0 };
+    const pdfTextMetrics = {
+      attempted: 0,
+      extracted: 0,
+      failed: 0,
+      skipped: 0,
+      notAttempted: 0,
+      reasons: {} as Record<string, number>,
+      totalElapsedMs: 0,
+    };
 
     for (const email of emails) {
       for (const attachment of email.attachments) {
-        await processAttachment(env, bucket, freeeClient, email, attachment, metrics);
+        await processAttachment(env, bucket, freeeClient, email, attachment, metrics, pdfTextMetrics);
       }
     }
+
+    const pdfExtractionEnabled = env.PDF_TEXT_EXTRACTION_ENABLED === 'true';
 
     safeLog.info('[Gmail Poller] Polling completed', {
       processed: metrics.processed,
       skipped: metrics.skipped,
       failed: metrics.failed,
+      dealsCreated: metrics.dealsCreated,
+      ...(pdfExtractionEnabled
+        ? {
+            pdfTextAttempted: pdfTextMetrics.attempted,
+            pdfTextExtracted: pdfTextMetrics.extracted,
+            pdfTextFailed: pdfTextMetrics.failed,
+            pdfTextSkipped: pdfTextMetrics.skipped,
+            pdfTextNotAttempted: pdfTextMetrics.notAttempted,
+            pdfTextTotalElapsedMs: pdfTextMetrics.totalElapsedMs,
+            pdfTextReasons: pdfTextMetrics.reasons,
+          }
+        : {}),
       durationMs: Date.now() - startTime,
     });
   });

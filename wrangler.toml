@@ -30,6 +30,7 @@ id = "378a478680ec41d280737181530f58a9"  # Reusing same KV namespace
 # Durable Objects for atomic task queue coordination
 [durable_objects]
 bindings = [
+  { name = "RATE_LIMITER", class_name = "RateLimiter" },
   { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
   { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
   { name = "SYSTEM_EVENTS", class_name = "SystemEvents" }
@@ -47,6 +48,10 @@ new_sqlite_classes = ["CockpitWebSocket"]
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["SystemEvents"]
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["RateLimiter"]
 
 # R2 bucket for audio staging and Obsidian vault (requires R2 enabled on account)
 # [[r2_buckets]]
@@ -85,18 +90,37 @@ index_name = "obsidian-knowledge"
 # max_retries = 3
 # dead_letter_queue = "push-notifications-dlq"
 
-# Cron Triggers (Free plan limit: 5, currently using 5)
+# Cron Triggers (Free plan limit: 5, using 5/5)
 [triggers]
-crons = ["*/15 * * * *", "0 */6 * * *", "0 2 * * *", "0 21 * * *", "0 0 * * SUN"]  # Every 15min (Gmail polling + hourly Limitless sync), PHI verification (every 6h), Subscription cleanup (11AM JST), Daily actions (6AM JST), Weekly digest (Sun 9AM JST)
+# Cloudflare cron triggers are limited to 5 per worker on Free plan.
+# All 5 slots allocated:
+#   1. */15 * * * *  - Gmail polling + Limitless sync + optional poller
+#   2. 0 21 * * *    - Daily action check (6AM JST)
+#   3. 0 0 * * SUN   - Weekly digest (Sun 9AM JST)
+#   4. 0 */6 * * *   - PHI verification batch (Phase 6.2)
+#   5. 0 2 * * *     - Push subscription cleanup (11AM JST)
+crons = ["*/15 * * * *", "0 21 * * *", "0 0 * * SUN", "0 */6 * * *", "0 2 * * *"]
 
 # Environment variables
 [vars]
-ENVIRONMENT = "development"
-ALLOW_DEV_ORIGINS = "fugue-system-ui.vercel.app,localhost:3000"
+ENVIRONMENT = "production"
+DEPLOY_TARGET = "hub"
+ALLOW_DEV_ORIGINS = "fugue-system-ui.vercel.app"
 LIMITLESS_AUTO_SYNC_ENABLED = "true"
 LIMITLESS_USER_ID = "masayuki"
 LIMITLESS_SYNC_INTERVAL_HOURS = "1"
 FEATURE_HIGHLIGHTS_ENABLED = "true"
+# Cron mode: when true, scheduled handler will run Gmail polling only (skip Limitless backup sync).
+SCHEDULED_GMAIL_ONLY = "false"
+# Receipt PDF text extraction (unpdf) - default OFF
+PDF_TEXT_EXTRACTION_ENABLED = "false"
+PDF_TEXT_EXTRACTION_SAMPLE_RATE = "0"
+PDF_TEXT_EXTRACTION_MAX_PAGES = "50"
+PDF_TEXT_EXTRACTION_MAX_BYTES = "10485760"
+PDF_TEXT_EXTRACTION_MAX_CHARS = "8000"
+PDF_TEXT_EXTRACTION_USE_FOR_CLASSIFICATION = "false"
+# freee integration (enabled by default in code; explicitly set for clarity)
+FREEE_INTEGRATION_ENABLED = "true"
 # freee API Base URL
 FREEE_BASE_URL = "https://api.freee.co.jp/api/1"
 # Cloudflare Access (Zero Trust)
@@ -109,57 +133,147 @@ port = 8787
 local_protocol = "http"
 
 # Production environment
-[env.production]
-vars = { ENVIRONMENT = "production", CF_ACCESS_TEAM = "masa-stage1", ALLOW_DEV_ORIGINS = "fugue-system-ui.vercel.app", FEATURE_HIGHLIGHTS_ENABLED = "true", LIMITLESS_AUTO_SYNC_ENABLED = "true", LIMITLESS_USER_ID = "masayuki", LIMITLESS_SYNC_INTERVAL_HOURS = "1", FREEE_BASE_URL = "https://api.freee.co.jp/api/1" }
+# Canary environment (formerly the production-named env).
+# NOTE: This deploys as a separate script `orchestrator-hub-canary`.
+[env.canary]
 # CF_ACCESS_AUD should be set via wrangler secret or dashboard after Access app creation
 
-[env.production.ai]
+[env.canary.vars]
+ENVIRONMENT = "production"
+DEPLOY_TARGET = "canary"
+# Safety: canary shares production resources unless you explicitly split D1/KV/R2.
+# Block write methods by default to avoid accidental production data mutation.
+CANARY_WRITE_ENABLED = "true"
+CF_ACCESS_TEAM = "masa-stage1"
+ALLOW_DEV_ORIGINS = "fugue-system-ui.vercel.app"
+FEATURE_HIGHLIGHTS_ENABLED = "true"
+LIMITLESS_AUTO_SYNC_ENABLED = "true"
+LIMITLESS_USER_ID = "masayuki"
+LIMITLESS_SYNC_INTERVAL_HOURS = "1"
+FREEE_BASE_URL = "https://api.freee.co.jp/api/1"
+FREEE_INTEGRATION_ENABLED = "false"
+SCHEDULED_GMAIL_ONLY = "false"
+PDF_TEXT_EXTRACTION_ENABLED = "false"
+PDF_TEXT_EXTRACTION_SAMPLE_RATE = "0"
+PDF_TEXT_EXTRACTION_MAX_PAGES = "50"
+PDF_TEXT_EXTRACTION_MAX_BYTES = "10485760"
+PDF_TEXT_EXTRACTION_MAX_CHARS = "8000"
+PDF_TEXT_EXTRACTION_USE_FOR_CLASSIFICATION = "false"
+
+[env.canary.ai]
 binding = "AI"
 
-[[env.production.d1_databases]]
+[[env.canary.d1_databases]]
 binding = "DB"
-database_name = "knowledge-base"
-database_id = "4164f0fc-d6bb-4e78-86d1-2601d762d6de"
+database_name = "knowledge-base-canary"
+database_id = "a6f6aa64-184d-4c61-aeb0-0cce8550992f"
 
-[[env.production.kv_namespaces]]
+[[env.canary.kv_namespaces]]
 binding = "CACHE"
-id = "378a478680ec41d280737181530f58a9"
+id = "d2dd50f7fa3740e0b29c5ac63f62bb25"
 
-[[env.production.kv_namespaces]]
+[[env.canary.kv_namespaces]]
 binding = "USAGE_CACHE"
-id = "378a478680ec41d280737181530f58a9"
+id = "d2dd50f7fa3740e0b29c5ac63f62bb25"
 
-[[env.production.kv_namespaces]]
+[[env.canary.kv_namespaces]]
 binding = "KV"
-id = "378a478680ec41d280737181530f58a9"
+id = "d2dd50f7fa3740e0b29c5ac63f62bb25"
 
-[env.production.durable_objects]
+[env.canary.durable_objects]
 bindings = [
+  { name = "RATE_LIMITER", class_name = "RateLimiter" },
   { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
   { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
   { name = "SYSTEM_EVENTS", class_name = "SystemEvents" }
 ]
 
-[env.production.triggers]
+[env.canary.triggers]
+# Gmail receipt polling automation (every 15 minutes).
+# Other scheduled jobs remain disabled in production unless explicitly added here.
 crons = []
 
-# [[env.production.r2_buckets]]
+# [[env.canary.r2_buckets]]
 # binding = "AUDIO_STAGING"
 # bucket_name = "voice-messages"
 
-# [[env.production.r2_buckets]]
+# [[env.canary.r2_buckets]]
 # binding = "OBSIDIAN_VAULT"
 # bucket_name = "obsidian-vault"
 
-[[env.production.r2_buckets]]
+[[env.canary.r2_buckets]]
+binding = "RECEIPTS"
+bucket_name = "receipt-worm-storage-canary"
+
+[[env.canary.vectorize]]
+binding = "KNOWLEDGE_INDEX"
+index_name = "obsidian-knowledge-canary"
+
+# R2 bucket for receipt WORM storage
+[[env.canary.r2_buckets]]
+binding = "R2"
+bucket_name = "receipt-worm-storage-canary"
+
+# Local dev environment (safe defaults; no cron; localhost allowed).
+[env.dev]
+[env.dev.vars]
+ENVIRONMENT = "development"
+DEPLOY_TARGET = "dev"
+ALLOW_DEV_ORIGINS = "localhost:3000,fugue-system-ui.vercel.app"
+LIMITLESS_AUTO_SYNC_ENABLED = "false"
+LIMITLESS_USER_ID = "masayuki"
+LIMITLESS_SYNC_INTERVAL_HOURS = "1"
+FEATURE_HIGHLIGHTS_ENABLED = "true"
+SCHEDULED_GMAIL_ONLY = "true"
+PDF_TEXT_EXTRACTION_ENABLED = "false"
+PDF_TEXT_EXTRACTION_SAMPLE_RATE = "0"
+PDF_TEXT_EXTRACTION_MAX_PAGES = "50"
+PDF_TEXT_EXTRACTION_MAX_BYTES = "10485760"
+PDF_TEXT_EXTRACTION_MAX_CHARS = "8000"
+PDF_TEXT_EXTRACTION_USE_FOR_CLASSIFICATION = "false"
+FREEE_BASE_URL = "https://api.freee.co.jp/api/1"
+FREEE_INTEGRATION_ENABLED = "false"
+CF_ACCESS_TEAM = "masa-stage1"
+
+[env.dev.triggers]
+crons = []
+
+[env.dev.ai]
+binding = "AI"
+
+[[env.dev.d1_databases]]
+binding = "DB"
+database_name = "knowledge-base"
+database_id = "4164f0fc-d6bb-4e78-86d1-2601d762d6de"
+
+[[env.dev.kv_namespaces]]
+binding = "CACHE"
+id = "378a478680ec41d280737181530f58a9"
+
+[[env.dev.kv_namespaces]]
+binding = "USAGE_CACHE"
+id = "378a478680ec41d280737181530f58a9"
+
+[[env.dev.kv_namespaces]]
+binding = "KV"
+id = "378a478680ec41d280737181530f58a9"
+
+[env.dev.durable_objects]
+bindings = [
+  { name = "RATE_LIMITER", class_name = "RateLimiter" },
+  { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
+  { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
+  { name = "SYSTEM_EVENTS", class_name = "SystemEvents" }
+]
+
+[[env.dev.r2_buckets]]
+binding = "R2"
+bucket_name = "receipt-worm-storage"
+
+[[env.dev.r2_buckets]]
 binding = "RECEIPTS"
 bucket_name = "receipt-worm-storage"
 
-[[env.production.vectorize]]
+[[env.dev.vectorize]]
 binding = "KNOWLEDGE_INDEX"
 index_name = "obsidian-knowledge"
-
-# R2 bucket for receipt WORM storage
-[[env.production.r2_buckets]]
-binding = "R2"
-bucket_name = "receipt-worm-storage"

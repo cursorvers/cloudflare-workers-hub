@@ -150,34 +150,23 @@ curl https://your-worker.workers.dev/health
 
 ### Before
 
-```toml
-# wrangler.toml - No authentication variables needed
-[env.production]
-vars = {
-  ENVIRONMENT = "production"
-}
+No keys configured (legacy behavior): `/health` and `/metrics` remain public.
 ```
 
 ### After (Recommended)
 
-```toml
-# wrangler.toml - Add monitoring key
-[env.production]
-vars = {
-  ENVIRONMENT = "production",
-  MONITORING_API_KEY = "your-secure-monitoring-key"
-}
+```bash
+# Canonical worker (orchestrator-hub)
+wrangler secret put MONITORING_API_KEY --env ""
+
+# Optional canary (orchestrator-hub-canary)
+wrangler secret put MONITORING_API_KEY --env canary
 ```
 
 ### After (Fallback Option)
 
-```toml
-# wrangler.toml - Use admin key if monitoring key not set
-[env.production]
-vars = {
-  ENVIRONMENT = "production",
-  ADMIN_API_KEY = "your-admin-key"  # Falls back to this
-}
+```bash
+wrangler secret put ADMIN_API_KEY --env ""
 ```
 
 ## Monitoring Tool Configuration

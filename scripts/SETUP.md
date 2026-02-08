@@ -23,8 +23,14 @@ openssl rand -hex 32
 ```bash
 # MBP で実行
 cd ~/Dev/cloudflare-workers-hub
-wrangler secret put ASSISTANT_API_KEY
+# 推奨: QUEUE_API_KEY と ASSISTANT_API_KEY を同一値に揃える（401再発防止）
+#
 # プロンプトが出たら Step 1 で生成した値を入力
+wrangler secret put ASSISTANT_API_KEY
+wrangler secret put QUEUE_API_KEY
+
+# すでにローカルに canonical な ASSISTANT_API_KEY がある場合は同期スクリプトで一括反映可:
+# ./scripts/sync-queue-api-keys.sh
 ```
 
 ---

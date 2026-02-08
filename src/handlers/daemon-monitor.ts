@@ -49,7 +49,8 @@ export async function handleDaemonHealthCheck(
 
     // Mark as ever-registered if we see active daemons
     if (totalActive > 0 && !everRegistered) {
-      await env.CACHE!.put('daemon:ever_registered', 'true');
+      // Long TTL: prevents false alerts after restarts, but keeps this key from becoming permanent state.
+      await env.CACHE!.put('daemon:ever_registered', 'true', { expirationTtl: 180 * 24 * 60 * 60 });
     }
 
     // All good: active daemons exist

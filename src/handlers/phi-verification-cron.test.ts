@@ -1,13 +1,24 @@
 /**
  * Tests for PHI Verification Cron Handler (Phase 6.2)
+ *
+ * Implementation calls processPhiVerificationBatch() directly
+ * (not via HTTP self-call).
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { handlePhiVerificationCron } from './phi-verification-cron';
 import { Env } from '../types';
 
-// Mock global fetch
-global.fetch = vi.fn();
+// Mock the verification module
+vi.mock('./limitless-phi-verification', () => ({
+  processPhiVerificationBatch: vi.fn(),
+}));
+
+vi.mock('../utils/log-sanitizer', () => ({
+  safeLog: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
+import { processPhiVerificationBatch } from './limitless-phi-verification';
 
 const mockEnv: Env = {
   WORKERS_URL: 'https://test.workers.dev',
@@ -19,87 +30,49 @@ describe('PHI Verification Cron', () => {
     vi.clearAllMocks();
   });
 
-  it('calls verification API with correct parameters', async () => {
-    (global.fetch as any).mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        success: true,
-        data: {
-          processed: 10,
-          verified: 8,
-          failed: 2,
-          next_batch_available: false,
-        },
-      }),
+  it('calls processPhiVerificationBatch with max_items=50', async () => {
+    (processPhiVerificationBatch as any).mockResolvedValue({
+      processed: 10,
+      verified: 8,
+      failed: 2,
+      next_batch_available: false,
     });
 
     await handlePhiVerificationCron(mockEnv);
 
-    expect(global.fetch).toHaveBeenCalledWith(
-      'https://test.workers.dev/api/limitless/verify-phi-batch',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': 'test-key',
-        },
-        body: JSON.stringify({
-          max_items: 50,
-          priority: 'low',
-        }),
-      }
-    );
+    expect(processPhiVerificationBatch).toHaveBeenCalledWith(mockEnv, 50);
   });
 
   it('handles successful batch processing', async () => {
-    (global.fetch as any).mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        success: true,
-        data: {
-          processed: 25,
-          verified: 20,
-          failed: 5,
-          next_batch_available: true,
-        },
-      }),
+    (processPhiVerificationBatch as any).mockResolvedValue({
+      processed: 25,
+      verified: 20,
+      failed: 5,
+      next_batch_available: true,
     });
 
     await expect(handlePhiVerificationCron(mockEnv)).resolves.toBeUndefined();
   });
 
-  it('handles API errors gracefully', async () => {
-    (global.fetch as any).mockResolvedValue({
-      ok: false,
-      status: 500,
-      statusText: 'Internal Server Error',
-    });
+  it('handles errors gracefully', async () => {
+    (processPhiVerificationBatch as any).mockRejectedValue(new Error('DB error'));
 
     await expect(handlePhiVerificationCron(mockEnv)).resolves.toBeUndefined();
   });
 
-  it('handles network errors gracefully', async () => {
-    (global.fetch as any).mockRejectedValue(new Error('Network error'));
-
-    await expect(handlePhiVerificationCron(mockEnv)).resolves.toBeUndefined();
-  });
-
-  it('uses default WORKERS_URL when not configured', async () => {
-    const envWithoutUrl = { ...mockEnv, WORKERS_URL: undefined };
-
-    (global.fetch as any).mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        success: true,
-        data: { processed: 0, verified: 0, failed: 0, next_batch_available: false },
-      }),
+  it('logs when more batches are available', async () => {
+    const { safeLog } = await import('../utils/log-sanitizer');
+    (processPhiVerificationBatch as any).mockResolvedValue({
+      processed: 50,
+      verified: 48,
+      failed: 2,
+      next_batch_available: true,
     });
 
-    await handlePhiVerificationCron(envWithoutUrl);
+    await handlePhiVerificationCron(mockEnv);
 
-    expect(global.fetch).toHaveBeenCalledWith(
-      'https://workers-hub.cursorvers.workers.dev/api/limitless/verify-phi-batch',
-      expect.any(Object)
+    expect(safeLog.info).toHaveBeenCalledWith(
+      expect.stringContaining('More batches available'),
     );
   });
 });

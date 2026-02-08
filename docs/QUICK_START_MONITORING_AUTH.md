@@ -16,16 +16,17 @@ Copy the output (e.g., `xK9mP2vQ8rL4wN7eT1uY5jH6gF3dS0aZ`)
 
 ## Step 2: Add to Your Worker
 
-### Option A: Via wrangler.toml (Recommended for Development)
+### Option A: Via Workers secrets (Recommended)
 
-```toml
-[env.production]
-vars = {
-  MONITORING_API_KEY = "xK9mP2vQ8rL4wN7eT1uY5jH6gF3dS0aZ"
-}
+```bash
+# Canonical (orchestrator-hub)
+echo "xK9mP2vQ8rL4wN7eT1uY5jH6gF3dS0aZ" | wrangler secret put MONITORING_API_KEY
+
+# Optional canary (orchestrator-hub-canary)
+echo "xK9mP2vQ8rL4wN7eT1uY5jH6gF3dS0aZ" | wrangler secret put MONITORING_API_KEY --env canary
 ```
 
-### Option B: Via Cloudflare Dashboard (Recommended for Production)
+### Option B: Via Cloudflare Dashboard
 
 1. Go to Workers & Pages
 2. Select your worker

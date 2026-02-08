@@ -11,40 +11,19 @@
 - D1 テーブル作成完了
 
 ### ❌ 未設定（必須）
-1. **FREEE_COMPANY_ID** - freee 会社 ID
-2. **GITHUB_TOKEN** - GitHub Actions 用トークン
-3. **GITHUB_REPO** - GitHub リポジトリ名
-4. **RECEIPTS_API_KEY** - Receipts API アクセスキー
+1. **GITHUB_TOKEN** - GitHub Actions 用トークン
+2. **GITHUB_REPO** - GitHub リポジトリ名
+3. **RECEIPTS_API_KEY** - Receipts API アクセスキー
 
 ### ❌ 未設定（オプション）
 - Google Drive OAuth (CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN)
+- FREEE_COMPANY_ID - freee 会社 ID（通常不要。未設定なら Worker が `/companies` から自動解決して D1 に保存）
 
 ---
 
 ## セットアップ手順
 
-### 1. FREEE_COMPANY_ID 取得
-
-```bash
-# freee API で会社 ID を取得
-curl -H "Authorization: Bearer $FREEE_ACCESS_TOKEN" \
-  https://api.freee.co.jp/api/1/companies
-
-# 出力例:
-# {
-#   "companies": [
-#     {
-#       "id": 1234567,
-#       "name": "Your Company Name"
-#     }
-#   ]
-# }
-
-# 会社 ID を設定
-echo "1234567" | wrangler secret put FREEE_COMPANY_ID
-```
-
-### 2. GITHUB_TOKEN 設定
+### 1. GITHUB_TOKEN 設定
 
 ```bash
 # GitHub Personal Access Token を作成
@@ -59,7 +38,7 @@ wrangler secret put GITHUB_TOKEN
 echo "cursorvers/cloudflare-workers-hub" | wrangler secret put GITHUB_REPO
 ```
 
-### 3. RECEIPTS_API_KEY 生成
+### 2. RECEIPTS_API_KEY 生成
 
 ```bash
 # API キーを生成して設定
@@ -72,7 +51,7 @@ echo "Generated RECEIPTS_API_KEY: $RECEIPTS_API_KEY"
 echo "Save this key to your password manager!"
 ```
 
-### 4. Google Drive OAuth (オプション)
+### 3. Google Drive OAuth (オプション)
 
 Google Drive バックアップ機能を使用する場合:
 
@@ -106,10 +85,8 @@ bash /tmp/check-integration-readiness.sh
 
 ```bash
 # 手動トリガー（cron の代わり）
-curl -X POST https://orchestrator-hub.masa-stage1.workers.dev/api/admin/cron \
-  -H "Authorization: Bearer $ADMIN_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"schedule": "*/15 * * * *"}'
+curl -X POST https://orchestrator-hub.masa-stage1.workers.dev/api/receipts/poll \
+  -H "Authorization: Bearer $ADMIN_API_KEY"
 
 # Workers ログ確認
 wrangler tail --format pretty
@@ -194,7 +171,8 @@ curl -H "Authorization: Bearer $RECEIPTS_API_KEY" \
 echo "9999999" | wrangler secret put FREEE_COMPANY_ID
 
 # Gmail polling 実行
-curl -X POST .../api/admin/cron ...
+curl -X POST https://orchestrator-hub.masa-stage1.workers.dev/api/receipts/poll \
+  -H "Authorization: Bearer $ADMIN_API_KEY"
 
 # 期待される動作:
 # - freee API が 404 を返す
@@ -251,10 +229,9 @@ wrangler secret put GITHUB_TOKEN
 
 ### freee API が 400 を返す
 
-1. **会社 ID 確認**
-   ```bash
-   wrangler secret list | grep FREEE_COMPANY_ID
-   ```
+1. **company_id 確認**
+   - `FREEE_COMPANY_ID` を設定していればそれが優先されます
+   - 未設定なら D1（`external_oauth_tokens.company_id`）に保存されているか確認
 
 2. **アクセストークン確認**
    ```bash

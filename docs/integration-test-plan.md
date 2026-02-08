@@ -30,10 +30,8 @@ freee領収書登録システムの全フロー統合テスト。本番環境 AP
 1. **Gmail Polling 実行**
    ```bash
    # 手動トリガー（cron の代わり）
-   curl -X POST https://orchestrator-hub.masa-stage1.workers.dev/api/admin/cron \
-     -H "Authorization: Bearer $ADMIN_API_KEY" \
-     -H "Content-Type: application/json" \
-     -d '{"schedule": "*/15 * * * *"}'
+   curl -X POST https://orchestrator-hub.masa-stage1.workers.dev/api/receipts/poll \
+     -H "Authorization: Bearer $ADMIN_API_KEY"
    ```
 
 2. **Workers ログ確認**
@@ -269,10 +267,9 @@ freee領収書登録システムの全フロー統合テスト。本番環境 AP
 2. **freee API ドキュメント確認**
    - https://developer.freee.co.jp/docs/accounting/reference
 
-3. **会社 ID 確認**
-   ```bash
-   echo $FREEE_COMPANY_ID
-   ```
+3. **company_id 確認**
+   - `FREEE_COMPANY_ID` は任意（設定していれば優先）
+   - 未設定なら D1（`external_oauth_tokens.company_id`）に保存されているか確認
 
 ### Web Scraper が要素を見つけられない
 

@@ -119,14 +119,14 @@ describe('CockpitGateway', () => {
         type: 'command',
         payload: {
           command: 'deploy',
-          args: ['--env', 'production'],
+          args: ['--env', 'canary'],
         },
       };
 
       const request = gateway.transformToOrchestratorRequest(message, 'user-456');
 
       expect(request.messageType).toBe('command');
-      expect(request.content).toBe('/deploy --env production');
+      expect(request.content).toBe('/deploy --env canary');
       expect(request.context).toBeUndefined();
     });
 

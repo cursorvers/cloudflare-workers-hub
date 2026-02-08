@@ -10,6 +10,7 @@
 import { NormalizedEvent } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { addToTaskIndex, getTaskIds } from '../utils/task-index';
+import { enqueueTaskD1, getResultD1, getTaskD1, listPendingTaskIdsD1, storeResultD1 } from '../utils/queue-d1';
 
 export interface SkillHint {
   category: string;
@@ -256,6 +257,32 @@ async function sendViaKVQueue(
 }
 
 /**
+ * Send request to Orchestrator via D1-backed queue
+ * External orchestrator polls /api/queue endpoint
+ */
+async function sendViaD1Queue(
+  request: OrchestratorRequest,
+  db: D1Database
+): Promise<OrchestratorResponse> {
+  const task = {
+    ...request,
+    queuedAt: new Date().toISOString(),
+    status: 'pending',
+  };
+
+  await enqueueTaskD1({ DB: db } as any, request.id, task as any);
+
+  safeLog.log(`[Orchestrator] Request ${request.id} queued in D1`);
+
+  return {
+    id: request.id,
+    status: 'accepted',
+    message: `Request queued. Poll /api/result/${request.id} for result. Delegation: ${request.delegationHints.map(h => h.target).join(', ')}`,
+    estimatedCompletion: new Date(Date.now() + 60000).toISOString(),
+  };
+}
+
+/**
  * Send request to Orchestrator via webhook callback
  */
 async function sendViaWebhook(
@@ -339,7 +366,8 @@ async function sendViaDirect(
  */
 export async function sendToOrchestrator(
   request: OrchestratorRequest,
-  kv?: KVNamespace
+  kv?: KVNamespace,
+  db?: D1Database
 ): Promise<OrchestratorResponse> {
   safeLog.log('[Orchestrator] Processing request:', {
     id: request.id,
@@ -349,6 +377,16 @@ export async function sendToOrchestrator(
   });
 
   const config = orchestratorConfig;
+
+  // Prefer D1 queue when available (reduces KV write/list pressure).
+  if (config.mode === 'kv-queue' && db) {
+    try {
+      return await sendViaD1Queue(request, db);
+    } catch (error) {
+      safeLog.error('[Orchestrator] D1 queue enqueue failed (falling back to KV if available)', { error: String(error) });
+      // fall through
+    }
+  }
 
   // Use KV queue if available
   if (config.mode === 'kv-queue' && (kv || config.kvNamespace)) {
@@ -381,6 +419,7 @@ export async function sendToOrchestrator(
 export class CommHubAdapter {
   private orchestratorUrl: string;
   private kv?: KVNamespace;
+  private db?: D1Database;
 
   constructor(orchestratorUrl: string = 'http://localhost:8080', kv?: KVNamespace) {
     this.orchestratorUrl = orchestratorUrl;
@@ -392,6 +431,10 @@ export class CommHubAdapter {
    */
   setKV(kv: KVNamespace): void {
     this.kv = kv;
+  }
+
+  setDB(db: D1Database): void {
+    this.db = db;
   }
 
   async processEvent(event: NormalizedEvent): Promise<OrchestratorResponse> {
@@ -406,15 +449,22 @@ export class CommHubAdapter {
     const totalTokens = request.skillHints.reduce((sum, s) => sum + s.tokensEstimate, 0);
     safeLog.log(`[CommHub] Skills: ${request.skillHints.map(s => s.category).join(', ')} (~${totalTokens} tokens)`);
 
-    return sendToOrchestrator(request, this.kv);
+    return sendToOrchestrator(request, this.kv, this.db);
   }
 
   /**
    * Get pending requests from queue (cached to reduce KV list ops)
    */
   async getPendingRequests(): Promise<string[]> {
-    if (!this.kv) return [];
-    return getTaskIds(this.kv);
+    if (this.db) {
+      try {
+        return await listPendingTaskIdsD1({ DB: this.db } as any);
+      } catch (error) {
+        safeLog.error('[CommHub] D1 pending list failed (falling back)', { error: String(error) });
+      }
+    }
+    if (this.kv) return getTaskIds(this.kv);
+    return [];
   }
 
   /**
@@ -422,14 +472,30 @@ export class CommHubAdapter {
    * NEW: Use queue:task: prefix
    */
   async getRequest(requestId: string): Promise<OrchestratorRequest | null> {
-    if (!this.kv) return null;
-    return await this.kv.get<OrchestratorRequest>(`queue:task:${requestId}`, 'json');
+    if (this.db) {
+      try {
+        const got = await getTaskD1({ DB: this.db } as any, requestId);
+        return (got?.task ?? null) as any;
+      } catch (error) {
+        safeLog.error('[CommHub] D1 get task failed (falling back)', { error: String(error) });
+      }
+    }
+    if (this.kv) return await this.kv.get<OrchestratorRequest>(`queue:task:${requestId}`, 'json');
+    return null;
   }
 
   /**
    * Store result for a request
    */
   async storeResult(requestId: string, result: OrchestratorResponse): Promise<void> {
+    if (this.db) {
+      try {
+        await storeResultD1({ DB: this.db } as any, requestId, result as any);
+        return;
+      } catch (error) {
+        safeLog.error('[CommHub] D1 store result failed (falling back)', { error: String(error) });
+      }
+    }
     if (!this.kv) return;
 
     // Store result
@@ -450,8 +516,15 @@ export class CommHubAdapter {
    * Get result for a request
    */
   async getResult(requestId: string): Promise<OrchestratorResponse | null> {
-    if (!this.kv) return null;
-    return await this.kv.get<OrchestratorResponse>(`orchestrator:result:${requestId}`, 'json');
+    if (this.db) {
+      try {
+        return (await getResultD1({ DB: this.db } as any, requestId)) as any;
+      } catch (error) {
+        safeLog.error('[CommHub] D1 get result failed (falling back)', { error: String(error) });
+      }
+    }
+    if (this.kv) return await this.kv.get<OrchestratorResponse>(`orchestrator:result:${requestId}`, 'json');
+    return null;
   }
 }
 

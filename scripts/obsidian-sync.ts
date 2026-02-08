@@ -27,8 +27,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { config } from 'dotenv';
 
-// Load environment variables from .env file
-config();
+// Load environment variables from .env.local (preferred) or .env.
+// This keeps local secrets out of the repo by default, while still allowing
+// exported env vars (e.g. launchd runner) to take precedence.
+const envPath = fs.existsSync(path.join(process.cwd(), '.env.local')) ? '.env.local' : '.env';
+config({ path: envPath });
 
 // ============================================================================
 // Configuration
@@ -80,11 +83,11 @@ interface ProcessedLifelog {
 interface LifelogHighlight {
   id: string;
   limitless_id: string;
-  title: string;
-  content: string;
-  speaker: string | null;
+  highlight_time: string; // timestamptz
+  extracted_text: string | null;
+  speaker_name: string | null;
   topics: string[];
-  timestamp: string;
+  processing_status: string;
   user_reflection: string | null; // Phase 4: User's emotional reflection
   user_action_plan: string | null; // Phase 4: Action plan for applying insights
   created_at: string;
@@ -324,20 +327,24 @@ function buildDailyDigest(date: string, lifelogs: ProcessedLifelog[], highlights
     lines.push('## User Highlights');
     lines.push('');
 
-    // Sort highlights by timestamp
+    // Sort highlights by highlight_time
     const sortedHighlights = [...highlights].sort(
-      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+      (a, b) => new Date(a.highlight_time).getTime() - new Date(b.highlight_time).getTime()
     );
 
     for (const highlight of sortedHighlights) {
-      const time = formatTimeJST(highlight.timestamp);
-      const speaker = highlight.speaker || '大田原正幸';
+      const time = formatTimeJST(highlight.highlight_time);
+      const speaker = highlight.speaker_name || '大田原正幸';
+      const rawText = (highlight.extracted_text || '').trim();
+      const title = rawText
+        ? rawText.replace(/\s+/g, ' ').slice(0, 60) + (rawText.length > 60 ? '…' : '')
+        : 'Highlight';
 
-      lines.push(`### ${time} — ${highlight.title}`);
+      lines.push(`### ${time} — ${title}`);
       lines.push(`*Speaker: ${speaker}*`);
       lines.push('');
       lines.push(`> [!tip] ハイライト`);
-      lines.push(`> ${highlight.content}`);
+      lines.push(`> ${rawText || '(no extracted text)'}`);
       lines.push('');
 
       const topics = parseJsonArray(highlight.topics);
@@ -824,125 +831,125 @@ async function main(): Promise<void> {
     `select=id,limitless_id,classification,summary,key_insights,action_items,topics,speakers,sentiment,title,start_time,end_time,duration_seconds,is_starred,raw_markdown&${query}`
   );
 
-  if (lifelogs.length === 0) {
-    console.log('✅ No unsynced lifelogs found. Everything up to date.');
-    return;
-  }
-
-  console.log(`📊 Found ${lifelogs.length} unsynced lifelogs`);
-
-  // Group by JST date
-  const byDate = new Map<string, ProcessedLifelog[]>();
-
-  for (const log of lifelogs) {
-    const date = getJSTDate(log.start_time);
-    const existing = byDate.get(date) || [];
-    existing.push(log);
-    byDate.set(date, existing);
-  }
-
-  console.log(`📁 Grouped into ${byDate.size} date(s)`);
-
-  // Fetch highlights for all dates (optimized: single query instead of N+1)
-  console.log('📌 Fetching user highlights from Supabase...');
-  const allDates = Array.from(byDate.keys());
-  const highlightsByDate = new Map<string, LifelogHighlight[]>();
-
-  if (allDates.length > 0) {
-    // Calculate date range (min to max)
-    const sortedDates = [...allDates].sort();
-    const minDate = new Date(`${sortedDates[0]}T00:00:00+09:00`).toISOString();
-    const maxDate = new Date(`${sortedDates[sortedDates.length - 1]}T23:59:59+09:00`).toISOString();
-
-    // Fetch all highlights in one query
-    const allHighlights = await supabaseFetch<LifelogHighlight[]>(
-      supabaseUrl,
-      serviceRoleKey,
-      'lifelog_highlights',
-      `select=id,limitless_id,title,content,speaker,topics,timestamp,user_reflection,user_action_plan,created_at&timestamp=gte.${minDate}&timestamp=lte.${maxDate}&order=timestamp.asc`
-    );
-
-    // Group highlights by date in memory
-    for (const highlight of allHighlights) {
-      const highlightDate = new Date(highlight.timestamp).toLocaleString('ja-JP', {
-        timeZone: 'Asia/Tokyo',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit'
-      }).split('/').join('-');
-
-      const existing = highlightsByDate.get(highlightDate) || [];
-      existing.push(highlight);
-      highlightsByDate.set(highlightDate, existing);
-    }
-
-    console.log(`  📌 Total ${allHighlights.length} highlight(s) across ${allDates.length} date(s)`);
-  }
-
-  // Process each date
   const syncedIds: string[] = [];
 
-  for (const [date, logs] of byDate) {
-    const [year, month] = date.split('-');
-    const dirPath = path.join(pendantDir, year, month);
-    const filePath = path.join(dirPath, `${date}.md`);
+  if (lifelogs.length === 0) {
+    console.log('✅ No unsynced lifelogs found. Everything up to date.');
+  } else {
+    console.log(`📊 Found ${lifelogs.length} unsynced lifelogs`);
 
-    const highlights = highlightsByDate.get(date) || [];
-    console.log(`  📝 ${date}: ${logs.length} recording(s) + ${highlights.length} highlight(s) → ${filePath}`);
+    // Group by JST date
+    const byDate = new Map<string, ProcessedLifelog[]>();
 
-    // Build markdown
-    const markdown = buildDailyDigest(date, logs, highlights);
-
-    if (!isDryRun) {
-      // Create directory if needed
-      fs.mkdirSync(dirPath, { recursive: true });
-
-      // Check if file already exists (append new recordings)
-      if (fs.existsSync(filePath)) {
-        // Read existing file and merge
-        const existing = fs.readFileSync(filePath, 'utf-8');
-        // Replace the entire file with new content (includes all recordings for the day)
-        fs.writeFileSync(filePath, markdown, 'utf-8');
-        console.log(`    ↻ Updated existing file`);
-      } else {
-        fs.writeFileSync(filePath, markdown, 'utf-8');
-        console.log(`    ✨ Created new file`);
-      }
-
-      // Collect synced IDs
-      syncedIds.push(...logs.map((l) => l.id));
-    } else {
-      console.log(`    (dry run - skipped)`);
-      console.log(`    Preview (first 200 chars): ${markdown.substring(0, 200)}...`);
+    for (const log of lifelogs) {
+      const date = getJSTDate(log.start_time);
+      const existing = byDate.get(date) || [];
+      existing.push(log);
+      byDate.set(date, existing);
     }
-  }
 
-  // Mark as synced in Supabase
-  if (!isDryRun && syncedIds.length > 0) {
-    console.log(`\n🔄 Marking ${syncedIds.length} lifelogs as synced in Supabase...`);
+    console.log(`📁 Grouped into ${byDate.size} date(s)`);
 
-    // Update in batches of 50
-    for (let i = 0; i < syncedIds.length; i += 50) {
-      const batch = syncedIds.slice(i, i + 50);
-      const idFilter = batch.map((id) => `"${id}"`).join(',');
+    // Fetch highlights for all dates (optimized: single query instead of N+1)
+    console.log('📌 Fetching user highlights from Supabase...');
+    const allDates = Array.from(byDate.keys());
+    const highlightsByDate = new Map<string, LifelogHighlight[]>();
 
-      await supabaseFetch(
+    if (allDates.length > 0) {
+      // Calculate date range (min to max)
+      const sortedDates = [...allDates].sort();
+      const minDate = new Date(`${sortedDates[0]}T00:00:00+09:00`).toISOString();
+      const maxDate = new Date(`${sortedDates[sortedDates.length - 1]}T23:59:59+09:00`).toISOString();
+
+      // Fetch all highlights in one query
+      const allHighlights = await supabaseFetch<LifelogHighlight[]>(
         supabaseUrl,
         serviceRoleKey,
-        'processed_lifelogs',
-        `id=in.(${idFilter})`,
-        'PATCH',
-        {
-          obsidian_synced: true,
-          obsidian_synced_at: new Date().toISOString(),
-        }
+        'lifelog_highlights',
+        `select=id,limitless_id,highlight_time,extracted_text,speaker_name,topics,processing_status,user_reflection,user_action_plan,created_at&highlight_time=gte.${minDate}&highlight_time=lte.${maxDate}&processing_status=eq.completed&order=highlight_time.asc`
       );
 
-      console.log(`  ✅ Batch ${Math.floor(i / 50) + 1}: ${batch.length} records marked`);
-    }
-  }
+      // Group highlights by date in memory
+      for (const highlight of allHighlights) {
+        const highlightDate = new Date(highlight.highlight_time)
+          .toLocaleString('ja-JP', {
+            timeZone: 'Asia/Tokyo',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+          })
+          .split('/')
+          .join('-');
 
-  console.log(`\n✅ Lifelogs sync complete! ${syncedIds.length} lifelogs synced to Obsidian.`);
+        const existing = highlightsByDate.get(highlightDate) || [];
+        existing.push(highlight);
+        highlightsByDate.set(highlightDate, existing);
+      }
+
+      console.log(`  📌 Total ${allHighlights.length} highlight(s) across ${allDates.length} date(s)`);
+    }
+
+    // Process each date
+    for (const [date, logs] of byDate) {
+      const [year, month] = date.split('-');
+      const dirPath = path.join(pendantDir, year, month);
+      const filePath = path.join(dirPath, `${date}.md`);
+
+      const highlights = highlightsByDate.get(date) || [];
+      console.log(`  📝 ${date}: ${logs.length} recording(s) + ${highlights.length} highlight(s) → ${filePath}`);
+
+      // Build markdown
+      const markdown = buildDailyDigest(date, logs, highlights);
+
+      if (!isDryRun) {
+        // Create directory if needed
+        fs.mkdirSync(dirPath, { recursive: true });
+
+        // Check if file already exists (append new recordings)
+        if (fs.existsSync(filePath)) {
+          // Replace the entire file with new content (includes all recordings for the day)
+          fs.writeFileSync(filePath, markdown, 'utf-8');
+          console.log(`    ↻ Updated existing file`);
+        } else {
+          fs.writeFileSync(filePath, markdown, 'utf-8');
+          console.log(`    ✨ Created new file`);
+        }
+
+        // Collect synced IDs
+        syncedIds.push(...logs.map((l) => l.id));
+      } else {
+        console.log(`    (dry run - skipped)`);
+        console.log(`    Preview (first 200 chars): ${markdown.substring(0, 200)}...`);
+      }
+    }
+
+    // Mark as synced in Supabase
+    if (!isDryRun && syncedIds.length > 0) {
+      console.log(`\n🔄 Marking ${syncedIds.length} lifelogs as synced in Supabase...`);
+
+      // Update in batches of 50
+      for (let i = 0; i < syncedIds.length; i += 50) {
+        const batch = syncedIds.slice(i, i + 50);
+        const idFilter = batch.map((id) => `"${id}"`).join(',');
+
+        await supabaseFetch(
+          supabaseUrl,
+          serviceRoleKey,
+          'processed_lifelogs',
+          `id=in.(${idFilter})`,
+          'PATCH',
+          {
+            obsidian_synced: true,
+            obsidian_synced_at: new Date().toISOString(),
+          }
+        );
+
+        console.log(`  ✅ Batch ${Math.floor(i / 50) + 1}: ${batch.length} records marked`);
+      }
+    }
+
+    console.log(`\n✅ Lifelogs sync complete! ${syncedIds.length} lifelogs synced to Obsidian.`);
+  }
 
   // === Phase 2: Sync Digest Reports ===
   const digestCount = await syncDigestReports(supabaseUrl, serviceRoleKey, pendantDir);

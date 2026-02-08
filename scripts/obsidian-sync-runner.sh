@@ -9,9 +9,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LOG_DIR="$PROJECT_DIR/logs"
 LOG_FILE="$LOG_DIR/obsidian-sync.log"
+LOCK_DIR="$LOG_DIR/obsidian-sync.lock"
 
 # Ensure log directory exists
 mkdir -p "$LOG_DIR"
+
+# Simple non-overlapping guard (launchd can re-trigger while a run is in progress).
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  exit 0
+fi
+cleanup() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
+trap cleanup EXIT
 
 # Rotate log if > 1MB
 if [ -f "$LOG_FILE" ] && [ "$(stat -f%z "$LOG_FILE" 2>/dev/null || echo 0)" -gt 1048576 ]; then
@@ -28,14 +36,21 @@ fi
     exit 1
   fi
 
-  export $(grep -E "^SUPABASE_URL=|^SUPABASE_SERVICE_ROLE_KEY=" "$ENV_FILE" | xargs)
+  # Robustly parse SUPABASE_* lines (service role keys often contain '=' padding).
+  while IFS='=' read -r key value; do
+    case "$key" in
+      SUPABASE_URL|SUPABASE_SERVICE_ROLE_KEY)
+        export "$key=$value"
+        ;;
+    esac
+  done < <(grep -E "^(SUPABASE_URL|SUPABASE_SERVICE_ROLE_KEY)=" "$ENV_FILE" || true)
 
   if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
     echo "ERROR: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set"
     exit 1
   fi
 
-  # Ensure npx is available (nvm / Homebrew / system)
+  # Ensure node is available (nvm / Homebrew / system)
   for node_dir in \
     "$HOME/.nvm/versions/node"/*/bin \
     /opt/homebrew/bin \
@@ -45,7 +60,7 @@ fi
 
   # Run sync
   cd "$PROJECT_DIR"
-  npx tsx scripts/obsidian-sync.ts 2>&1
+  node scripts/obsidian-sync.ts 2>&1
 
   echo "=== $(date '+%Y-%m-%d %H:%M:%S') Obsidian Sync End ==="
   echo ""

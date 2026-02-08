@@ -24,6 +24,7 @@ export interface Env {
   CACHE?: KVNamespace;
   USAGE_CACHE?: KVNamespace;
   KV?: KVNamespace; // AI classification cache
+  RATE_LIMITER?: DurableObjectNamespace;
   TASK_COORDINATOR?: DurableObjectNamespace;
   COCKPIT_WS?: DurableObjectNamespace;
   SYSTEM_EVENTS?: DurableObjectNamespace;
@@ -34,6 +35,8 @@ export interface Env {
   KNOWLEDGE_INDEX?: VectorizeIndex;
   PUSH_NOTIFICATION_QUEUE?: Queue<PushNotificationQueueMessage>;
   ENVIRONMENT: string;
+  DEPLOY_TARGET?: string;          // hub | canary | dev (operational safety)
+  CANARY_WRITE_ENABLED?: string;   // "true" to allow non-GET methods on canary
   ALLOW_DEV_ORIGINS?: string;
   // Slack
   SLACK_BOT_TOKEN?: string;
@@ -64,6 +67,9 @@ export interface Env {
   LIMITLESS_USER_ID?: string;      // User ID for automatic sync
   LIMITLESS_AUTO_SYNC_ENABLED?: string; // Enable/disable auto-sync (default: false)
   LIMITLESS_SYNC_INTERVAL_HOURS?: string; // Sync interval in hours (default: 1)
+  LIMITLESS_SYNC_WEBHOOK_KEY?: string; // Dedicated webhook auth key for Limitless-only worker
+  LIMITLESS_POLLER_ENABLED?: string; // Enable/disable Limitless poller (default: false)
+  DAEMON_HEALTH_CRON_ENABLED?: string; // Enable/disable daemon health check in scheduled cron (default: false)
   // Notifications (Heartbeat pattern)
   DISCORD_WEBHOOK_URL?: string;    // Discord webhook URL for digest/alert notifications
   // Supabase (Limitless pipeline storage)
@@ -71,6 +77,8 @@ export interface Env {
   SUPABASE_SERVICE_ROLE_KEY?: string; // Supabase service role key (server-side only)
   // OpenAI (optional, for higher-quality lifelog processing)
   OPENAI_API_KEY?: string;         // GPT-4o-mini for classification/summarization
+  // Anthropic (optional, alternate provider)
+  ANTHROPIC_API_KEY?: string;
   // Google Slides (optional, for auto-generating slides from digests)
   GOOGLE_CLIENT_ID?: string;       // Google OAuth client ID
   GOOGLE_CLIENT_SECRET?: string;   // Google OAuth client secret
@@ -82,6 +90,7 @@ export interface Env {
   GMAIL_CLIENT_ID?: string;        // Gmail OAuth client ID
   GMAIL_CLIENT_SECRET?: string;    // Gmail OAuth client secret
   GMAIL_REFRESH_TOKEN?: string;    // Gmail OAuth refresh token
+  SCHEDULED_GMAIL_ONLY?: string;   // "true" to run only Gmail polling in */15 cron (production-safe)
   // JWT Authentication (Cockpit API)
   JWT_SECRET?: string;             // HS256 secret for development
   JWT_PRIVATE_KEY?: string;        // RS256 private key for production
@@ -92,6 +101,13 @@ export interface Env {
   // Feature flags
   FEATURE_HIGHLIGHTS_ENABLED?: string; // Enable/disable Limitless highlights feature
   DRY_RUN?: string;                // Enable dry-run mode for testing (Limitless poller)
+  // Receipt PDF text extraction (unpdf) - default OFF
+  PDF_TEXT_EXTRACTION_ENABLED?: string; // "true" to enable
+  PDF_TEXT_EXTRACTION_SAMPLE_RATE?: string; // 0.0-1.0 (default: 0.0)
+  PDF_TEXT_EXTRACTION_MAX_PAGES?: string; // default: 50
+  PDF_TEXT_EXTRACTION_MAX_BYTES?: string; // default: 10485760 (10MB)
+  PDF_TEXT_EXTRACTION_MAX_CHARS?: string; // truncate extracted text before sending to AI (default: 8000)
+  PDF_TEXT_EXTRACTION_USE_FOR_CLASSIFICATION?: string; // "true" to append extracted text to classification prompt (default: false)
   // Web Push (PWA)
   VAPID_PUBLIC_KEY?: string;       // VAPID public key for web push
   VAPID_PRIVATE_KEY?: string;      // VAPID private key for web push
@@ -99,6 +115,7 @@ export interface Env {
   // Slack webhook (alternative to bot)
   SLACK_WEBHOOK_URL?: string;      // Slack webhook URL for notifications
   // freee API Integration
+  FREEE_INTEGRATION_ENABLED?: string; // "false" to disable freee integration explicitly (default: enabled)
   FREEE_CLIENT_ID?: string;        // freee OAuth client ID
   FREEE_CLIENT_SECRET?: string;    // freee OAuth client secret
   FREEE_REDIRECT_URI?: string;     // freee OAuth redirect URI
@@ -107,6 +124,8 @@ export interface Env {
   FREEE_BASE_URL?: string;         // freee API base URL (default: https://api.freee.co.jp/api/1)
   // Highlight API (iOS Shortcut)
   HIGHLIGHT_API_KEY?: string;      // API key for Limitless highlights feature
+  // Base URL for self-calls (cron -> API) if needed
+  WORKERS_URL?: string;
   // GitHub Actions Integration (Web Receipt Scraper)
   GITHUB_TOKEN?: string;           // GitHub Personal Access Token for workflow_dispatch
   GITHUB_REPO?: string;            // Repository name (default: cursorvers/cloudflare-workers-hub)

@@ -156,12 +156,13 @@ curl -H "X-API-Key: your-monitoring-key" https://your-worker.workers.dev/metrics
 
 ### Environment Configuration
 
-```toml
-# wrangler.toml
-[env.production]
-vars = {
-  MONITORING_API_KEY = "your-secure-monitoring-key"
-}
+Recommended (Workers secret; applies to the correct script deterministically):
+```bash
+# hub (envless)
+printf "%s" "your-secure-monitoring-key" | wrangler secret put MONITORING_API_KEY
+
+# canary
+printf "%s" "your-secure-monitoring-key" | wrangler secret put MONITORING_API_KEY --env canary
 ```
 
 Or via Cloudflare Dashboard:

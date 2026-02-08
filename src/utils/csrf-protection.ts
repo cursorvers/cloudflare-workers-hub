@@ -35,9 +35,14 @@ export interface OriginValidationResult {
 function getAllowedOrigins(env: Env): string[] {
   const origins: string[] = [];
 
-  // Production domain
-  const workersDomain = 'orchestrator-hub.masa-stage1.workers.dev';
-  origins.push(`https://${workersDomain}`);
+  // Production domains (multiple Workers scripts can exist via Wrangler envs).
+  // Keep this list explicit to avoid accidentally trusting arbitrary origins.
+  const workersDomains = [
+    'orchestrator-hub.masa-stage1.workers.dev',
+    'orchestrator-hub-production.masa-stage1.workers.dev',
+    'orchestrator-hub-canary.masa-stage1.workers.dev',
+  ];
+  workersDomains.forEach((d) => origins.push(`https://${d}`));
 
   // Development origins
   if (env.ENVIRONMENT === 'development' && env.ALLOW_DEV_ORIGINS) {

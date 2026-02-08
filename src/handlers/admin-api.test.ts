@@ -42,12 +42,25 @@ vi.mock('../utils/api-auth', () => ({
   hashAPIKey: vi.fn((key: string) => `hashed_${key}`),
 }));
 
+vi.mock('../utils/queue-kv-to-d1', () => ({
+  migrateQueueTasksKVToD1: vi.fn(async () => ({ migrated: 1, skipped: 0, errors: [], cursor: '', list_complete: true })),
+  migrateResultsKVToD1: vi.fn(async () => ({ migrated: 2, skipped: 0, errors: [], cursor: '', list_complete: true })),
+}));
+
 // Helper to create mock Env
 function createMockEnv(): Env {
   const cache = new Map<string, string>();
+  const stmt = {
+    bind: vi.fn(function () { return this; }),
+    run: vi.fn(async () => ({})),
+  };
+  const db = {
+    prepare: vi.fn(() => stmt),
+  };
 
   return {
     ADMIN_API_KEY: 'admin-key',
+    DB: db as any,
     CACHE: {
       get: vi.fn((key: string) => Promise.resolve(cache.get(key) || null)),
       put: vi.fn((key: string, value: string) => {
@@ -234,7 +247,7 @@ describe('Admin API Handler', () => {
       expect(response.status).toBe(400);
     });
 
-    it('should store mapping in CACHE with correct key format', async () => {
+    it('should store mapping in DB', async () => {
       const request = new Request('https://example.com/api/admin/apikey/mapping', {
         method: 'POST',
         headers: {
@@ -250,14 +263,11 @@ describe('Admin API Handler', () => {
 
       await handleAdminAPI(request, env, '/api/admin/apikey/mapping');
 
-      expect(env.CACHE!.put).toHaveBeenCalledWith(
-        expect.stringMatching(/^apikey:mapping:hashed_/),
-        expect.stringContaining('user123')
-      );
+      expect((env.DB as any).prepare).toHaveBeenCalledWith(expect.stringContaining('api_key_mappings'));
     });
 
-    it('should return 500 when CACHE is unavailable', async () => {
-      const envWithoutCache = { ...env, CACHE: undefined } as Env;
+    it('should return 500 when DB is unavailable', async () => {
+      const envWithoutDB = { ...env, DB: undefined } as Env;
 
       const request = new Request('https://example.com/api/admin/apikey/mapping', {
         method: 'POST',
@@ -272,7 +282,7 @@ describe('Admin API Handler', () => {
         }),
       });
 
-      const response = await handleAdminAPI(request, envWithoutCache, '/api/admin/apikey/mapping');
+      const response = await handleAdminAPI(request, envWithoutDB, '/api/admin/apikey/mapping');
 
       expect(response.status).toBe(500);
     });
@@ -316,7 +326,7 @@ describe('Admin API Handler', () => {
       expect(response.status).toBe(400);
     });
 
-    it('should call CACHE.delete with correct key', async () => {
+    it('should delete mapping in DB', async () => {
       const request = new Request('https://example.com/api/admin/apikey/mapping', {
         method: 'DELETE',
         headers: {
@@ -330,9 +340,43 @@ describe('Admin API Handler', () => {
 
       await handleAdminAPI(request, env, '/api/admin/apikey/mapping');
 
-      expect(env.CACHE.delete).toHaveBeenCalledWith(
-        expect.stringMatching(/^apikey:mapping:hashed_/)
-      );
+      expect((env.DB as any).prepare).toHaveBeenCalledWith(expect.stringContaining('DELETE FROM api_key_mappings'));
+    });
+  });
+
+  describe('Queue KV->D1 Migration', () => {
+    it('should migrate queue tasks', async () => {
+      const request = new Request('https://example.com/api/admin/queue/migrate-tasks-kv-to-d1', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': 'admin-key',
+        },
+        body: JSON.stringify({ limit: 10, cleanup: false }),
+      });
+
+      const response = await handleAdminAPI(request, env, '/api/admin/queue/migrate-tasks-kv-to-d1');
+      expect(response.status).toBe(200);
+      const data = await response.json() as any;
+      expect(data.success).toBe(true);
+      expect(data.migrated).toBe(1);
+    });
+
+    it('should migrate results', async () => {
+      const request = new Request('https://example.com/api/admin/queue/migrate-results-kv-to-d1', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': 'admin-key',
+        },
+        body: JSON.stringify({ limit: 10, cleanup: false }),
+      });
+
+      const response = await handleAdminAPI(request, env, '/api/admin/queue/migrate-results-kv-to-d1');
+      expect(response.status).toBe(200);
+      const data = await response.json() as any;
+      expect(data.success).toBe(true);
+      expect(data.migrated).toBe(2);
     });
   });
 
@@ -351,7 +395,10 @@ describe('Admin API Handler', () => {
     });
 
     it('should handle exceptions gracefully', async () => {
-      vi.mocked(env.CACHE.put).mockRejectedValueOnce(new Error('Database error'));
+      (env.DB as any).prepare.mockImplementationOnce(() => ({
+        bind: vi.fn(function () { return this; }),
+        run: vi.fn(async () => { throw new Error('Database error'); }),
+      }));
 
       const request = new Request('https://example.com/api/admin/apikey/mapping', {
         method: 'POST',

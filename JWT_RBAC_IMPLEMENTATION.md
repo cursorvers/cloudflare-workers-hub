@@ -296,7 +296,7 @@ npx tsx scripts/test-jwt-auth.ts
 
 4. **Deploy to Production**:
 ```bash
-wrangler deploy --env production
+wrangler deploy --env ""
 ```
 
 5. **Create Real Admin User**:

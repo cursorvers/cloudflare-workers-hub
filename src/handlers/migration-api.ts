@@ -4,7 +4,6 @@
  * Provides endpoints for queue migration management
  */
 
-import { KVNamespace } from '@cloudflare/workers-types';
 import {
   migrateQueueToNewFormat,
   migrateLeases,

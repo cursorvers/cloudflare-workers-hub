@@ -405,6 +405,8 @@ export async function sendPushNotification(
 
   const vapidSubject = env.VAPID_SUBJECT || 'mailto:admin@example.com';
   const severity = payload.severity || 'info';
+  const queueSeverity: 'critical' | 'high' | 'medium' | 'low' =
+    severity === 'critical' ? 'critical' : severity === 'warning' ? 'medium' : 'low';
 
   try {
     let query = 'SELECT * FROM push_subscriptions WHERE active = 1';
@@ -462,7 +464,7 @@ export async function sendPushNotification(
             timestamp: Date.now(),
           },
         },
-        severity,
+        severity: queueSeverity,
       });
 
       // Return immediately (processing happens in queue consumer)

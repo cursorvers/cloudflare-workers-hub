@@ -72,8 +72,8 @@ export async function getRecentImportantEmails(options: {
 }): Promise<GmailMessage[]> {
   const { maxResults = 10, credentialsPath, subject } = options;
 
-  // For Domain-Wide Delegation, get subject from env var if not provided
-  const userEmail = subject || process.env.GOOGLE_CALENDAR_USER_EMAIL;
+  // Domain-Wide Delegation subject is optional; callers should pass it explicitly when needed.
+  const userEmail = subject;
 
   const credentials = await import('./google-auth').then(m => m.loadGoogleCredentials(credentialsPath));
   const tokenResponse = await import('./google-auth').then(m =>

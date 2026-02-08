@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "SaaS領収書アップローダー",
+  "version": "1.0.0",
+  "description": "SaaSの請求書PDFを検出してアップロードします。",
+  "permissions": [
+    "storage",
+    "downloads",
+    "activeTab",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://dash.cloudflare.com/*",
+    "https://vercel.com/*",
+    "https://dashboard.heroku.com/*",
+    "https://orchestrator-hub.masa-stage1.workers.dev/*",
+    "https://orchestrator-hub-canary.masa-stage1.workers.dev/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "領収書アップローダー",
+    "default_popup": "popup/popup.html"
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://dash.cloudflare.com/*",
+        "https://vercel.com/*",
+        "https://dashboard.heroku.com/*"
+      ],
+      "js": [
+        "content-scripts/detector.js"
+      ],
+      "css": [
+        "styles/content.css"
+      ]
+    }
+  ]
+}

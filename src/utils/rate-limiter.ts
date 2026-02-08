@@ -1,8 +1,9 @@
 /**
- * Rate Limiter with KV Storage
+ * Rate Limiter (DO-first, KV fallback)
  *
  * Implements token bucket algorithm for rate limiting API requests.
- * Uses Cloudflare KV for distributed rate limiting across workers.
+ * Uses a Durable Object on hot paths to avoid KV daily write quota blowups.
+ * Falls back to KV or in-memory tracking when DO is not available (tests/dev).
  *
  * ## Features
  * - Sliding window algorithm (1-minute buckets)
@@ -33,13 +34,24 @@ export interface RateLimitConfig {
 export interface RateLimitResult {
   allowed: boolean;
   remaining: number;
-  resetAt: Date;
+  // Historically some callsites/tests used epoch millis. Keep both for compatibility.
+  resetAt: Date | number;
   retryAfter?: number; // seconds
 }
 
 // =============================================================================
 // Rate Limit Configuration
 // =============================================================================
+
+// Legacy (channel-based) limits used by older code + tests.
+const LEGACY_CHANNEL_LIMITS: Record<string, number> = {
+  slack: 100,
+  admin: 10,
+  // Webhook policies
+  limitless_webhook_public: 10,
+  limitless_webhook_auth: 60,
+  default: 30,
+};
 
 const RATE_LIMITS: Record<string, { user: number; ip: number }> = {
   // High-frequency endpoints
@@ -119,12 +131,13 @@ function getCurrentWindow(): string {
  * Uses sliding window algorithm with 1-minute buckets.
  * Stores request count in KV with automatic expiration.
  */
-export async function checkRateLimit(
+async function checkHttpRateLimit(
   request: Request,
   env: Env,
   userId?: string
 ): Promise<RateLimitResult> {
-  const pathname = new URL(request.url).pathname;
+  // In Workers, request.url is absolute. In tests it may be relative.
+  const pathname = new URL(request.url, 'http://localhost').pathname;
   const config = getRateLimitConfig(pathname);
   const clientId = getClientIdentifier(request, userId);
   const isUser = clientId.startsWith('user:');
@@ -135,70 +148,196 @@ export async function checkRateLimit(
   const key = `ratelimit:${clientId}:${pathname}:${window}`;
 
   try {
-    // Get current count
-    const currentStr = await env.KV?.get(key);
-    const current = currentStr ? parseInt(currentStr, 10) : 0;
+    const windowStartSec = parseInt(window, 10);
+    const resetAt = new Date((windowStartSec + 60) * 1000);
 
-    // Check if limit exceeded
-    if (current >= maxRequests) {
-      const resetAt = new Date((parseInt(window, 10) + 60) * 1000);
-      const retryAfter = Math.ceil((resetAt.getTime() - Date.now()) / 1000);
-
-      safeLog.warn('[RateLimit] Limit exceeded', {
-        clientId,
-        pathname,
-        current,
-        maxRequests,
-        retryAfter,
+    // Prefer DO to avoid KV puts on every request.
+    if (env.RATE_LIMITER) {
+      // Stable sharding: keep DO instance count bounded.
+      const shard = fnv1a32(clientId) & 255; // 256 shards
+      const id = env.RATE_LIMITER.idFromName(`rl:${shard}`);
+      const stub = env.RATE_LIMITER.get(id);
+      const resp = await stub.fetch('https://rate-limiter/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          key,
+          limit: maxRequests,
+          ttlSec: 120, // window + grace period
+          windowStartSec,
+          windowSec: 60,
+        }),
       });
 
-      return {
-        allowed: false,
-        remaining: 0,
-        resetAt,
-        retryAfter,
-      };
+      const data = (await resp.json()) as { allowed: boolean; remaining: number; retryAfter?: number };
+      if (!data.allowed) {
+        const retryAfter = Number.isFinite(data.retryAfter) ? data.retryAfter : Math.ceil((resetAt.getTime() - Date.now()) / 1000);
+        safeLog.warn('[RateLimit] Limit exceeded', { clientId, pathname, current: maxRequests, maxRequests, retryAfter });
+        return { allowed: false, remaining: 0, resetAt, retryAfter };
+      }
+
+      return { allowed: true, remaining: Math.max(0, data.remaining ?? 0), resetAt };
     }
 
-    // Increment counter
-    const newCount = current + 1;
-    await env.KV?.put(key, newCount.toString(), {
-      expirationTtl: 120, // 2 minutes (window + grace period)
-    });
+    // Fallback: per-isolate memory bucket counter (best-effort).
+    const store = getHttpBuckets(env);
+    const nowMs = Date.now();
+    const expiresAtMs = nowMs + 120_000;
+    const existing = store.get(key);
+    const fresh = existing && existing.expiresAtMs > nowMs ? existing : null;
+    const current = fresh?.count ?? 0;
 
-    const resetAt = new Date((parseInt(window, 10) + 60) * 1000);
-    return {
-      allowed: true,
-      remaining: maxRequests - newCount,
-      resetAt,
-    };
+    if (current >= maxRequests) {
+      const retryAfter = Math.ceil((resetAt.getTime() - nowMs) / 1000);
+      safeLog.warn('[RateLimit] Limit exceeded (memory fallback)', { clientId, pathname, current, maxRequests, retryAfter });
+      return { allowed: false, remaining: 0, resetAt, retryAfter };
+    }
+
+    const newCount = current + 1;
+    store.set(key, { count: newCount, expiresAtMs });
+    return { allowed: true, remaining: maxRequests - newCount, resetAt };
   } catch (error) {
     // If KV is unavailable, fail open (allow request) to prevent service disruption
     safeLog.error('[RateLimit] KV error, failing open', { error });
-    return {
-      allowed: true,
-      remaining: maxRequests,
-      resetAt: new Date(Date.now() + 60000),
-    };
+      return {
+        allowed: true,
+        remaining: maxRequests,
+        resetAt: new Date(Date.now() + 60000),
+      };
+    }
+}
+
+function fnv1a32(input: string): number {
+  // 32-bit FNV-1a
+  let h = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
   }
+  return h >>> 0;
+}
+
+type HttpBucket = { count: number; expiresAtMs: number };
+const httpBucketsByEnv = new WeakMap<Env, Map<string, HttpBucket>>();
+
+function getHttpBuckets(env: Env): Map<string, HttpBucket> {
+  let store = httpBucketsByEnv.get(env);
+  if (!store) {
+    store = new Map();
+    httpBucketsByEnv.set(env, store);
+  }
+  return store;
+}
+
+const memoryByEnv = new WeakMap<Env, Map<string, number[]>>();
+
+function getLegacyLimit(channel: string): number {
+  return LEGACY_CHANNEL_LIMITS[channel] ?? LEGACY_CHANNEL_LIMITS.default;
+}
+
+async function checkLegacyRateLimit(
+  env: Env,
+  channel: string,
+  userId: string
+): Promise<RateLimitResult> {
+  const limit = getLegacyLimit(channel);
+  const key = `ratelimit:${channel}:${userId}`;
+  const now = Date.now();
+  const cutoff = now - 60_000;
+
+  const inMemoryCheck = async (): Promise<RateLimitResult> => {
+    let store = memoryByEnv.get(env);
+    if (!store) {
+      store = new Map();
+      memoryByEnv.set(env, store);
+    }
+
+    const requests = store.get(key) ?? [];
+    const recent = requests.filter((ts) => ts >= cutoff);
+
+    if (recent.length >= limit) {
+      const oldest = Math.min(...recent);
+      const resetAt = oldest + 60_000;
+      const retryAfter = Math.max(1, Math.ceil((resetAt - now) / 1000));
+      store.set(key, recent);
+      return { allowed: false, remaining: 0, resetAt, retryAfter };
+    }
+
+    const updated = [...recent, now];
+    store.set(key, updated);
+    return { allowed: true, remaining: limit - updated.length, resetAt: now + 60_000 };
+  };
+
+  // Prefer KV if available in this environment (legacy name: CACHE).
+  try {
+    const cache = (env as any).CACHE;
+    if (!cache?.get || !cache?.put) return await inMemoryCheck();
+
+    const stored = await cache.get(key, 'json');
+    const existingRequests = Array.isArray(stored?.requests) ? stored.requests : [];
+    const recent = existingRequests
+      .filter((ts: unknown): ts is number => typeof ts === 'number' && ts >= cutoff);
+
+    if (recent.length >= limit) {
+      const oldest = Math.min(...recent);
+      const resetAt = oldest + 60_000;
+      const retryAfter = Math.max(1, Math.ceil((resetAt - now) / 1000));
+      return { allowed: false, remaining: 0, resetAt, retryAfter };
+    }
+
+    const updated = [...recent, now];
+    await cache.put(key, JSON.stringify({ requests: updated }), { expirationTtl: 120 });
+    return { allowed: true, remaining: limit - updated.length, resetAt: now + 60_000 };
+  } catch {
+    // If KV is unavailable, fail open-ish: allow but keep some local tracking to avoid a hard bypass.
+    return await inMemoryCheck();
+  }
+}
+
+export async function checkRateLimit(
+  request: Request,
+  env: Env,
+  userId?: string
+): Promise<RateLimitResult>;
+export async function checkRateLimit(
+  env: Env,
+  channel: string,
+  userId: string
+): Promise<RateLimitResult>;
+export async function checkRateLimit(
+  requestOrEnv: Request | Env,
+  envOrChannel: Env | string,
+  userId?: string
+): Promise<RateLimitResult> {
+  if (requestOrEnv instanceof Request) {
+    return await checkHttpRateLimit(requestOrEnv, envOrChannel as Env, userId);
+  }
+  return await checkLegacyRateLimit(requestOrEnv, envOrChannel as string, userId ?? 'unknown');
 }
 
 /**
  * Create rate limit error response
  */
 export function createRateLimitErrorResponse(result: RateLimitResult): Response {
+  const resetAt = result.resetAt instanceof Date
+    ? result.resetAt
+    : new Date((result.resetAt as number) || Date.now());
+  const resetAtSeconds = String(Math.ceil(resetAt.getTime() / 1000));
+
   return new Response(
     JSON.stringify({
-      error: 'Rate limit exceeded',
+      error: 'Too Many Requests',
       message: 'Too many requests. Please try again later.',
       retryAfter: result.retryAfter,
+      resetAt: resetAtSeconds,
     }),
     {
       status: 429,
       headers: {
         'Content-Type': 'application/json',
         'X-RateLimit-Remaining': result.remaining.toString(),
-        'X-RateLimit-Reset': result.resetAt.toISOString(),
+        // Epoch seconds (common convention for rate limit reset time).
+        'X-RateLimit-Reset': resetAtSeconds,
         'Retry-After': (result.retryAfter || 60).toString(),
         'X-Content-Type-Options': 'nosniff',
       },
@@ -215,7 +354,10 @@ export function addRateLimitHeaders(
 ): Response {
   const newResponse = new Response(response.body, response);
   newResponse.headers.set('X-RateLimit-Remaining', result.remaining.toString());
-  newResponse.headers.set('X-RateLimit-Reset', result.resetAt.toISOString());
+  const resetAt = result.resetAt instanceof Date
+    ? result.resetAt
+    : new Date((result.resetAt as number) || Date.now());
+  newResponse.headers.set('X-RateLimit-Reset', String(Math.ceil(resetAt.getTime() / 1000)));
   return newResponse;
 }
 

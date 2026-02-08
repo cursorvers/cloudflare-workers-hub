@@ -42,6 +42,12 @@ export async function handleReceiptSearch(
   env: Env
 ): Promise<Response> {
   const startTime = Date.now();
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: 'DB not configured' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
 
   // Parse query parameters
   const url = new URL(request.url);
@@ -190,7 +196,7 @@ export async function handleReceiptExport(
 ): Promise<Response> {
   // Use same search logic
   const searchResponse = await handleReceiptSearch(request, env);
-  const searchData = await searchResponse.json();
+  const searchData = (await searchResponse.json()) as any;
 
   if (!searchData.results) {
     return new Response('No results found', { status: 404 });
@@ -249,6 +255,12 @@ export async function handleReceiptDetail(
   env: Env,
   receiptId: string
 ): Promise<Response> {
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: 'DB not configured' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
   // Get receipt
   const receipt = await env.DB.prepare(
     'SELECT * FROM receipts WHERE id = ?'

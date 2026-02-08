@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="../styles/popup.css" />
+    <title>領収書アップローダー</title>
+  </head>
+  <body>
+    <header class="popup-header">
+      <h1>領収書アップローダー</h1>
+      <div class="status">
+        <span id="status-dot" class="status-dot"></span>
+        <span id="status-text">接続確認中...</span>
+      </div>
+    </header>
+
+    <section class="section">
+      <h2>最近のアップロード</h2>
+      <ul id="recent-list" class="recent-list"></ul>
+    </section>
+
+    <section class="section">
+      <h2>手動アップロード</h2>
+      <input id="manual-file" type="file" accept=".pdf" />
+      <button id="upload-button" class="primary">アップロード</button>
+      <p id="upload-status" class="hint"></p>
+    </section>
+
+    <footer class="popup-footer">
+      <button id="options-link" class="link-button">設定を開く</button>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

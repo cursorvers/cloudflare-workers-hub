@@ -8,7 +8,9 @@
  *
  * State Flow:
  * pending_validation → validated → classified → extracting → extracted
- * → uploading_r2 → uploaded_r2 → submitting_freee → completed
+ * → uploading_r2 → uploaded_r2 → submitting_freee → freee_uploaded
+ * → mapping_account → finding_partner → creating_deal → linking_receipt
+ * → completed
  *
  * Terminal States: completed, failed
  * Review State: needs_review (can transition to any valid state)
@@ -30,6 +32,11 @@ export type ReceiptStatus =
   | 'uploading_r2'
   | 'uploaded_r2'
   | 'submitting_freee'
+  | 'freee_uploaded'
+  | 'mapping_account'
+  | 'finding_partner'
+  | 'creating_deal'
+  | 'linking_receipt'
   | 'completed'
   | 'failed'
   | 'needs_review';
@@ -83,9 +90,16 @@ const VALID_TRANSITIONS: Record<ReceiptStatus, ReceiptStatus[]> = {
   extracted: ['uploading_r2', 'failed'],
   uploading_r2: ['uploaded_r2', 'failed'],
   uploaded_r2: ['submitting_freee', 'failed'],
-  submitting_freee: ['completed', 'failed', 'needs_review'],
+  submitting_freee: ['freee_uploaded', 'failed', 'needs_review'],
+  // Deal automation states
+  freee_uploaded: ['mapping_account', 'completed', 'failed'],
+  mapping_account: ['finding_partner', 'needs_review', 'failed'],
+  finding_partner: ['creating_deal', 'needs_review', 'failed'],
+  creating_deal: ['linking_receipt', 'needs_review', 'failed'],
+  linking_receipt: ['completed', 'failed'],
+  // Terminal & recovery states
   completed: [], // Terminal state
-  failed: ['pending_validation', 'needs_review'], // Can retry
+  failed: ['pending_validation', 'freee_uploaded', 'needs_review'], // Can retry from upload or start
   needs_review: [
     'validated',
     'classified',
@@ -94,6 +108,11 @@ const VALID_TRANSITIONS: Record<ReceiptStatus, ReceiptStatus[]> = {
     'uploading_r2',
     'uploaded_r2',
     'submitting_freee',
+    'freee_uploaded',
+    'mapping_account',
+    'finding_partner',
+    'creating_deal',
+    'linking_receipt',
     'failed',
   ], // Can transition to any state
 };
@@ -104,10 +123,16 @@ const VALID_TRANSITIONS: Record<ReceiptStatus, ReceiptStatus[]> = {
 
 export class WorkflowStateMachine {
   private env: Env;
+  private db: D1Database;
   private receiptId: string;
 
   constructor(env: Env, receiptId: string) {
     this.env = env;
+    if (!env.DB) {
+      // Callers should guard this, but keep a hard runtime check to avoid silent corruption.
+      throw new Error('DB not configured');
+    }
+    this.db = env.DB;
     this.receiptId = receiptId;
   }
 
@@ -115,7 +140,7 @@ export class WorkflowStateMachine {
    * Get current receipt state
    */
   async getCurrentState(): Promise<Receipt | null> {
-    const result = await this.env.DB.prepare(
+    const result = await this.db.prepare(
       'SELECT * FROM receipts WHERE id = ?'
     )
       .bind(this.receiptId)
@@ -155,14 +180,14 @@ export class WorkflowStateMachine {
     }
 
     // Start transaction
-    await this.env.DB.batch([
+    await this.db.batch([
       // Update receipt status
-      this.env.DB.prepare(
-        'UPDATE receipts SET status = ?, updated_at = datetime(?) WHERE id = ?'
-      ).bind(to, 'now', this.receiptId),
+      this.db.prepare(
+        "UPDATE receipts SET status = ?, updated_at = datetime('now') WHERE id = ?"
+      ).bind(to, this.receiptId),
 
       // Insert audit log
-      this.env.DB.prepare(
+      this.db.prepare(
         `INSERT INTO audit_logs (receipt_id, event_type, previous_status, new_status, metadata)
          VALUES (?, ?, ?, ?, ?)`
       ).bind(
@@ -190,9 +215,9 @@ export class WorkflowStateMachine {
     errorCode: string,
     metadata?: Record<string, any>
   ): Promise<void> {
-    await this.env.DB.batch([
+    await this.db.batch([
       // Update receipt with error
-      this.env.DB.prepare(
+      this.db.prepare(
         `UPDATE receipts
          SET error_message = ?, error_code = ?, retry_count = retry_count + 1,
              last_retry_at = datetime('now'), updated_at = datetime('now')
@@ -200,7 +225,7 @@ export class WorkflowStateMachine {
       ).bind(errorMessage, errorCode, this.receiptId),
 
       // Insert audit log
-      this.env.DB.prepare(
+      this.db.prepare(
         `INSERT INTO audit_logs (receipt_id, event_type, metadata)
          VALUES (?, ?, ?)`
       ).bind(
@@ -264,7 +289,7 @@ export class WorkflowStateMachine {
    * Get audit trail
    */
   async getAuditTrail(): Promise<AuditLog[]> {
-    const results = await this.env.DB.prepare(
+    const results = await this.db.prepare(
       `SELECT * FROM audit_logs WHERE receipt_id = ? ORDER BY created_at ASC`
     )
       .bind(this.receiptId)
@@ -277,9 +302,9 @@ export class WorkflowStateMachine {
    * Complete workflow
    */
   async complete(freeeReceiptId: string): Promise<void> {
-    await this.env.DB.batch([
+    await this.db.batch([
       // Update receipt
-      this.env.DB.prepare(
+      this.db.prepare(
         `UPDATE receipts
          SET status = ?, freee_receipt_id = ?, completed_at = datetime('now'),
              updated_at = datetime('now')
@@ -287,7 +312,7 @@ export class WorkflowStateMachine {
       ).bind('completed', freeeReceiptId, this.receiptId),
 
       // Insert audit log
-      this.env.DB.prepare(
+      this.db.prepare(
         `INSERT INTO audit_logs (receipt_id, event_type, new_status, metadata)
          VALUES (?, ?, ?, ?)`
       ).bind(

@@ -11,12 +11,15 @@ import { Env } from './types';
 import { CommHubAdapter } from './adapters/commhub';
 import { performStartupCheck } from './utils/secrets-validator';
 import { safeLog } from './utils/log-sanitizer';
+import { getDeployTarget, isCanaryWriteEnabled, maybeBlockCanaryWrite } from './utils/canary-write-gate';
 import { authenticateWithAccess, mapAccessUserToInternal } from './utils/cloudflare-access';
+import { isFreeeIntegrationEnabled } from './utils/freee-integration';
 
 // Durable Objects
 export { TaskCoordinator } from './durable-objects/task-coordinator';
 export { CockpitWebSocket } from './durable-objects/cockpit-websocket';
 export { SystemEvents } from './durable-objects/system-events';
+export { RateLimiter } from './durable-objects/rate-limiter';
 
 // Handlers
 import { ensureServiceRoleMappings } from './handlers/initialization';
@@ -43,6 +46,17 @@ import { handleReceiptSourcesAPI } from './handlers/receipt-sources-api';
 import { handleDLQAPI } from './handlers/dlq-api';
 
 export type { Env };
+
+function parseCookies(cookieHeader: string | null): Record<string, string> {
+  if (!cookieHeader) return {};
+  const out: Record<string, string> = {};
+  for (const part of cookieHeader.split(';')) {
+    const [rawKey, ...rest] = part.trim().split('=');
+    if (!rawKey) continue;
+    out[rawKey] = decodeURIComponent(rest.join('=') || '');
+  }
+  return out;
+}
 
 // Cockpit PWA HTML (inline for Workers) - Gemini UI/UX Design v3.0
 // Phase 3: Swipe gestures, ARIA, Dynamic Type, Coach marks
@@ -336,6 +350,15 @@ let serviceRoleMappingsInitialized = false;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		  const url = new URL(request.url);
+		  const workerOrigin = url.origin;
+		  const path = url.pathname;
+	
+		  const deployTarget = getDeployTarget(env);
+		  const canaryWriteEnabled = isCanaryWriteEnabled(env);
+		  const blocked = maybeBlockCanaryWrite(request, env);
+		  if (blocked) return blocked;
+
     // Perform startup secrets validation once
     if (!startupCheckDone) {
       performStartupCheck(env);
@@ -347,19 +370,22 @@ export default {
       commHub.setKV(env.CACHE);
       commHubInitialized = true;
     }
+    if (env.DB) {
+      commHub.setDB(env.DB);
+    }
 
     // Initialize service role KV mappings (idempotent, runs once per isolate)
     if (!serviceRoleMappingsInitialized) {
-      try {
-        await ensureServiceRoleMappings(env);
-      } catch (e) {
-        safeLog.error('[Init] Service role mapping failed', { error: String(e) });
-      }
+	    // If canary is in read-only mode, skip any initialization that could write to D1/KV.
+	    if (!(deployTarget === 'canary' && !canaryWriteEnabled)) {
+	      try {
+	        await ensureServiceRoleMappings(env);
+	      } catch (e) {
+	        safeLog.error('[Init] Service role mapping failed', { error: String(e) });
+	      }
+	    }
       serviceRoleMappingsInitialized = true;
-    }
-
-    const url = new URL(request.url);
-    const path = url.pathname;
+	    }
 
     // Health check endpoint
     if (path === '/health') {
@@ -546,6 +572,313 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
       return handleMemoryAPI(request, env, path);
     }
 
+      // freee OAuth (manual start): redirects to freee authorize page.
+      if (path === '/api/freee/auth') {
+        if (!isFreeeIntegrationEnabled(env)) {
+          return new Response('Not Found', { status: 404 });
+        }
+
+        if (!env.FREEE_CLIENT_ID || !env.FREEE_CLIENT_SECRET || !env.FREEE_ENCRYPTION_KEY) {
+          safeLog.error('[freee OAuth] Missing required env vars (auth start)', {
+            hasClientId: !!env.FREEE_CLIENT_ID,
+            hasClientSecret: !!env.FREEE_CLIENT_SECRET,
+            hasEncryptionKey: !!env.FREEE_ENCRYPTION_KEY,
+          });
+          return new Response('Server not configured', { status: 500 });
+        }
+
+        const origin = new URL(request.url).origin;
+        const redirectUri = env.FREEE_REDIRECT_URI || `${origin}/api/freee/callback`;
+        const state = crypto.randomUUID();
+
+        const authUrl = new URL('https://accounts.secure.freee.co.jp/public_api/authorize');
+        authUrl.search = new URLSearchParams({
+          response_type: 'code',
+          client_id: env.FREEE_CLIENT_ID,
+          redirect_uri: redirectUri,
+          // freee requires explicit scopes for API access. Keep it broad enough for receipts + deal automation.
+          scope: 'read write',
+          state,
+        }).toString();
+
+        const headers = new Headers({ Location: authUrl.toString() });
+        headers.set(
+          'Set-Cookie',
+          `freee_oauth_state=${encodeURIComponent(state)}; Max-Age=600; Path=/; HttpOnly; Secure; SameSite=Lax`
+        );
+        return new Response(null, { status: 302, headers });
+      }
+
+	    // freee OAuth Callback endpoint
+	    if (path === '/api/freee/callback') {
+        if (!isFreeeIntegrationEnabled(env)) {
+          return new Response('Not Found', { status: 404 });
+        }
+
+	      const code = url.searchParams.get('code');
+	      if (!code) {
+	        return new Response('Missing authorization code', { status: 400 });
+	      }
+
+        // If the flow started via /api/freee/auth, validate state cookie (best-effort).
+        const state = url.searchParams.get('state');
+        const cookieState = parseCookies(request.headers.get('Cookie')).freee_oauth_state;
+        if (cookieState && state && cookieState !== state) {
+          safeLog.error('[freee OAuth] State mismatch', {
+            cookieStatePrefix: cookieState.substring(0, 8),
+            statePrefix: state.substring(0, 8),
+          });
+          return new Response('Invalid OAuth state', { status: 400 });
+        }
+
+	      if (!env.FREEE_CLIENT_ID || !env.FREEE_CLIENT_SECRET || !env.FREEE_ENCRYPTION_KEY) {
+	        safeLog.error('[freee OAuth] Missing required env vars', {
+	          hasClientId: !!env.FREEE_CLIENT_ID,
+	          hasClientSecret: !!env.FREEE_CLIENT_SECRET,
+	          hasEncryptionKey: !!env.FREEE_ENCRYPTION_KEY,
+	        });
+	        return new Response('Server not configured', { status: 500 });
+	      }
+	      if (!env.DB && !env.KV) {
+	        safeLog.error('[freee OAuth] Neither DB nor KV configured');
+	        return new Response('Server not configured', { status: 500 });
+	      }
+	 
+	      try {
+	        // Prefer configured redirect URI (stable across script/env hostnames).
+	        // Fallback to same-origin callback for development/staging.
+	        const redirectUri = env.FREEE_REDIRECT_URI || `${new URL(request.url).origin}/api/freee/callback`;
+
+	        // Primary: send client_id/client_secret in the form body (common OAuth pattern).
+	        // Fallback: some OAuth servers require client authentication via HTTP Basic and
+	        // may reject (or mis-handle) duplicated credentials in both header + body.
+	        const paramsWithClientSecret = new URLSearchParams({
+	          grant_type: 'authorization_code',
+	          client_id: env.FREEE_CLIENT_ID,
+	          client_secret: env.FREEE_CLIENT_SECRET,
+	          code: code,
+	          redirect_uri: redirectUri,
+	        });
+
+        safeLog.log('[freee OAuth] Exchanging code', {
+          redirectUri,
+          codePrefix: code.substring(0, 10),
+          clientIdPrefix: env.FREEE_CLIENT_ID?.substring(0, 6),
+        });
+
+        const tokenUrl = 'https://accounts.secure.freee.co.jp/public_api/token';
+        const basicAuth = btoa(`${env.FREEE_CLIENT_ID}:${env.FREEE_CLIENT_SECRET}`);
+
+        // Exchange code for tokens. Some OAuth servers require client auth via Basic;
+        // we try without and then retry with Basic to reduce misconfiguration/debug time.
+        const tryExchange = async (useBasic: boolean): Promise<Response> => {
+          const headers: Record<string, string> = { 'Content-Type': 'application/x-www-form-urlencoded' };
+          if (useBasic) headers.Authorization = `Basic ${basicAuth}`;
+          const body = useBasic
+            ? new URLSearchParams({
+                grant_type: 'authorization_code',
+                code: code,
+                redirect_uri: redirectUri,
+              })
+            : paramsWithClientSecret;
+          return fetch(tokenUrl, { method: 'POST', headers, body });
+        };
+
+        let tokenResponse = await tryExchange(false);
+        let fallback: { attempted: boolean; status?: number; body?: string } = { attempted: false };
+
+        if (!tokenResponse.ok) {
+          const primaryError = await tokenResponse.text();
+          safeLog.error('[freee OAuth] Token exchange failed (primary)', {
+            status: tokenResponse.status,
+            error: primaryError,
+            redirectUri,
+            envRedirectUri: env.FREEE_REDIRECT_URI,
+          });
+
+          fallback.attempted = true;
+          const tokenResponse2 = await tryExchange(true);
+          if (tokenResponse2.ok) {
+            tokenResponse = tokenResponse2;
+          } else {
+            const fallbackError = await tokenResponse2.text();
+            fallback.status = tokenResponse2.status;
+            fallback.body = fallbackError;
+            safeLog.error('[freee OAuth] Token exchange failed (basic auth fallback)', {
+              status: tokenResponse2.status,
+              error: fallbackError,
+              redirectUri,
+              envRedirectUri: env.FREEE_REDIRECT_URI,
+            });
+
+            // Include non-secret diagnostics to reduce guesswork when debugging invalid_grant.
+            const hint =
+              primaryError.includes('invalid_grant') || fallbackError.includes('invalid_grant')
+                ? 'Hint: authorization codes are short-lived and one-time-use. Restart from /api/freee/auth (do not refresh /callback). Also verify FREEE_CLIENT_SECRET and that FREEE_REDIRECT_URI exactly matches the redirect URI registered in freee.'
+                : 'Hint: verify freee app settings and Worker secrets.';
+
+            return new Response(
+              [
+                `Token exchange failed (primary): ${primaryError}`,
+                `Token exchange failed (basic auth): ${fallbackError}`,
+                '',
+                `redirect_uri_used: ${redirectUri}`,
+                `env.FREEE_REDIRECT_URI: ${env.FREEE_REDIRECT_URI || '(unset)'}`,
+                hint,
+              ].join('\n'),
+              { status: 400 }
+            );
+          }
+        }
+
+        const tokens = await tokenResponse.json() as { access_token: string; refresh_token: string; expires_in: number };
+
+        // Optionally resolve company_id from freee API so the Worker can operate without
+        // requiring FREEE_COMPANY_ID as a secret (we persist this to D1 when possible).
+        let companyId: string | null = null;
+        try {
+          const companiesRes = await fetch('https://api.freee.co.jp/api/1/companies', {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${tokens.access_token}` },
+          });
+          if (companiesRes.ok) {
+            const companiesPayload = await companiesRes.json() as { companies?: Array<{ id: number }> };
+            const companies = Array.isArray(companiesPayload.companies) ? companiesPayload.companies : [];
+            if (companies.length > 0) {
+              companyId = String(companies[0].id);
+              if (companies.length > 1) {
+                safeLog.warn('[freee OAuth] Multiple companies returned; defaulting to first', { count: companies.length });
+              }
+            }
+          } else {
+            safeLog.warn('[freee OAuth] Failed to fetch companies (continuing)', { status: companiesRes.status });
+          }
+        } catch (e) {
+          safeLog.warn('[freee OAuth] Error fetching companies (continuing)', { error: String(e) });
+        }
+
+	        // Encrypt refresh token with AES-GCM
+	        const encoder = new TextEncoder();
+	        const keyData = encoder.encode(env.FREEE_ENCRYPTION_KEY.padEnd(32, '0').slice(0, 32));
+	        const cryptoKey = await crypto.subtle.importKey('raw', keyData, { name: 'AES-GCM' }, false, ['encrypt']);
+	        const iv = crypto.getRandomValues(new Uint8Array(12));
+	        const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, cryptoKey, encoder.encode(tokens.refresh_token));
+	        const combined = new Uint8Array(iv.length + encrypted.byteLength);
+	        combined.set(iv, 0);
+	        combined.set(new Uint8Array(encrypted), iv.length);
+	        const encryptedRefreshToken = btoa(String.fromCharCode(...combined));
+
+	        // Store tokens in D1 (preferred). Fallback to KV if migrations are not applied yet.
+          const expiresAtMs = Date.now() + (tokens.expires_in - 60) * 1000;
+          if (env.DB) {
+            try {
+              await env.DB.prepare(
+                `INSERT INTO external_oauth_tokens (provider, encrypted_refresh_token, access_token, access_token_expires_at_ms, updated_at, company_id)
+                 VALUES ('freee', ?, ?, ?, strftime('%s','now'), ?)
+                 ON CONFLICT(provider) DO UPDATE SET
+                   encrypted_refresh_token=excluded.encrypted_refresh_token,
+                   access_token=excluded.access_token,
+                   access_token_expires_at_ms=excluded.access_token_expires_at_ms,
+                   company_id=COALESCE(external_oauth_tokens.company_id, excluded.company_id),
+                   updated_at=strftime('%s','now')`
+              ).bind(encryptedRefreshToken, tokens.access_token, expiresAtMs, companyId).run();
+            } catch (error) {
+              safeLog.error('[freee OAuth] Failed to persist tokens to D1 (falling back to KV)', { error: String(error) });
+              // kv-optimizer:ignore-next
+              await env.KV?.put('freee:refresh_token', encryptedRefreshToken);
+              // kv-optimizer:ignore-next
+              await env.KV?.put('freee:access_token', tokens.access_token, { expirationTtl: tokens.expires_in - 60 });
+              // kv-optimizer:ignore-next
+              await env.KV?.put('freee:access_token_expiry', expiresAtMs.toString(), { expirationTtl: tokens.expires_in - 60 });
+            }
+          } else {
+            // kv-optimizer:ignore-next
+            await env.KV?.put('freee:refresh_token', encryptedRefreshToken);
+            // kv-optimizer:ignore-next
+            await env.KV?.put('freee:access_token', tokens.access_token, { expirationTtl: tokens.expires_in - 60 });
+            // kv-optimizer:ignore-next
+            await env.KV?.put('freee:access_token_expiry', expiresAtMs.toString(), { expirationTtl: tokens.expires_in - 60 });
+          }
+
+        safeLog.log('[freee OAuth] Tokens stored successfully');
+
+        return new Response(`
+          <!DOCTYPE html>
+          <html><head><title>freee OAuth Success</title></head>
+          <body style="font-family:system-ui;text-align:center;padding:40px">
+            <h1>✅ freee認証成功</h1>
+            <p>アクセストークンとリフレッシュトークンが保存されました。</p>
+            <p>このウィンドウを閉じて大丈夫です。</p>
+          </body></html>
+        `, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            // Clear state cookie after success (best-effort).
+            'Set-Cookie': 'freee_oauth_state=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax',
+          },
+        });
+      } catch (error) {
+        safeLog.error('[freee OAuth] Error', { error: String(error) });
+        return new Response(`OAuth error: ${error}`, { status: 500 });
+      }
+    }
+
+    // Manual Gmail polling trigger (admin only)
+    if (path === '/api/receipts/poll' && request.method === 'POST') {
+      const { verifyAPIKey } = await import('./utils/api-auth');
+      if (!verifyAPIKey(request, env, 'admin')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const { handleGmailReceiptPolling } = await import('./handlers/receipt-gmail-poller');
+      try {
+        await handleGmailReceiptPolling(env);
+        return new Response(JSON.stringify({ success: true, message: 'Gmail polling completed' }), { headers: { 'Content-Type': 'application/json' } });
+      } catch (error) {
+        return new Response(JSON.stringify({ error: String(error) }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // Retry failed receipts - fetch from R2 and upload to freee (admin only)
+    if (path === '/api/receipts/retry' && request.method === 'POST') {
+      const { verifyAPIKey } = await import('./utils/api-auth');
+      if (!verifyAPIKey(request, env, 'admin')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const { createFreeeClient } = await import('./services/freee-client');
+      const bucket = env.RECEIPTS || env.R2;
+      if (!bucket) {
+        return new Response(JSON.stringify({ error: 'R2 bucket not configured' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      }
+      const freeeClient = createFreeeClient(env);
+      const failed = await env.DB!.prepare(
+        `SELECT id, r2_object_key, file_hash FROM receipts WHERE status = 'failed' ORDER BY created_at DESC LIMIT 50`
+      ).all();
+      const results: Array<{id: string, status: string, freeeId?: string, error?: string}> = [];
+      for (const row of failed.results) {
+        try {
+          const obj = await bucket.get(row.r2_object_key as string);
+          if (!obj) { results.push({ id: row.id as string, status: 'skipped', error: 'R2 object not found' }); continue; }
+          const blob = await obj.blob();
+          const fileName = (row.r2_object_key as string).split('/').pop() || 'receipt.pdf';
+          const freeeResult = await freeeClient.uploadReceipt(blob, fileName, `retry:${row.file_hash}`);
+          await env.DB!.prepare(
+            `UPDATE receipts SET status = 'completed', freee_receipt_id = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
+          ).bind(String(freeeResult.receipt?.id || ''), row.id).run();
+          results.push({ id: row.id as string, status: 'completed', freeeId: String(freeeResult.receipt?.id || '') });
+        } catch (error) {
+          results.push({ id: row.id as string, status: 'failed', error: String(error) });
+        }
+      }
+      return new Response(JSON.stringify({ success: true, retried: results.length, results }), { headers: { 'Content-Type': 'application/json' } });
+    }
+
     // Receipt Upload API endpoint (freee integration)
     if (path === '/api/receipts/upload' && request.method === 'POST') {
       return handleReceiptUpload(request, env);
@@ -556,7 +889,7 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
       return handleReceiptSearch(request, env);
     }
 
-    // Receipt Sources Management API (Web scraper configuration)
+    // Receipt Sources API (web receipt scraper orchestration)
     if (path.startsWith('/api/receipts/sources')) {
       return handleReceiptSourcesAPI(request, env, path);
     }
@@ -608,15 +941,18 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
     }
 
     // Strategic Advisor API endpoints (for FUGUE insights) - with CORS
-    if (path.startsWith('/api/advisor')) {
-      // CSRF protection: restrict CORS to same origin or trusted domains
-      const origin = request.headers.get('Origin') || '';
-      const allowedOrigins = [
-        'https://orchestrator-hub.masa-stage1.workers.dev',
-        'https://cockpit-pwa.vercel.app',
-        'http://localhost:3000',
-        'http://localhost:8787',
-      ];
+	    if (path.startsWith('/api/advisor')) {
+	      // CSRF protection: restrict CORS to same origin or trusted domains
+	      const origin = request.headers.get('Origin') || '';
+	      const allowedOrigins = [
+	        workerOrigin,
+	        'https://orchestrator-hub.masa-stage1.workers.dev',
+	        'https://orchestrator-hub-production.masa-stage1.workers.dev',
+	        'https://orchestrator-hub-canary.masa-stage1.workers.dev',
+	        'https://cockpit-pwa.vercel.app',
+	        'http://localhost:3000',
+	        'http://localhost:8787',
+	      ];
       const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
       const corsHeaders = {
         'Access-Control-Allow-Origin': allowOrigin,
@@ -649,15 +985,18 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
     }
 
     // Cockpit API endpoints (for FUGUE monitoring) - with CORS
-    if (path.startsWith('/api/cockpit')) {
-      // CSRF protection: restrict CORS to same origin or trusted domains
-      const origin = request.headers.get('Origin') || '';
-      const allowedOrigins = [
-        'https://orchestrator-hub.masa-stage1.workers.dev',
-        'https://cockpit-pwa.vercel.app',
-        'https://fugue-system-ui.vercel.app',
-        'http://localhost:3000',
-        'http://localhost:8787',
+	    if (path.startsWith('/api/cockpit')) {
+	      // CSRF protection: restrict CORS to same origin or trusted domains
+	      const origin = request.headers.get('Origin') || '';
+	      const allowedOrigins = [
+	        workerOrigin,
+	        'https://orchestrator-hub.masa-stage1.workers.dev',
+	        'https://orchestrator-hub-production.masa-stage1.workers.dev',
+	        'https://orchestrator-hub-canary.masa-stage1.workers.dev',
+	        'https://cockpit-pwa.vercel.app',
+	        'https://fugue-system-ui.vercel.app',
+	        'http://localhost:3000',
+	        'http://localhost:8787',
       ];
       const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
       const corsHeaders = {
@@ -691,22 +1030,25 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
     }
 
     // Notification System API (SystemEvents DO) - for device-independent notifications
-    if (path.startsWith('/api/notifications')) {
+	    if (path.startsWith('/api/notifications')) {
       if (!env.SYSTEM_EVENTS) {
         return new Response(JSON.stringify({ error: 'Notification system not available' }), {
           status: 503, headers: { 'Content-Type': 'application/json' },
         });
       }
 
-      // CORS support for PWA
-      const origin = request.headers.get('Origin') || '';
-      const allowedOrigins = [
-        'https://orchestrator-hub.masa-stage1.workers.dev',
-        'https://cockpit-pwa.vercel.app',
-        'https://fugue-system-ui.vercel.app',
-        'http://localhost:3000',
-        'http://localhost:8787',
-      ];
+	      // CORS support for PWA
+	      const origin = request.headers.get('Origin') || '';
+	      const allowedOrigins = [
+	        workerOrigin,
+	        'https://orchestrator-hub.masa-stage1.workers.dev',
+	        'https://orchestrator-hub-production.masa-stage1.workers.dev',
+	        'https://orchestrator-hub-canary.masa-stage1.workers.dev',
+	        'https://cockpit-pwa.vercel.app',
+	        'https://fugue-system-ui.vercel.app',
+	        'http://localhost:3000',
+	        'http://localhost:8787',
+	      ];
       const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
       const corsHeaders = {
         'Access-Control-Allow-Origin': allowOrigin,

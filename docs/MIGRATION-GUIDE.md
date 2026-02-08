@@ -222,8 +222,8 @@ curl https://production-worker.workers.dev/health
 curl -X GET https://production-worker.workers.dev/api/memory/context/{your-userId} \
   -H "X-API-Key: {your-key}"
 
-# 3. Monitor error rates
-wrangler tail --env production
+# 3. Monitor error rates (canonical worker)
+wrangler tail
 ```
 
 ---
@@ -350,7 +350,7 @@ If rollback fails and users are locked out:
 
 ```bash
 # Count authorization failures
-wrangler tail --env production --format json | \
+wrangler tail --format json | \
   grep "Authorization failed" | \
   wc -l
 

@@ -6,6 +6,7 @@
  */
 
 import { z } from 'zod';
+import { decodeBase64UrlToUint8Array } from '../utils/base64url';
 
 // ============================================================================
 // Schemas
@@ -90,6 +91,13 @@ export interface GmailReceiptEmail {
   date: Date;
   attachments: GmailReceiptAttachment[];
 }
+
+export type ShouldDownloadAttachment = (args: {
+  messageId: string;
+  attachmentId: string;
+  filename: string;
+  size?: number;
+}) => Promise<boolean> | boolean;
 
 // ============================================================================
 // Constants
@@ -215,15 +223,7 @@ async function getAttachment(
   const data = await response.json();
   const parsed = AttachmentResponseSchema.parse(data);
 
-  // Decode Base64url to binary
-  const base64 = parsed.data.replace(/-/g, '+').replace(/_/g, '/');
-  const binaryString = atob(base64);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-
-  return bytes;
+  return decodeBase64UrlToUint8Array(parsed.data);
 }
 
 // ============================================================================
@@ -235,7 +235,8 @@ async function getAttachment(
  */
 async function extractPDFAttachments(
   accessToken: string,
-  message: GmailMessage
+  message: GmailMessage,
+  shouldDownloadAttachment?: ShouldDownloadAttachment
 ): Promise<GmailReceiptAttachment[]> {
   const attachments: GmailReceiptAttachment[] = [];
 
@@ -247,6 +248,17 @@ async function extractPDFAttachments(
       part.body?.attachmentId
     ) {
       try {
+        if (shouldDownloadAttachment) {
+          const ok = await shouldDownloadAttachment({
+            messageId: message.id,
+            attachmentId: part.body.attachmentId,
+            filename: part.filename,
+            size: part.body.size,
+          });
+          if (!ok) {
+            return;
+          }
+        }
         const data = await getAttachment(
           accessToken,
           message.id,
@@ -287,6 +299,17 @@ async function extractPDFAttachments(
     message.payload.body?.attachmentId
   ) {
     try {
+      if (shouldDownloadAttachment) {
+        const ok = await shouldDownloadAttachment({
+          messageId: message.id,
+          attachmentId: message.payload.body.attachmentId,
+          filename: message.payload.filename,
+          size: message.payload.body.size,
+        });
+        if (!ok) {
+          return attachments;
+        }
+      }
       const data = await getAttachment(
         accessToken,
         message.id,
@@ -348,16 +371,21 @@ export async function fetchReceiptEmails(
     query?: string;
     maxResults?: number;
     newerThan?: string; // e.g., "1d", "2h"
+    shouldDownloadAttachment?: ShouldDownloadAttachment;
   } = {}
 ): Promise<GmailReceiptEmail[]> {
   const { clientId, clientSecret, refreshToken } = config;
-  const { query: customQuery, maxResults = 10, newerThan = '1d' } = options;
+  const { query: customQuery, maxResults = 10, newerThan = '1d', shouldDownloadAttachment } = options;
 
   // Refresh access token
   const accessToken = await refreshAccessToken(clientId, clientSecret, refreshToken);
 
   // Build search query
-  const query = customQuery || `has:attachment filename:pdf newer_than:${newerThan}`;
+  // Filter for receipt/invoice emails only
+  // Strategy: subject keywords + known billing senders (not broad from:noreply)
+  const subjectFilter = '(subject:receipt OR subject:invoice OR subject:billing OR subject:payment OR subject:領収 OR subject:請求 OR subject:statement)';
+  const senderFilter = '(from:billing@cloudflare.com OR from:noreply@github.com OR from:receipts@stripe.com OR from:invoices@stripe.com OR from:noreply@google.com OR from:noreply@anthropic.com OR from:noreply@x.ai OR from:noreply@vercel.com OR from:billing@heroku.com OR from:aws-billing@amazon.com OR from:cloud-noreply@google.com)';
+  const query = customQuery || `has:attachment filename:pdf (${subjectFilter} OR ${senderFilter}) newer_than:${newerThan}`;
 
   // Search for messages
   const messageRefs = await searchMessages(accessToken, query, maxResults);
@@ -372,7 +400,7 @@ export async function fetchReceiptEmails(
   for (const ref of messageRefs) {
     try {
       const message = await getMessage(accessToken, ref.id);
-      const attachments = await extractPDFAttachments(accessToken, message);
+      const attachments = await extractPDFAttachments(accessToken, message, shouldDownloadAttachment);
 
       if (attachments.length > 0) {
         const metadata = extractMetadata(message);

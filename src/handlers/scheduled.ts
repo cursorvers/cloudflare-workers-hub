@@ -28,6 +28,7 @@ import { handleGmailReceiptPolling } from './receipt-gmail-poller';
 // ============================================================================
 
 const CRON_15MIN_MULTI = '*/15 * * * *'; // Every 15min (Gmail polling + hourly Limitless sync)
+const CRON_HOURLY_BACKUP = '0 * * * *'; // Backward compatible: legacy hourly Limitless sync
 const CRON_DAILY_ACTIONS = '0 21 * * *';   // 21:00 UTC = 06:00 JST
 const CRON_WEEKLY_DIGEST = '0 0 * * SUN';  // Sun 00:00 UTC = Sun 09:00 JST
 const CRON_PHI_VERIFICATION = '0 */6 * * *'; // Every 6 hours (Phase 6.2)
@@ -52,8 +53,14 @@ async function acquireLock(kv: KVNamespace, lockKey: string, ttlSeconds: number)
     });
     const verifyValue = await kv.get(lockKey);
     return verifyValue === lockValue;
-  } catch {
-    return false;
+  } catch (error) {
+    // Fail-open: scheduled automation should keep running even if KV hits limits/outages.
+    // We rely on downstream idempotency (e.g., D1 unique constraints) to avoid duplicates.
+    safeLog.warn('[Lock] Failed to acquire lock, proceeding without lock', {
+      lockKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return true;
   }
 }
 
@@ -115,35 +122,60 @@ export async function handleScheduled(
     cron: controller.cron,
   });
 
-  if (!env.CACHE) {
-    safeLog.warn('[Scheduled] CACHE KV not configured, cannot use distributed locking');
-    return;
+  const cache = env.CACHE;
+  if (!cache) {
+    safeLog.warn('[Scheduled] CACHE KV not configured (locks/throttles disabled)');
   }
 
   switch (controller.cron) {
     case CRON_15MIN_MULTI:
-      // Every 15 minutes: Gmail polling
-      // Every hour (0min): Limitless sync + Daemon health check
-      const tasks: Promise<void>[] = [
-        // Gmail polling runs every 15 minutes
-        withLock(env.CACHE!, 'gmail:polling_lock', 300, async () => {
-          await handleGmailReceiptPolling(env);
-        }),
-      ];
+      // IMPORTANT: Cloudflare Workers have a limited subrequest budget per invocation.
+      // To avoid budget exhaustion, do NOT run all heavy jobs concurrently at minute 0.
+      //
+      // Schedule within the 15-min cron:
+      // - :00 (hourly): Limitless backup sync only (highest priority)
+      // - :15/:30/:45: Gmail polling
+      // - :45: daemon health check (optional)
+      // - Poller: opt-in via env.LIMITLESS_POLLER_ENABLED=true, runs at :30
+      const minute = scheduledTime.getUTCMinutes();
 
-      // Limitless sync and daemon check only run at 0 minutes (hourly)
-      const minute = scheduledTime.getMinutes();
-      if (minute === 0) {
-        tasks.push(
-          handleLimitlessSync(env),
-          handleDaemonHealthCheck(env, withLock),
-          handleLimitlessPollerCron(env).catch((error) => {
-            safeLog.error('[Scheduled] Limitless poller failed', { error: String(error) });
-          })
-        );
+      // Production-safe mode: run Gmail polling only, skip all other work.
+      // This avoids unexpected background jobs when only Gmail automation is desired.
+      if (env.SCHEDULED_GMAIL_ONLY === 'true') {
+        // Gmail poller already does its own locking.
+        // Avoid double-locking here to reduce KV ops (important under KV quotas).
+        await handleGmailReceiptPolling(env);
+        return;
       }
 
-      await Promise.all(tasks);
+      // Hourly: backup sync only
+      if (minute === 0) {
+        await handleLimitlessSync(env);
+        return;
+      }
+
+      // Gmail polling (not on :00)
+      // Gmail poller already does its own locking.
+      await handleGmailReceiptPolling(env);
+
+      // Optional: daemon health check
+      if (minute === 45 && env.DAEMON_HEALTH_CRON_ENABLED === 'true') {
+        if (cache) {
+          await handleDaemonHealthCheck(env, withLock);
+        }
+      }
+
+      // Optional: Limitless poller (disabled by default)
+      if (minute === 30 && env.LIMITLESS_POLLER_ENABLED === 'true') {
+        await handleLimitlessPollerCron(env).catch((error) => {
+          safeLog.error('[Scheduled] Limitless poller failed', { error: String(error) });
+        });
+      }
+      return;
+
+    case CRON_HOURLY_BACKUP:
+      // Legacy hourly backup: keep it lean.
+      await handleLimitlessSync(env);
       return;
 
     case CRON_DAILY_ACTIONS:
@@ -168,99 +200,129 @@ export async function handleScheduled(
 // ============================================================================
 
 async function handleLimitlessSync(env: Env): Promise<void> {
-  const lockKey = `limitless:sync_lock:${env.LIMITLESS_USER_ID || 'default'}`;
+  const autoSyncEnabled = env.LIMITLESS_AUTO_SYNC_ENABLED === 'true';
+  if (!autoSyncEnabled) {
+    safeLog.info('[Scheduled] Limitless auto-sync is disabled');
+    return;
+  }
 
-  await withLock(env.CACHE!, lockKey, 300, async () => {
-    const autoSyncEnabled = env.LIMITLESS_AUTO_SYNC_ENABLED === 'true';
-    if (!autoSyncEnabled) {
-      safeLog.info('[Scheduled] Limitless auto-sync is disabled');
-      return;
-    }
+  if (!env.LIMITLESS_API_KEY) {
+    safeLog.warn('[Scheduled] LIMITLESS_API_KEY not configured, skipping sync');
+    return;
+  }
 
-    if (!env.LIMITLESS_API_KEY) {
-      safeLog.warn('[Scheduled] LIMITLESS_API_KEY not configured, skipping sync');
-      return;
-    }
+  if (!env.LIMITLESS_USER_ID) {
+    safeLog.warn('[Scheduled] LIMITLESS_USER_ID not configured, skipping sync');
+    return;
+  }
 
-    if (!env.LIMITLESS_USER_ID) {
-      safeLog.warn('[Scheduled] LIMITLESS_USER_ID not configured, skipping sync');
-      return;
-    }
+  const syncIntervalHours = parseInt(env.LIMITLESS_SYNC_INTERVAL_HOURS || '24', 10);
 
-    const syncIntervalHours = parseInt(env.LIMITLESS_SYNC_INTERVAL_HOURS || '24', 10);
+  safeLog.info('[Scheduled] Starting Limitless backup sync', {
+    userId: env.LIMITLESS_USER_ID,
+    syncIntervalHours,
+    purpose: 'catch-up backup (primary sync via iPhone webhook)',
+  });
 
-    safeLog.info('[Scheduled] Starting Limitless backup sync', {
-      userId: env.LIMITLESS_USER_ID,
-      syncIntervalHours,
-      purpose: 'catch-up backup (primary sync via iPhone webhook)',
-    });
+  // Best-effort KV throttling. Even if KV writes are rate-limited, the sync should still run:
+  // Supabase upsert on limitless_id is idempotent and prevents duplicates.
+  const cache = env.CACHE;
+  const lastSyncKey = `limitless:backup_sync:${env.LIMITLESS_USER_ID}`;
+  if (cache) {
+    try {
+      const lastSyncData = await cache.get(lastSyncKey);
 
-    // Check last backup sync time from KV
-    const lastSyncKey = `limitless:backup_sync:${env.LIMITLESS_USER_ID}`;
-    const lastSyncData = await env.CACHE!.get(lastSyncKey);
+      if (lastSyncData) {
+        const lastSync = new Date(lastSyncData);
+        const timeDiffMs = Date.now() - lastSync.getTime();
 
-    if (lastSyncData) {
-      const lastSync = new Date(lastSyncData);
-      const timeDiffMs = Date.now() - lastSync.getTime();
-
-      // Guard: Prevent division by zero and negative time differences
-      if (timeDiffMs < 0) {
-        safeLog.warn('[Scheduled] Invalid lastSync time (future date), forcing sync', {
-          lastSync: lastSync.toISOString(),
-        });
-      } else {
-        const hoursSinceLastSync = timeDiffMs / (1000 * 60 * 60);
-
-        if (hoursSinceLastSync < syncIntervalHours) {
-          safeLog.info('[Scheduled] Skipping backup sync (too soon)', {
-            lastSync: lastSync.toISOString(),
-            hoursSinceLastSync: hoursSinceLastSync.toFixed(2),
-            minInterval: syncIntervalHours,
-          });
-          return;
+        // Guard: Prevent negative time differences
+        if (timeDiffMs >= 0) {
+          const hoursSinceLastSync = timeDiffMs / (1000 * 60 * 60);
+          const driftGraceHours = 0.05; // 3 minutes
+          if (hoursSinceLastSync < syncIntervalHours - driftGraceHours) {
+            safeLog.info('[Scheduled] Skipping backup sync (too soon)', {
+              lastSync: lastSync.toISOString(),
+              hoursSinceLastSync: hoursSinceLastSync.toFixed(2),
+              minInterval: syncIntervalHours,
+            });
+            return;
+          }
         }
       }
+    } catch (error) {
+      safeLog.warn('[Scheduled] KV read failed (throttle disabled)', { error: String(error) });
     }
+  }
 
-    const startTime = Date.now();
-    const result = await syncToSupabase(env, env.LIMITLESS_API_KEY, {
+  const startTime = Date.now();
+  let result: Awaited<ReturnType<typeof syncToSupabase>>;
+  try {
+    result = await syncToSupabase(env, env.LIMITLESS_API_KEY, {
       userId: env.LIMITLESS_USER_ID,
       maxAgeHours: syncIntervalHours + 2,
       includeAudio: false,
       maxItems: 5,
-      syncSource: 'backup',
+      // Supabase check constraint currently permits only 'webhook' for processed_lifelogs.sync_source.
+      syncSource: 'webhook',
     });
-
-    const duration = Date.now() - startTime;
-
-    await env.CACHE!.put(lastSyncKey, new Date().toISOString());
-
-    const statsKey = `limitless:backup_stats:${env.LIMITLESS_USER_ID}`;
-    const stats = {
-      lastSync: new Date().toISOString(),
-      synced: result.synced,
-      skipped: result.skipped,
-      errors: result.errors.length,
-      durationMs: duration,
-      purpose: 'backup',
-    };
-    await env.CACHE!.put(statsKey, JSON.stringify(stats));
-
-    safeLog.info('[Scheduled] Limitless backup sync completed', {
+  } catch (error) {
+    safeLog.error('[Scheduled] Limitless backup sync failed', {
       userId: env.LIMITLESS_USER_ID,
-      synced: result.synced,
-      skipped: result.skipped,
-      errors: result.errors.length,
-      durationMs: duration,
-      note: result.synced > 0 ? 'Caught items missed by iPhone triggers' : 'No new items',
+      error: error instanceof Error ? error.message : String(error),
     });
+    return;
+  }
+  const duration = Date.now() - startTime;
 
-    if (result.errors.length > 0) {
-      safeLog.warn('[Scheduled] Sync completed with errors', {
-        errors: result.errors.slice(0, 5),
-      });
+  if (cache) {
+    try {
+      await cache.put(lastSyncKey, new Date().toISOString());
+
+      const statsKey = `limitless:backup_stats:${env.LIMITLESS_USER_ID}`;
+      const stats = {
+        lastSync: new Date().toISOString(),
+        synced: result.synced,
+        skipped: result.skipped,
+        errors: result.errors.length,
+        durationMs: duration,
+        purpose: 'backup',
+      };
+      await cache.put(statsKey, JSON.stringify(stats));
+
+      // Persist a small sample of errors for post-mortem via KV (no log retention required).
+      const errorKey = `limitless:backup_last_errors:${env.LIMITLESS_USER_ID}`;
+      if (result.errors.length > 0) {
+        await cache.put(
+          errorKey,
+          JSON.stringify({
+            lastSync: new Date().toISOString(),
+            errors: result.errors.slice(0, 10),
+          }),
+          { expirationTtl: 7 * 24 * 60 * 60 } // 7 days
+        );
+      } else {
+        await cache.delete(errorKey);
+      }
+    } catch (error) {
+      safeLog.warn('[Scheduled] KV write failed (stats/throttle not updated)', { error: String(error) });
     }
+  }
+
+  safeLog.info('[Scheduled] Limitless backup sync completed', {
+    userId: env.LIMITLESS_USER_ID,
+    synced: result.synced,
+    skipped: result.skipped,
+    errors: result.errors.length,
+    durationMs: duration,
+    note: result.synced > 0 ? 'Caught items missed by iPhone triggers' : 'No new items',
   });
+
+  if (result.errors.length > 0) {
+    safeLog.warn('[Scheduled] Sync completed with errors', {
+      errors: result.errors.slice(0, 5),
+    });
+  }
 }
 
 // ============================================================================

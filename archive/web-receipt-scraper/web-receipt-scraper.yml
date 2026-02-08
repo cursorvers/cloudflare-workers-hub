@@ -1,0 +1,78 @@
+name: Web Receipt Scraper
+
+on:
+  schedule:
+    # Run daily at 2:00 AM JST (17:00 UTC previous day)
+    - cron: '0 17 * * *'
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Source ID to scrape (e.g., stripe, cloudflare)'
+        required: false
+        default: 'all'
+
+jobs:
+  scrape-receipts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        if: github.event.inputs.source != 'stripe'
+        run: npx playwright install chromium
+
+      # Use Stripe API directly (avoids CAPTCHA issues)
+      - name: Fetch Stripe invoices via API
+        if: github.event.inputs.source == 'stripe' || github.event.inputs.source == 'all' || github.event.inputs.source == ''
+        env:
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          WORKERS_API_URL: ${{ secrets.WORKERS_API_URL }}
+          WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
+        run: node scripts/stripe-invoice-fetcher.js --range=last_90_days --limit=10
+
+      # Use web scraper for other sources (Cloudflare, AWS, etc.)
+      - name: Run web receipt scraper (non-Stripe)
+        if: github.event.inputs.source != 'stripe'
+        env:
+          # Workers API
+          WORKERS_API_URL: ${{ secrets.WORKERS_API_URL }}
+          WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
+
+          # Cloudflare credentials (optional - only if enabled in config)
+          CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
+          CLOUDFLARE_PASSWORD: ${{ secrets.CLOUDFLARE_PASSWORD }}
+
+          # AWS credentials (optional - only if enabled in config)
+          AWS_EMAIL: ${{ secrets.AWS_EMAIL }}
+          AWS_PASSWORD: ${{ secrets.AWS_PASSWORD }}
+        run: |
+          # Skip stripe in web scraper since we use API
+          node scripts/web-receipt-scraper.js --source ${{ github.event.inputs.source || 'all' }} --skip-stripe
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-screenshots
+          path: |
+            screenshots/
+            playwright-report/
+          retention-days: 7
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Web receipt scraper failed. Check artifacts for details."
+          # TODO: Add Discord/Slack notification

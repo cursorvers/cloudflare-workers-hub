@@ -146,6 +146,15 @@ describe('Queue API Security', () => {
       // Admin should NOT fall back
       expect(verifyAPIKey(createRequest({ 'X-API-Key': legacyKey }), env, 'admin')).toBe(false);
     });
+
+    it('should accept WORKERS_API_KEY for all scopes (legacy super key)', () => {
+      const superKey = 'legacy-workers-super-key';
+      const env = createEnv({ WORKERS_API_KEY: superKey });
+
+      expect(verifyAPIKey(createRequest({ 'X-API-Key': superKey }), env, 'queue')).toBe(true);
+      expect(verifyAPIKey(createRequest({ 'X-API-Key': superKey }), env, 'memory')).toBe(true);
+      expect(verifyAPIKey(createRequest({ 'X-API-Key': superKey }), env, 'admin')).toBe(true);
+    });
   });
 
   describe('authorizeUserAccess constant-time comparison', () => {

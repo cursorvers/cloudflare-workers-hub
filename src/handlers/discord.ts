@@ -104,9 +104,9 @@ export async function verifyDiscordSignature(
 
   try {
     const encoder = new TextEncoder();
-    const message = encoder.encode(timestamp + body);
-    const signatureBytes = hexToUint8Array(signature);
-    const publicKeyBytes = hexToUint8Array(publicKey);
+    const message = toArrayBufferBackedUint8Array(encoder.encode(timestamp + body));
+    const signatureBytes = toArrayBufferBackedUint8Array(hexToUint8Array(signature));
+    const publicKeyBytes = toArrayBufferBackedUint8Array(hexToUint8Array(publicKey));
 
     // Import public key for Ed25519
     const key = await crypto.subtle.importKey(
@@ -133,6 +133,15 @@ export async function verifyDiscordSignature(
     safeLog.error('Discord signature verification error:', error);
     return false;
   }
+}
+
+function toArrayBufferBackedUint8Array(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  // The WebCrypto typings in TS require ArrayBuffer-backed views, not ArrayBufferLike.
+  // Ensure the view is backed by a concrete ArrayBuffer.
+  const buf = new ArrayBuffer(bytes.byteLength);
+  const u8 = new Uint8Array(buf);
+  u8.set(bytes);
+  return u8;
 }
 
 function hexToUint8Array(hex: string): Uint8Array {

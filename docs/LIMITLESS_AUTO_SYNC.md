@@ -261,8 +261,14 @@ wrangler secret put LIMITLESS_SYNC_INTERVAL_HOURS --env development
 
 **Production**:
 ```bash
-wrangler secret put LIMITLESS_SYNC_INTERVAL_HOURS --env production
+wrangler secret put LIMITLESS_SYNC_INTERVAL_HOURS --env ""
 # Enter: 1  # Every hour
+```
+
+Optional canary:
+
+```bash
+wrangler secret put LIMITLESS_SYNC_INTERVAL_HOURS --env canary
 ```
 
 ### Disable Auto-Sync

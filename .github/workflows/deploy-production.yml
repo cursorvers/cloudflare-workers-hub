@@ -1,12 +1,25 @@
-name: Deploy to Production
+name: Release Worker
 
 on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: 'Type "deploy" to confirm production deployment'
+        description: 'Type "deploy" to confirm release'
         required: true
         type: string
+      target:
+        description: 'Release target: hub (envless) or canary (--env canary)'
+        required: true
+        default: 'hub'
+        type: string
+      apply_migrations:
+        description: 'Apply D1 migrations (remote). WARNING: canary shares production DB unless split.'
+        required: true
+        default: 'hub_only'
+        type: choice
+        options:
+          - hub_only
+          - always
 
 jobs:
   validate:
@@ -17,6 +30,16 @@ jobs:
         if: ${{ github.event.inputs.confirm != 'deploy' }}
         run: |
           echo "::error::Confirmation failed. Please type 'deploy' to confirm."
+          exit 1
+      - name: Validate target
+        if: ${{ github.event.inputs.target != 'hub' && github.event.inputs.target != 'canary' && github.event.inputs.target != 'hub-production' }}
+        run: |
+          echo "::error::Invalid target '${{ github.event.inputs.target }}'. Use 'hub' or 'canary'."
+          exit 1
+      - name: Validate apply_migrations
+        if: ${{ github.event.inputs.apply_migrations != 'hub_only' && github.event.inputs.apply_migrations != 'always' }}
+        run: |
+          echo "::error::Invalid apply_migrations '${{ github.event.inputs.apply_migrations }}'. Use hub_only or always."
           exit 1
 
   test:
@@ -44,7 +67,7 @@ jobs:
         run: npm test
 
   deploy:
-    name: Deploy to Production
+    name: Release
     needs: test
     runs-on: ubuntu-latest
     environment: production
@@ -62,15 +85,52 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Deploy to Production
+      - name: Apply D1 migrations (remote)
+        # IMPORTANT: Without --remote this applies to a local DB (no-op for production).
+        run: |
+          if [ "${{ github.event.inputs.target }}" = "hub" ]; then
+            npx wrangler d1 migrations apply DB --env= --remote
+            exit 0
+          fi
+
+          if [ "${{ github.event.inputs.apply_migrations }}" = "always" ]; then
+            # WARNING: canary shares production DB unless you split D1 resources.
+            npx wrangler d1 migrations apply DB --env canary --remote
+            exit 0
+          fi
+
+          echo "Skipping D1 migrations for canary (apply_migrations=hub_only)."
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Deploy (hub)
+        if: ${{ github.event.inputs.target == 'hub' }}
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --env production
+          command: deploy --env=
 
-      - name: Set Worker Secrets
-        run: echo "$QUEUE_API_KEY" | npx wrangler secret put QUEUE_API_KEY --env production
+      - name: Deploy (canary)
+        if: ${{ github.event.inputs.target == 'canary' || github.event.inputs.target == 'hub-production' }}
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy --env canary
+
+      - name: Set Worker Secrets (hub)
+        if: ${{ github.event.inputs.target == 'hub' }}
+        run: printf "%s" "$QUEUE_API_KEY" | npx wrangler secret put QUEUE_API_KEY --env=
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          QUEUE_API_KEY: ${{ secrets.QUEUE_API_KEY }}
+
+      - name: Set Worker Secrets (canary)
+        if: ${{ github.event.inputs.target == 'canary' || github.event.inputs.target == 'hub-production' }}
+        run: printf "%s" "$QUEUE_API_KEY" | npx wrangler secret put QUEUE_API_KEY --env canary
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -78,7 +138,8 @@ jobs:
 
       - name: Deployment Summary
         run: |
-          echo "## Production Deployment" >> $GITHUB_STEP_SUMMARY
-          echo "- Status: ✅ Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "## Worker Release" >> $GITHUB_STEP_SUMMARY
+          echo "- Target: ${{ github.event.inputs.target }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ✅ Released" >> $GITHUB_STEP_SUMMARY
           echo "- Triggered by: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
           echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY

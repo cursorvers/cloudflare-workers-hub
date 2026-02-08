@@ -1,0 +1,24 @@
+name = "limitless-sync"
+main = "src/limitless-only.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+crons = ["0 * * * *"]
+
+# Bindings
+[ai]
+binding = "AI"
+
+[vars]
+ENVIRONMENT = "production"
+LIMITLESS_AUTO_SYNC_ENABLED = "true"
+LIMITLESS_SYNC_INTERVAL_HOURS = "1"
+LIMITLESS_USER_ID = "masayuki"
+
+# Secrets to set via `wrangler secret put` (per-worker):
+# - LIMITLESS_API_KEY
+# - SUPABASE_URL
+# - SUPABASE_SERVICE_ROLE_KEY
+# - OPENAI_API_KEY (optional but recommended)
+# - LIMITLESS_SYNC_WEBHOOK_KEY (recommended; to use webhook endpoint)

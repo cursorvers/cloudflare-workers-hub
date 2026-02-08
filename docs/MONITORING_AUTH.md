@@ -71,14 +71,14 @@ curl https://your-worker.workers.dev/health
 
 ### Phase 2: Add ADMIN_API_KEY (Gradual Migration)
 
-Add `ADMIN_API_KEY` to your wrangler.toml or Cloudflare dashboard:
+Add `ADMIN_API_KEY` as a Workers secret (recommended):
 
-```toml
-[vars]
-ENVIRONMENT = "production"
+```bash
+# Canonical (orchestrator-hub)
+wrangler secret put ADMIN_API_KEY --env ""
 
-[env.production]
-vars = { ADMIN_API_KEY = "your-admin-key" }
+# Optional canary
+wrangler secret put ADMIN_API_KEY --env canary
 ```
 
 Now you need to include the API key:
@@ -89,14 +89,13 @@ curl -H "X-API-Key: your-admin-key" https://your-worker.workers.dev/health
 
 ### Phase 3: Add MONITORING_API_KEY (Recommended Final State)
 
-Create a dedicated monitoring key:
+Create a dedicated monitoring key (recommended):
 
-```toml
-[env.production]
-vars = {
-  MONITORING_API_KEY = "your-monitoring-key",
-  ADMIN_API_KEY = "your-admin-key"  # Keep for other admin endpoints
-}
+Set both secrets:
+
+```bash
+wrangler secret put MONITORING_API_KEY --env ""
+wrangler secret put ADMIN_API_KEY --env ""
 ```
 
 Use the monitoring key:
@@ -166,12 +165,15 @@ openssl rand -base64 32
 
 Use different keys for development, staging, and production:
 
-```toml
-[env.development]
-vars = { MONITORING_API_KEY = "dev-monitoring-key" }
+```bash
+# dev (if you use a dedicated Wrangler env)
+wrangler secret put MONITORING_API_KEY --env development
 
-[env.production]
-vars = { MONITORING_API_KEY = "prod-monitoring-key" }
+# canonical (orchestrator-hub)
+wrangler secret put MONITORING_API_KEY --env ""
+
+# optional canary (orchestrator-hub-canary)
+wrangler secret put MONITORING_API_KEY --env canary
 ```
 
 ### 3. Rotate Keys Regularly
@@ -256,7 +258,7 @@ Store the key as a secret and use it in health checks:
 curl -v -H "X-API-Key: your-key" https://your-worker.workers.dev/health
 
 # Verify environment variable is set
-wrangler tail --env production | grep MONITORING
+wrangler tail | grep MONITORING
 ```
 
 ### Issue: Public access still works
@@ -272,9 +274,8 @@ Set at least one of the API keys in your environment variables.
 
 Set either `MONITORING_API_KEY` or `ADMIN_API_KEY` to enforce authentication:
 
-```toml
-[env.production]
-vars = { MONITORING_API_KEY = "required-key" }
+```bash
+wrangler secret put MONITORING_API_KEY --env ""
 ```
 
 Now all requests without a valid API key will receive 401 Unauthorized.

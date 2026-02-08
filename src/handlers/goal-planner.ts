@@ -394,13 +394,13 @@ async function handleCreateGoal(request: Request, env: Env): Promise<Response> {
       const goalsData = await env.CACHE.get(GOALS_KEY);
       const goals: StructuredGoal[] = goalsData ? JSON.parse(goalsData) : [];
       goals.push(structuredGoal);
-      await env.CACHE.put(GOALS_KEY, JSON.stringify(goals.slice(-100)));
+      await env.CACHE.put(GOALS_KEY, JSON.stringify(goals.slice(-100)), { expirationTtl: 30 * 24 * 60 * 60 });
 
       // Store plan
       const plansData = await env.CACHE.get(PLANS_KEY);
       const plans: ActionPlan[] = plansData ? JSON.parse(plansData) : [];
       plans.push(plan);
-      await env.CACHE.put(PLANS_KEY, JSON.stringify(plans.slice(-100)));
+      await env.CACHE.put(PLANS_KEY, JSON.stringify(plans.slice(-100)), { expirationTtl: 30 * 24 * 60 * 60 });
     } catch (e) {
       safeLog.error('[Goal Planner] Failed to store in KV', { error: String(e) });
     }
@@ -463,7 +463,7 @@ async function handleExecutePlan(env: Env, planId: string): Promise<Response> {
   plan.status = results.every(r => r.status === 'success') ? 'completed' : 'failed';
 
   // Update plan in KV
-  await env.CACHE.put(PLANS_KEY, JSON.stringify(plans));
+  await env.CACHE.put(PLANS_KEY, JSON.stringify(plans), { expirationTtl: 30 * 24 * 60 * 60 });
 
   return new Response(JSON.stringify({
     plan,

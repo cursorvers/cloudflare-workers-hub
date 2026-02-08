@@ -7,8 +7,9 @@
  * - Update task status
  * - Store and retrieve results
  *
- * Architecture: Task data in KV, lease coordination in Durable Object.
- * Falls back to KV-only mode when DO is unavailable (dev/test).
+ * Architecture:
+ * - Preferred: D1-backed queue (no KV list in hot paths)
+ * - Legacy/dev: KV-backed queue + Durable Object coordination
  */
 
 import { Env } from '../types';
@@ -24,7 +25,17 @@ import {
 } from '../schemas/queue';
 import { TaskIdPathSchema } from '../schemas/path-params';
 import { verifyAPIKey } from '../utils/api-auth';
-import { getTaskIds, removeFromTaskIndex } from '../utils/task-index';
+import {
+  claimNextTaskD1,
+  getResultD1,
+  getTaskD1,
+  listPendingTaskIdsD1,
+  releaseTaskD1,
+  renewTaskD1,
+  storeResultD1,
+  updateTaskStatusD1,
+} from '../utils/queue-d1';
+import { getTaskIds } from '../utils/task-index';
 
 /** Get the TaskCoordinator DO singleton stub */
 function getCoordinatorStub(env: Env): DurableObjectStub | null {
@@ -73,18 +84,26 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     return createRateLimitResponse(rateLimitResult);
   }
 
-  if (!env.CACHE) {
-    return new Response(JSON.stringify({ error: 'KV not configured' }), {
+  const kv = env.CACHE;
+  const hasD1 = !!env.DB;
+  if (!hasD1 && !kv) {
+    return new Response(JSON.stringify({ error: 'Queue store not configured (DB or KV required)' }), {
       status: 503, headers: JSON_HEADERS,
     });
   }
-
-  const kv = env.CACHE;
   const coordinator = getCoordinatorStub(env);
 
   // GET /api/queue - List pending tasks (cached to reduce KV list ops)
   if (path === '/api/queue' && request.method === 'GET') {
-    const pending = await getTaskIds(kv);
+    // D1-first: avoid KV list() (quota sensitive). KV draining should be done via admin migration endpoints.
+    if (hasD1) {
+      const pending = await listPendingTaskIdsD1(env);
+      safeLog.log('[Queue API] Listed tasks (D1)', { count: pending.length });
+      return new Response(JSON.stringify({ pending, count: pending.length }), { headers: JSON_HEADERS });
+    }
+
+    // KV-only mode (dev/test). Note: this may list internally on cache miss.
+    const pending = kv ? await getTaskIds(kv) : [];
 
     safeLog.log('[Queue API] Listed tasks', { count: pending.length });
 
@@ -102,19 +121,34 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     const workerId = body.workerId || `worker_${Date.now()}`;
     const leaseDuration = Math.min(body.leaseDurationSec || 300, 600);
 
-    // Get task IDs (cached to reduce KV list ops)
-    const candidates = await getTaskIds(kv);
+    // Prefer D1-backed queue (no KV list, reduced KV puts).
+    if (hasD1) {
+      try {
+        const claimed = await claimNextTaskD1(env, workerId, leaseDuration);
+        if (claimed) {
+          safeLog.log('[Queue API] Task claimed via D1', { taskId: claimed.taskId, workerId, leaseDuration });
+          return new Response(JSON.stringify({
+            success: true,
+            taskId: claimed.taskId,
+            task: claimed.task,
+            lease: claimed.lease,
+          }), { headers: JSON_HEADERS });
+        }
+      } catch (error) {
+        safeLog.error('[Queue API] D1 claim failed (falling back)', { error: String(error) });
+      }
 
-    if (candidates.length === 0) {
-      return new Response(JSON.stringify({
-        success: false, message: 'No tasks available', pending: 0,
-      }), { headers: JSON_HEADERS });
+      // KV draining is done via admin endpoints, not via claim path (avoids KV list + lease writes).
+      return new Response(JSON.stringify({ success: false, message: 'No tasks available', pending: 0 }), { headers: JSON_HEADERS });
     }
 
-    // Route through DO for atomic claim (or fall back to KV)
-    if (coordinator) {
-      return claimViaDO(coordinator, kv, candidates, workerId, leaseDuration, env);
+    // KV-only mode (dev/test): DO-based claim if available, otherwise KV nonce-based claim.
+    if (!kv) return new Response(JSON.stringify({ error: 'KV not configured' }), { status: 503, headers: JSON_HEADERS });
+    const candidates = (await getTaskIds(kv)).slice(0, 200);
+    if (!candidates.length) {
+      return new Response(JSON.stringify({ success: false, message: 'No tasks available', pending: 0 }), { headers: JSON_HEADERS });
     }
+    if (coordinator) return claimViaDO(coordinator, kv, candidates, workerId, leaseDuration, env);
     return claimViaKV(kv, candidates, workerId, leaseDuration);
   }
 
@@ -130,15 +164,29 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
 
     const body = validation.data;
 
+    if (hasD1) {
+      try {
+        const exists = await getTaskD1(env, taskId);
+        if (exists) {
+          const res = await releaseTaskD1(env, taskId, body.workerId);
+          if (!res.success && res.error === 'Not lease holder') {
+            return new Response(JSON.stringify({ error: res.error }), { status: 403, headers: JSON_HEADERS });
+          }
+          safeLog.log('[Queue API] Lease released via D1', { taskId, reason: body.reason || 'manual' });
+          return new Response(JSON.stringify({ success: true }), { headers: JSON_HEADERS });
+        }
+      } catch (error) {
+        safeLog.error('[Queue API] D1 release failed (falling back)', { error: String(error) });
+      }
+    }
+
     if (coordinator) {
-      const { status, data } = await coordinatorFetch(coordinator, '/release', 'POST', {
-        taskId, workerId: body.workerId,
-      }, env);
+      const { status, data } = await coordinatorFetch(coordinator, '/release', 'POST', { taskId, workerId: body.workerId }, env);
       safeLog.log('[Queue API] Lease released via DO', { taskId, reason: body.reason || 'manual' });
       return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
     }
 
-    // KV fallback
+    if (!kv) return new Response(JSON.stringify({ error: 'KV not configured' }), { status: 503, headers: JSON_HEADERS });
     return releaseViaKV(kv, taskId, body);
   }
 
@@ -155,14 +203,27 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     const body = validation.data;
     const extendDuration = Math.min(body.extendSec || 300, 600);
 
+    if (hasD1) {
+      try {
+        const exists = await getTaskD1(env, taskId);
+        if (exists) {
+          const res = await renewTaskD1(env, taskId, body.workerId, extendDuration);
+          if (!res.success) {
+            return new Response(JSON.stringify({ error: res.error }), { status: 403, headers: JSON_HEADERS });
+          }
+          return new Response(JSON.stringify({ success: true, lease: res.lease }), { headers: JSON_HEADERS });
+        }
+      } catch (error) {
+        safeLog.error('[Queue API] D1 renew failed (falling back)', { error: String(error) });
+      }
+    }
+
     if (coordinator) {
-      const { status, data } = await coordinatorFetch(coordinator, '/renew', 'POST', {
-        taskId, workerId: body.workerId, extendSec: extendDuration,
-      }, env);
+      const { status, data } = await coordinatorFetch(coordinator, '/renew', 'POST', { taskId, workerId: body.workerId, extendSec: extendDuration }, env);
       return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
     }
 
-    // KV fallback
+    if (!kv) return new Response(JSON.stringify({ error: 'KV not configured' }), { status: 503, headers: JSON_HEADERS });
     return renewViaKV(kv, taskId, body.workerId, extendDuration);
   }
 
@@ -182,20 +243,32 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
   }
 
-  // GET /api/queue/:taskId - Get specific task (KV only)
+  // GET /api/queue/:taskId - Get specific task
   const taskMatch = path.match(/^\/api\/queue\/([^/]+)$/);
   if (taskMatch && request.method === 'GET') {
     const taskId = taskMatch[1];
     const taskIdValidation = validatePathParameter(taskId, TaskIdPathSchema, 'taskId', '/api/queue/:taskId');
     if (!taskIdValidation.success) return taskIdValidation.response;
 
-    const task = await kv.get(`queue:task:${taskId}`, 'json');
-    if (!task) {
-      return new Response(JSON.stringify({ error: 'Task not found' }), {
-        status: 404, headers: JSON_HEADERS,
-      });
+    if (hasD1) {
+      try {
+        const got = await getTaskD1(env, taskId);
+        if (got?.task) {
+          const task = got.task;
+          task.status = got.row.status;
+          task.updatedAt = new Date(got.row.updated_at_ms).toISOString();
+          return new Response(JSON.stringify(task), { headers: JSON_HEADERS });
+        }
+      } catch (error) {
+        safeLog.error('[Queue API] D1 get task failed (falling back)', { error: String(error) });
+      }
     }
-    return new Response(JSON.stringify(task), { headers: JSON_HEADERS });
+
+    if (!kv) return new Response(JSON.stringify({ error: 'Task not found' }), { status: 404, headers: JSON_HEADERS });
+    const kvTask = await kv.get<Record<string, unknown>>(`queue:task:${taskId}`, 'json');
+    if (!kvTask) return new Response(JSON.stringify({ error: 'Task not found' }), { status: 404, headers: JSON_HEADERS });
+
+    return new Response(JSON.stringify(kvTask), { headers: JSON_HEADERS });
   }
 
   // POST /api/queue/:taskId/status - Update task status (KV only)
@@ -209,19 +282,21 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     if (!validation.success) return validation.response;
 
     const body = validation.data;
-    const task = await kv.get(`queue:task:${taskId}`, 'json') as Record<string, unknown> | null;
-    if (!task) {
-      return new Response(JSON.stringify({ error: 'Task not found' }), {
-        status: 404, headers: JSON_HEADERS,
-      });
+    if (hasD1) {
+      try {
+        const ok = await updateTaskStatusD1(env, taskId, body.status);
+        if (ok) return new Response(JSON.stringify({ success: true, status: body.status }), { headers: JSON_HEADERS });
+      } catch (error) {
+        safeLog.error('[Queue API] D1 status update failed (falling back)', { error: String(error) });
+      }
     }
 
+    if (!kv) return new Response(JSON.stringify({ error: 'Task not found' }), { status: 404, headers: JSON_HEADERS });
+    const task = await kv.get(`queue:task:${taskId}`, 'json') as Record<string, unknown> | null;
+    if (!task) return new Response(JSON.stringify({ error: 'Task not found' }), { status: 404, headers: JSON_HEADERS });
     const updatedTask = { ...task, status: body.status, updatedAt: new Date().toISOString() };
     await kv.put(`queue:task:${taskId}`, JSON.stringify(updatedTask), { expirationTtl: 3600 });
-
-    return new Response(JSON.stringify({ success: true, status: body.status }), {
-      headers: JSON_HEADERS,
-    });
+    return new Response(JSON.stringify({ success: true, status: body.status }), { headers: JSON_HEADERS });
   }
 
   // POST /api/result/:taskId - Store result and remove from queue
@@ -234,21 +309,42 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     const validation = await validateRequestBody(request, ResultSchema, '/api/result/:taskId');
     if (!validation.success) return validation.response;
 
-    // Store result (backwards compatible key)
-    await kv.put(`orchestrator:result:${taskId}`, JSON.stringify(validation.data), {
-      expirationTtl: 3600,
-    });
-
-    // Delete task from KV and update cached index
-    await kv.delete(`queue:task:${taskId}`);
-    await removeFromTaskIndex(kv, taskId);
-
-    // Delete lease from DO (or KV fallback)
-    if (coordinator) {
-      await coordinatorFetch(coordinator, `/task/${taskId}`, 'DELETE', undefined, env);
-    } else {
-      await kv.delete(`queue:lease:${taskId}`);
+    if (hasD1) {
+      try {
+        const exists = await getTaskD1(env, taskId);
+        if (exists) {
+          await storeResultD1(env, taskId, validation.data as any);
+          safeLog.log('[Queue API] Task completed (D1)', { taskId });
+          return new Response(JSON.stringify({ success: true }), { headers: JSON_HEADERS });
+        }
+      } catch (error) {
+        safeLog.error('[Queue API] D1 store result failed (falling back)', { error: String(error) });
+      }
     }
+
+    // Legacy KV task completion: store result in D1 even if task was not migrated yet, then delete KV keys.
+    if (!kv) return new Response(JSON.stringify({ error: 'Task not found' }), { status: 404, headers: JSON_HEADERS });
+    const kvTask = await kv.get<Record<string, unknown>>(`queue:task:${taskId}`, 'json');
+    if (!kvTask && !hasD1) return new Response(JSON.stringify({ error: 'Task not found' }), { status: 404, headers: JSON_HEADERS });
+
+    if (hasD1) {
+      try {
+        await storeResultD1(env, taskId, validation.data as any);
+        await kv.delete(`queue:task:${taskId}`);
+        await kv.delete(`queue:lease:${taskId}`);
+        if (coordinator) await coordinatorFetch(coordinator, `/task/${taskId}`, 'DELETE', undefined, env);
+        safeLog.log('[Queue API] Task completed (migrated result to D1, cleaned KV)', { taskId });
+        return new Response(JSON.stringify({ success: true }), { headers: JSON_HEADERS });
+      } catch (error) {
+        safeLog.error('[Queue API] D1 store result failed for legacy KV task', { error: String(error), taskId });
+      }
+    }
+
+    // Last-resort KV-only behavior (dev/test).
+    await kv.put(`orchestrator:result:${taskId}`, JSON.stringify(validation.data), { expirationTtl: 3600 });
+    await kv.delete(`queue:task:${taskId}`);
+    await kv.delete(`queue:lease:${taskId}`);
+    if (coordinator) await coordinatorFetch(coordinator, `/task/${taskId}`, 'DELETE', undefined, env);
 
     safeLog.log('[Queue API] Task completed and removed', { taskId });
     return new Response(JSON.stringify({ success: true }), { headers: JSON_HEADERS });
@@ -260,12 +356,18 @@ export async function handleQueueAPI(request: Request, env: Env, path: string): 
     const taskIdValidation = validatePathParameter(taskId, TaskIdPathSchema, 'taskId', '/api/result/:taskId');
     if (!taskIdValidation.success) return taskIdValidation.response;
 
-    const result = await kv.get(`orchestrator:result:${taskId}`, 'json');
-    if (!result) {
-      return new Response(JSON.stringify({ error: 'Result not found' }), {
-        status: 404, headers: JSON_HEADERS,
-      });
+    if (hasD1) {
+      try {
+        const res = await getResultD1(env, taskId);
+        if (res) return new Response(JSON.stringify(res), { headers: JSON_HEADERS });
+      } catch (error) {
+        safeLog.error('[Queue API] D1 get result failed (falling back)', { error: String(error) });
+      }
     }
+
+    if (!kv) return new Response(JSON.stringify({ error: 'KV not configured' }), { status: 503, headers: JSON_HEADERS });
+    const result = await kv.get(`orchestrator:result:${taskId}`, 'json');
+    if (!result) return new Response(JSON.stringify({ error: 'Result not found' }), { status: 404, headers: JSON_HEADERS });
     return new Response(JSON.stringify(result), { headers: JSON_HEADERS });
   }
 

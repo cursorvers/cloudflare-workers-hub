@@ -5,11 +5,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { handlePhiVerificationAPI } from './limitless-phi-verification';
 import { Env } from '../types';
+import * as supabaseClient from '../services/supabase-client';
 
 // Mock environment
 const mockEnv: Env = {
   SUPABASE_URL: 'https://test.supabase.co',
   SUPABASE_SERVICE_ROLE_KEY: 'test-key',
+  ENVIRONMENT: 'test',
   MONITORING_API_KEY: 'test-monitoring-key',
   ADMIN_API_KEY: 'test-admin-key',
   ASSISTANT_API_KEY: 'test-assistant-key',
@@ -22,31 +24,9 @@ const mockEnv: Env = {
   } as any,
 } as Env;
 
-// Mock Supabase client
-vi.mock('@supabase/supabase-js', () => ({
-  createClient: vi.fn(() => ({
-    from: vi.fn((table: string) => ({
-      select: vi.fn(() => ({
-        eq: vi.fn(() => ({
-          order: vi.fn(() => ({
-            limit: vi.fn(() => ({
-              then: vi.fn((cb) =>
-                cb({
-                  data: mockHighlights,
-                  error: null,
-                })
-              ),
-            })),
-          })),
-        })),
-      })),
-      update: vi.fn(() => ({
-        eq: vi.fn(() => ({
-          then: vi.fn((cb) => cb({ data: {}, error: null })),
-        })),
-      })),
-    })),
-  })),
+vi.mock('../services/supabase-client', () => ({
+  supabaseSelect: vi.fn(),
+  supabaseUpdate: vi.fn(),
 }));
 
 let mockHighlights: any[] = [];
@@ -55,6 +35,17 @@ describe('PHI Verification API', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockHighlights = [];
+    vi.mocked(supabaseClient.supabaseSelect).mockImplementation(async (_cfg: any, _table: any, query: string) => {
+      // First query fetches the batch; second query checks if any remain.
+      if (query.includes('select=id,extracted_text,phi_confidence_score')) {
+        return { data: mockHighlights, error: null } as any;
+      }
+      if (query.includes('select=id&needs_ai_verification=eq.true&limit=1')) {
+        return { data: [], error: null } as any;
+      }
+      return { data: [], error: null } as any;
+    });
+    vi.mocked(supabaseClient.supabaseUpdate).mockResolvedValue({ data: [], error: null } as any);
   });
 
   describe('Authentication', () => {
@@ -92,7 +83,7 @@ describe('PHI Verification API', () => {
       const request = new Request('https://test.com/api/limitless/verify-phi-batch', {
         method: 'POST',
         headers: {
-          'X-API-Key': 'test-admin-key',
+          'X-API-Key': 'test-monitoring-key',
           'Content-Type': 'application/json',
         },
       });

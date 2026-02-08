@@ -111,6 +111,30 @@ async function calculateHash(data: string): Promise<string> {
     .join('');
 }
 
+function getClassificationCacheTenant(metadata: Record<string, any>): string {
+  const tenant = metadata?.tenantId ?? metadata?.tenant_id;
+  return typeof tenant === 'string' && tenant.length > 0 ? tenant : 'default';
+}
+
+function normalizeClassificationMetadataForPrompt(metadata: Record<string, any>): Record<string, any> {
+  // Avoid feeding volatile identifiers into the model; they also destroy cache hit rate.
+  // Keep only signal-like fields; callers can still pass IDs via logs/workflow metadata.
+  const {
+    messageId,
+    attachmentId,
+    receiptId,
+    emailDate,
+    // Keep pdfText* out of the model prompt to avoid accidental prompt steering.
+    pdfTextExtracted,
+    pdfTextPages,
+    pdfTextElapsedMs,
+    pdfTextReason,
+    ...rest
+  } = metadata || {};
+
+  return rest;
+}
+
 /**
  * Call Workers AI for classification
  */
@@ -119,13 +143,14 @@ async function classifyWithAI(
   text: string,
   metadata: Record<string, any>
 ): Promise<ClassificationResult> {
+  const promptMetadata = normalizeClassificationMetadataForPrompt(metadata);
   const prompt = `Analyze this receipt/invoice and extract structured information.
 
 Receipt Text:
 ${text}
 
 Metadata:
-${JSON.stringify(metadata, null, 2)}
+${JSON.stringify(promptMetadata, null, 2)}
 
 Extract and return ONLY a JSON object with the following structure:
 {
@@ -198,9 +223,27 @@ export async function classifyReceipt(
     } as ClassificationResult;
   }
 
+  if (!env.KV) {
+    // Degrade gracefully: still classify, just without caching.
+    safeLog(env, 'warn', 'KV not configured; skipping classification cache', {});
+    const result = await classifyWithAI(env, text, metadata);
+    return result;
+  }
+
   // Check cache for AI classification
-  const cacheKey = await calculateHash(text + JSON.stringify(metadata));
-  const cached = await env.KV.get(`classification:${cacheKey}`);
+  const tenant = getClassificationCacheTenant(metadata);
+  const normalizedMetadata = normalizeClassificationMetadataForPrompt(metadata);
+  // Cache key must be consistent with the model prompt inputs (minus volatile identifiers).
+  const cacheKey = await calculateHash(`v2\n${tenant}\n${text}\n${JSON.stringify(normalizedMetadata)}`);
+  let cached: string | null = null;
+  try {
+    cached = await env.KV.get(`classification:v2:${cacheKey}`);
+  } catch (error) {
+    // Cache is non-critical; degrade gracefully under KV quota/outage.
+    safeLog(env, 'warn', 'Classification cache read failed (continuing)', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
   if (cached) {
     safeLog(env, 'info', 'Cache hit for classification', { cacheKey });
     const result = JSON.parse(cached);
@@ -212,9 +255,15 @@ export async function classifyReceipt(
   const result = await classifyWithAI(env, text, metadata);
 
   // Cache result for 30 days
-  await env.KV.put(`classification:${cacheKey}`, JSON.stringify(result), {
-    expirationTtl: 30 * 24 * 60 * 60, // 30 days
-  });
+  try {
+    await env.KV.put(`classification:v2:${cacheKey}`, JSON.stringify(result), {
+      expirationTtl: 30 * 24 * 60 * 60, // 30 days
+    });
+  } catch (error) {
+    safeLog(env, 'warn', 'Classification cache write failed (continuing)', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   return result;
 }

@@ -17,7 +17,7 @@
 import { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { getRecentLifelogs, type Lifelog } from '../services/limitless';
-import { supabaseSelect, supabaseInsert, type SupabaseConfig } from '../services/supabase-client';
+import { supabaseSelect, supabaseInsert, supabaseUpdate, type SupabaseConfig } from '../services/supabase-client';
 import { detectPHI } from '../services/phi-detector';
 import { sendReflectionNotification } from '../services/reflection-notifier';
 import { sendPWAAlert, generateAlertId } from '../services/pwa-notifier';
@@ -37,6 +37,7 @@ export async function handleLimitlessPollerCron(env: Env): Promise<void> {
     // Step 1: Fetch recent lifelogs from Limitless.ai (last 2 hours to account for delays)
     const apiKey = env.LIMITLESS_API_KEY;
     if (!apiKey) {
+      safeLog.error('[Limitless Poller] LIMITLESS_API_KEY not configured');
       throw new Error('LIMITLESS_API_KEY not configured');
     }
 
@@ -221,7 +222,7 @@ async function createReflectionFromLifelog(
 
   try {
     // Step 1: Create highlight (tracks lifelog_id)
-    const highlightResult = await supabaseInsert<{ id: string }>(
+    const highlightResult = await supabaseInsert<Array<{ id: string }>>(
       config,
       'lifelog_highlights',
       {
@@ -229,7 +230,7 @@ async function createReflectionFromLifelog(
         highlight_time: lifelog.startTime,
         extracted_text: transcript.substring(0, 500), // First 500 chars
         speaker_name: 'Auto-detected',
-        topics: [], // TODO: Extract topics using Workers AI
+        topics: await extractTopics(env, transcript),
         status: 'pending_review',
         created_at: new Date().toISOString(),
       }
@@ -237,6 +238,7 @@ async function createReflectionFromLifelog(
 
     highlightId = highlightResult.data?.[0]?.id;
     if (!highlightId) {
+      safeLog.error('[Limitless Poller] Failed to create highlight', { lifelog_id: lifelog.id });
       throw new Error('Failed to create highlight');
     }
 
@@ -319,18 +321,74 @@ async function createReflectionFromLifelog(
       error: String(error),
     });
 
-    // CRITICAL: If reflection creation fails after highlight creation,
-    // the highlight remains orphaned and won't be retried.
-    // TODO: Implement cleanup or status update to enable retry
+    // Mark orphaned highlight as 'error' to enable status-based retry
     if (highlightId) {
-      safeLog.warn('[Limitless Poller] Orphaned highlight detected', {
+      safeLog.warn('[Limitless Poller] Orphaned highlight detected, marking for retry', {
         highlight_id: highlightId,
         lifelog_id: lifelog.id,
-        note: 'Manual cleanup required or implement status-based retry',
+      });
+
+      await supabaseUpdate(
+        config,
+        'lifelog_highlights',
+        { status: 'error' },
+        `id=eq.${highlightId}`
+      ).catch((updateError) => {
+        safeLog.error('[Limitless Poller] Failed to mark highlight as error', {
+          highlight_id: highlightId,
+          error: String(updateError),
+        });
       });
     }
 
     throw error;
+  }
+}
+
+/**
+ * Extract topics from transcript using Workers AI
+ * Uses lightweight Llama 3.2 3B model for cost efficiency
+ * @internal Exported for testing only
+ */
+export async function extractTopics(env: Env, transcript: string): Promise<string[]> {
+  try {
+    if (!env.AI) {
+      safeLog.warn('[Limitless Poller] Workers AI not available, skipping topics extraction');
+      return [];
+    }
+
+    // Sanitize transcript to prevent prompt injection
+    const sanitized = transcript
+      .substring(0, 1000)
+      .replace(/["""]/g, "'")
+      .replace(/\\/g, '');
+    const response = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
+      prompt: `Extract 3-5 topic keywords from this conversation transcript. Return ONLY a JSON array of short keyword strings (2-3 words max each), no other text.\n\nTranscript:\n'${sanitized}'\n\nTopics:`,
+      max_tokens: 100,
+    });
+
+    const responseText = typeof response === 'string'
+      ? response
+      : (response as { response?: string }).response ?? '';
+
+    const match = responseText.match(/\[.*?\]/s);
+    if (match) {
+      try {
+        const parsed: unknown = JSON.parse(match[0]);
+        if (Array.isArray(parsed) && parsed.every((t: unknown) => typeof t === 'string')) {
+          return (parsed as string[]).slice(0, 5);
+        }
+      } catch {
+        // JSON parse failed, fall through to empty array
+      }
+    }
+
+    return [];
+  } catch (error) {
+    safeLog.warn('[Limitless Poller] Topics extraction failed, using empty array', {
+      error: String(error),
+    });
+    return [];
   }
 }
 
@@ -356,6 +414,7 @@ async function sendDiscordAlert(env: Env, message: string): Promise<void> {
     });
 
     if (!response.ok) {
+      safeLog.error('[Limitless Poller] Discord API error', { status: response.status });
       throw new Error(`Discord API error: ${response.status}`);
     }
 

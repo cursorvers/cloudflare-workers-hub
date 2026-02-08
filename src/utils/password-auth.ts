@@ -71,6 +71,14 @@ function fromHex(hex: string): Uint8Array {
   return bytes;
 }
 
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  // TS lib.dom's BufferSource typing is stricter than Uint8Array<ArrayBufferLike>.
+  // Allocate a concrete ArrayBuffer for compatibility.
+  const buf = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buf).set(bytes);
+  return buf;
+}
+
 /**
  * Hash password using PBKDF2-SHA256
  */
@@ -102,7 +110,7 @@ export async function hashPassword(password: string): Promise<string> {
   const hashBuffer = await crypto.subtle.deriveBits(
     {
       name: 'PBKDF2',
-      salt,
+      salt: toArrayBuffer(salt),
       iterations: PBKDF2_ITERATIONS,
       hash: 'SHA-256',
     },
@@ -152,7 +160,7 @@ export async function verifyPassword(
     const hashBuffer = await crypto.subtle.deriveBits(
       {
         name: 'PBKDF2',
-        salt,
+        salt: toArrayBuffer(salt),
         iterations,
         hash: 'SHA-256',
       },

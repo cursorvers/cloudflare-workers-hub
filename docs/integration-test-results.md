@@ -43,7 +43,7 @@ Workers Version: be401785-3dd6-484f-982e-8c59d97a2bac
 - **結果**: DLQ エントリ 0件（期待通り）
 - **検証**: DLQ API 動作確認
 
-#### ⏸️ POST /api/admin/cron
+#### ⏸️ POST /api/receipts/poll
 - **ステータス**: 保留（ADMIN_API_KEY 値取得必要）
 - **備考**: Gmail polling 手動トリガー
 
@@ -69,7 +69,6 @@ Workers Version: be401785-3dd6-484f-982e-8c59d97a2bac
 
 | 項目 | 理由 | 取得方法 |
 |------|------|----------|
-| **FREEE_COMPANY_ID** | freee API から取得必要 | `/tmp/get-freee-company-id.sh` 参照 |
 | **GITHUB_TOKEN** | Personal Access Token 作成必要 | GitHub Settings → Developer settings |
 | **GITHUB_REPO** | 手動設定必要 | `echo 'cursorvers/cloudflare-workers-hub' \| wrangler secret put GITHUB_REPO` |
 
@@ -158,30 +157,12 @@ wrangler d1 execute knowledge-base --remote --command \
 
 ### 🔴 高優先度（統合テスト完了に必須）
 
-1. **FREEE_COMPANY_ID 取得・設定**
-   ```bash
-   # Step 1: Get access token
-   curl -X POST https://accounts.secure.freee.co.jp/public_api/token \
-     -H 'Content-Type: application/x-www-form-urlencoded' \
-     -d "grant_type=refresh_token" \
-     -d "client_id=$FREEE_CLIENT_ID" \
-     -d "client_secret=$FREEE_CLIENT_SECRET" \
-     -d "refresh_token=$FREEE_REFRESH_TOKEN"
-
-   # Step 2: Get companies
-   curl -H "Authorization: Bearer $FREEE_ACCESS_TOKEN" \
-     https://api.freee.co.jp/api/1/companies
-
-   # Step 3: Set company ID
-   echo '1234567' | wrangler secret put FREEE_COMPANY_ID
-   ```
-
-2. **GITHUB_TOKEN 作成・設定**
+1. **GITHUB_TOKEN 作成・設定**
    - URL: https://github.com/settings/tokens/new
    - Scopes: `workflow` (Actions workflows の読み書き)
    - コマンド: `wrangler secret put GITHUB_TOKEN`
 
-3. **GITHUB_REPO 設定**
+2. **GITHUB_REPO 設定**
    ```bash
    echo 'cursorvers/cloudflare-workers-hub' | wrangler secret put GITHUB_REPO
    ```
@@ -190,10 +171,8 @@ wrangler d1 execute knowledge-base --remote --command \
 
 4. **Gmail Polling テスト**
    ```bash
-   curl -X POST https://orchestrator-hub.masa-stage1.workers.dev/api/admin/cron \
-     -H "Authorization: Bearer $ADMIN_API_KEY" \
-     -H "Content-Type: application/json" \
-     -d '{"schedule": "*/15 * * * *"}'
+   curl -X POST https://orchestrator-hub.masa-stage1.workers.dev/api/receipts/poll \
+     -H "Authorization: Bearer $ADMIN_API_KEY"
    ```
 
 5. **freee API 統合テスト**
@@ -229,7 +208,6 @@ wrangler d1 execute knowledge-base --remote --command \
 
 **ユーザー操作必要**:
 2. GitHub Personal Access Token 作成（2分）
-3. FREEE_COMPANY_ID 取得（5分）
 
 **統合テスト完了後**:
 4. Gmail Polling 実行
@@ -248,7 +226,6 @@ wrangler d1 execute knowledge-base --remote --command \
 
 ### 統合テスト完了条件
 - ✅ RECEIPTS_API_KEY 設定
-- ❌ FREEE_COMPANY_ID 設定
 - ❌ GITHUB_TOKEN 設定
 - ❌ GITHUB_REPO 設定
 

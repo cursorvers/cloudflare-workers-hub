@@ -9,6 +9,8 @@ import { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import type { ReflectionNotification } from '../schemas/user-reflections';
 
+export type { ReflectionNotification } from '../schemas/user-reflections';
+
 /**
  * Notification channel type
  */
@@ -50,7 +52,7 @@ export async function sendReflectionNotification(
       return {
         success: false,
         channel,
-        message: 'Notification skipped (frequency control)',
+        error: 'notification sent within 24 hours',
       };
     }
   }
@@ -119,7 +121,9 @@ async function sendDiscordNotification(
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorText = typeof (response as any).text === 'function'
+        ? await (response as Response).text()
+        : ((response as any).statusText ?? '');
       safeLog.error('[Notifier] Discord notification failed', {
         status: response.status,
         error: errorText,
@@ -128,7 +132,7 @@ async function sendDiscordNotification(
       return {
         success: false,
         channel: 'discord',
-        error: `Discord API error: ${response.status}`,
+        error: `Discord webhook returned ${response.status}`,
       };
     }
 
@@ -184,7 +188,9 @@ async function sendSlackNotification(
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorText = typeof (response as any).text === 'function'
+        ? await (response as Response).text()
+        : ((response as any).statusText ?? '');
       safeLog.error('[Notifier] Slack notification failed', {
         status: response.status,
         error: errorText,
@@ -193,7 +199,7 @@ async function sendSlackNotification(
       return {
         success: false,
         channel: 'slack',
-        error: `Slack API error: ${response.status}`,
+        error: `Slack webhook returned ${response.status}`,
       };
     }
 

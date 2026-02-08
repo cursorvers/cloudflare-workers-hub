@@ -1,0 +1,42 @@
+name: KV Optimizer Audit
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly (Mon 03:00 UTC). Adjust as needed.
+    - cron: '0 3 * * 1'
+  workflow_dispatch: {}
+
+jobs:
+  kv-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: KV audit (baseline check)
+        # Practical gate: block only *risky* regressions (TTL-less puts, kv.list usage).
+        # Keep totals/puts visible in the report, but don't fail CI just for those increases.
+        run: |
+          node tools/kv-optimizer/kv-optimizer.mjs check \
+            --root . \
+            --baseline tools/kv-optimizer/baseline.json \
+            --allow-total-increase 100000 \
+            --allow-puts-increase 100000 \
+            --json kv-report.json
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kv-optimizer-report
+          path: kv-report.json
+          retention-days: 14

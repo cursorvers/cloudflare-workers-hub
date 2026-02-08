@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="../styles/popup.css" />
+    <title>領収書アップローダー 設定</title>
+  </head>
+  <body class="options-body">
+    <header class="popup-header">
+      <h1>接続設定</h1>
+      <p class="hint">Workers APIの接続先を設定してください。</p>
+    </header>
+
+    <section class="section">
+      <label class="field">
+        <span>Workers API URL</span>
+        <input id="api-url" type="url" placeholder="https://example.workers.dev" />
+      </label>
+      <p id="canary-warning" class="hint warning" hidden></p>
+      <label class="field">
+        <span>APIトークン</span>
+        <input id="api-token" type="password" placeholder="Bearer トークン" />
+      </label>
+      <button id="save-button" class="primary">保存して接続テスト</button>
+      <p id="save-status" class="hint"></p>
+    </section>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

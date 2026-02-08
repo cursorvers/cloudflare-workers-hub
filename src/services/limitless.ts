@@ -99,6 +99,25 @@ const SyncOptionsSchema = z.object({
 
 export type SyncOptions = z.infer<typeof SyncOptionsSchema>;
 
+/**
+ * Range sync options (explicit start/end, resumable via cursor)
+ *
+ * This is intended for backfills where maxAgeHours is insufficient.
+ * Keep defaults conservative to respect Workers subrequest budgets.
+ */
+const SyncRangeOptionsSchema = z.object({
+  userId: z.string().min(1, 'User ID is required'),
+  startTime: z.string().datetime(),
+  endTime: z.string().datetime(),
+  cursor: z.string().optional(),
+  pageSize: z.number().min(1).max(10).optional().default(3),
+  maxPages: z.number().min(1).max(20).optional().default(1),
+  includeAudio: z.boolean().optional().default(false),
+  syncSource: z.enum(['webhook', 'backup', 'manual']).optional().default('manual'),
+});
+
+export type SyncRangeOptions = z.infer<typeof SyncRangeOptionsSchema>;
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -169,7 +188,7 @@ export async function getRecentLifelogs(
       }
     );
 
-    const rawData = await response.json();
+    const rawData = (await response.json()) as any;
 
     // Parse actual API response: { data: { lifelogs: [...] }, meta: { lifelogs: { nextCursor } } }
     const lifelogsArray = rawData?.data?.lifelogs || rawData?.lifelogs || [];
@@ -623,6 +642,159 @@ export async function syncToSupabase(
     });
     throw new Error(`Sync to Supabase failed: ${String(error)}`);
   }
+}
+
+/**
+ * Sync a specific time range to Supabase (resumable via cursor).
+ *
+ * Returns a nextCursor when more pages exist for the same time range.
+ */
+export async function syncRangeToSupabase(
+  env: Env,
+  apiKey: string,
+  options: SyncRangeOptions
+): Promise<{
+  synced: number;
+  skipped: number;
+  errors: string[];
+  nextCursor?: string;
+  pagesProcessed: number;
+  done: boolean;
+}> {
+  const validatedOptions = SyncRangeOptionsSchema.parse(options);
+
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('Supabase not configured: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY required');
+  }
+
+  const supabaseConfig: SupabaseConfig = {
+    url: env.SUPABASE_URL,
+    serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+  };
+
+  safeLog.info('[Limitless] Starting Supabase range sync', {
+    userId: validatedOptions.userId,
+    startTime: validatedOptions.startTime,
+    endTime: validatedOptions.endTime,
+    pageSize: validatedOptions.pageSize,
+    maxPages: validatedOptions.maxPages,
+    hasCursor: !!validatedOptions.cursor,
+  });
+
+  const errors: string[] = [];
+  let synced = 0;
+  let skipped = 0;
+  let cursor: string | undefined = validatedOptions.cursor;
+  let pagesProcessed = 0;
+
+  for (; pagesProcessed < validatedOptions.maxPages; pagesProcessed++) {
+    const result = await getRecentLifelogs(apiKey, {
+      limit: validatedOptions.pageSize,
+      cursor,
+      startTime: validatedOptions.startTime,
+      endTime: validatedOptions.endTime,
+    });
+
+    if (result.lifelogs.length === 0) {
+      cursor = result.cursor;
+      break;
+    }
+
+    for (const lifelog of result.lifelogs) {
+      try {
+        // Skip if no meaningful content
+        if (!lifelog.markdown && (!lifelog.contents || lifelog.contents.length === 0)) {
+          safeLog.info('[Limitless] Skipping lifelog without content', { lifelogId: lifelog.id });
+          skipped++;
+          continue;
+        }
+
+        const rawInput: RawLifelogInput = {
+          id: lifelog.id,
+          title: lifelog.title,
+          markdown: lifelog.markdown,
+          contents: lifelog.contents,
+          startTime: lifelog.startTime,
+          endTime: lifelog.endTime,
+          isStarred: lifelog.isStarred,
+        };
+
+        const processed = await processLifelog(env.AI, rawInput, env.OPENAI_API_KEY);
+
+        const startMs = new Date(lifelog.startTime).getTime();
+        const endMs = new Date(lifelog.endTime).getTime();
+        const durationSeconds = Math.round((endMs - startMs) / 1000);
+
+        const transcript =
+          lifelog.markdown ||
+          lifelog.contents
+            ?.filter((c) => c.type === 'blockquote')
+            .map((c) => `${c.speakerName || 'Unknown'}: ${c.content}`)
+            .join('\n') ||
+          '';
+
+        const row = {
+          limitless_id: lifelog.id,
+          classification: processed.classification,
+          summary: processed.summary,
+          key_insights: JSON.stringify(processed.keyInsights),
+          action_items: JSON.stringify(processed.actionItems),
+          topics: JSON.stringify(processed.topics),
+          speakers: JSON.stringify(processed.speakers),
+          sentiment: processed.sentiment,
+          confidence_score: processed.confidenceScore,
+          title: lifelog.title || null,
+          start_time: lifelog.startTime,
+          end_time: lifelog.endTime,
+          original_length: transcript.length,
+          duration_seconds: durationSeconds > 0 ? durationSeconds : null,
+          is_starred: lifelog.isStarred || false,
+          raw_markdown: lifelog.markdown || null,
+          raw_contents: lifelog.contents ? JSON.stringify(lifelog.contents) : null,
+          processed_at: processed.classification !== 'unprocessed' ? new Date().toISOString() : null,
+          sync_source: validatedOptions.syncSource,
+        };
+
+        const upsertResult = await supabaseUpsert(supabaseConfig, 'processed_lifelogs', row, 'limitless_id');
+        if (upsertResult.error) {
+          throw new Error(`Supabase upsert failed: ${upsertResult.error.message}`);
+        }
+
+        synced++;
+      } catch (itemError) {
+        const errorMsg = `Failed to sync lifelog ${lifelog.id}: ${String(itemError)}`;
+        safeLog.error('[Limitless] Failed to sync individual lifelog (range)', {
+          lifelogId: lifelog.id,
+          error: String(itemError),
+        });
+        errors.push(errorMsg);
+      }
+    }
+
+    cursor = result.cursor;
+    if (!cursor) {
+      break;
+    }
+  }
+
+  const done = !cursor;
+  safeLog.info('[Limitless] Supabase range sync completed', {
+    synced,
+    skipped,
+    errors: errors.length,
+    pagesProcessed,
+    done,
+    hasNextCursor: !!cursor,
+  });
+
+  return {
+    synced,
+    skipped,
+    errors,
+    nextCursor: cursor,
+    pagesProcessed,
+    done,
+  };
 }
 
 // ============================================================================

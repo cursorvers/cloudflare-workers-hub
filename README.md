@@ -63,11 +63,16 @@ npm install
 npm test
 
 # Local development
-npx wrangler dev
+npm run dev
 
-# Deploy
-npx wrangler deploy
+# Deploy (hub / canonical prod)
+npm run release:hub
+
+# Deploy (canary)
+npm run release:canary
 ```
+
+See `docs/DEPLOYMENT_TARGETS.md` for the accident-proof target model (hub vs canary vs legacy).
 
 ## Project Structure
 
@@ -118,6 +123,10 @@ See `src/types.ts` for the full `Env` interface. Key variables:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
+
+## Runbooks
+
+- Queue API Key drift (401 spam prevention): `docs/QUEUE_AUTH_KEY_DRIFT_RUNBOOK.md`
 | `ENVIRONMENT` | Yes | `development` / `production` |
 | `SLACK_BOT_TOKEN` | No | Slack Bot OAuth token |
 | `SLACK_SIGNING_SECRET` | No | Slack request signing secret |

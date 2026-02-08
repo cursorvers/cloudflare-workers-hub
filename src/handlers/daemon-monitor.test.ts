@@ -105,7 +105,11 @@ describe('daemon-monitor', () => {
 
       await handleDaemonHealthCheck(env, mockWithLock);
 
-      expect(env.CACHE!.put).toHaveBeenCalledWith('daemon:ever_registered', 'true');
+      expect(env.CACHE!.put).toHaveBeenCalledWith(
+        'daemon:ever_registered',
+        'true',
+        expect.objectContaining({ expirationTtl: 180 * 24 * 60 * 60 }),
+      );
       expect(notificationModule.sendDiscordNotification).not.toHaveBeenCalled();
     });
 

@@ -70,7 +70,7 @@ If you prefer a pinned version in Claude Desktop config, set:
 ## Notes For This Project
 
 - `freee-mcp` is a local MCP server; it is not intended to run inside Cloudflare Workers.
-- Cloudflare Workers secrets are per-script (e.g. `orchestrator-hub` vs `orchestrator-hub-production`). This is independent of `freee-mcp`'s local config.
+- Cloudflare Workers secrets are per-script (e.g. `orchestrator-hub` vs `orchestrator-hub-canary`). This is independent of `freee-mcp`'s local config.
 - If you need a one-off fix in production: prefer using `freee-mcp` locally to validate the API call, then implement the minimal safe endpoint in this Worker with admin auth (`ADMIN_API_KEY`) and strict input validation.
 
 ## Quickstart (Ops)

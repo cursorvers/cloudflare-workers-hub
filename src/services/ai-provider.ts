@@ -64,7 +64,7 @@ class WorkersAIProvider implements AIProvider {
     const fullPrompt = context ? `${context}\n\n${prompt}` : prompt;
 
     try {
-      const response = await this.env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+      const response = await this.env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
         prompt: fullPrompt,
         max_tokens: MAX_TOKENS_WORKERS_AI,
         temperature: 0.3,

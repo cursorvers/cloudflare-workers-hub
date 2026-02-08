@@ -11,7 +11,7 @@ ALLOW_ORIGINS = "fugue-system-ui.vercel.app,localhost:3000"
 [[durable_objects.bindings]]
 name = "COCKPIT_WS"
 class_name = "CockpitWebSocket"
-script_name = "orchestrator-hub-production"
+script_name = "orchestrator-hub"
 
 [observability]
 enabled = true

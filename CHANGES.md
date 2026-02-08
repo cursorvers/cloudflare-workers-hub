@@ -186,14 +186,18 @@ ADMIN_API_KEY=your-admin-key
    ```
 
 2. **Add to wrangler.toml or Cloudflare Dashboard:**
-   ```toml
-   [env.production]
-   vars = { MONITORING_API_KEY = "your-key" }
+   Recommended (Workers secret, avoids config drift):
+   ```bash
+   # hub (envless)
+   printf "%s" "your-key" | wrangler secret put MONITORING_API_KEY
+
+   # canary
+   printf "%s" "your-key" | wrangler secret put MONITORING_API_KEY --env canary
    ```
 
 3. **Deploy:**
    ```bash
-   wrangler deploy
+   npm run release:hub
    ```
 
 4. **Update monitoring tools:**

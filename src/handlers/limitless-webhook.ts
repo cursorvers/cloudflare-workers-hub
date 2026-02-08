@@ -59,7 +59,9 @@ export async function handleLimitlessWebhook(
 
   // Apply rate limiting (stricter for unauthenticated requests)
   const rateLimit = hasAuth ? 'limitless_webhook_auth' : 'limitless_webhook_public';
-  const rateLimitResult = await checkRateLimit(request, env, clientId);
+  // Use legacy channel-based limiter here: the webhook's "clientId" is already derived from IP.
+  // Keeping the call signature stable also makes it trivial to adjust per-route policy.
+  const rateLimitResult = await checkRateLimit(env, rateLimit, clientId);
 
   if (!rateLimitResult.allowed) {
     safeLog.warn('[Limitless Webhook] Rate limit exceeded', {

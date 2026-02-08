@@ -293,12 +293,13 @@ describe('handleLimitlessWebhook', () => {
       expect(syncToSupabase).toHaveBeenCalledWith(
         env,
         'test-api-key',
-        {
+        expect.objectContaining({
           userId: 'test-user',
           maxAgeHours: 2,
           includeAudio: true,
           maxItems: 5,
-        }
+          syncSource: 'webhook',
+        })
       );
     });
 

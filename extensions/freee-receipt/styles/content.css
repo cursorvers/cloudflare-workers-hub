@@ -1,0 +1,43 @@
+.receipt-fab {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  padding: 10px 14px;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: 0 8px 20px rgba(37, 99, 235, 0.25);
+  cursor: pointer;
+  z-index: 9999;
+}
+
+.receipt-fab:hover {
+  background: #1d4ed8;
+}
+
+.receipt-fab-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.receipt-fab-text {
+  white-space: nowrap;
+}
+
+@media (prefers-color-scheme: dark) {
+  .receipt-fab {
+    background: #60a5fa;
+    box-shadow: 0 8px 20px rgba(96, 165, 250, 0.35);
+    color: #0f172a;
+  }
+
+  .receipt-fab:hover {
+    background: #3b82f6;
+  }
+}

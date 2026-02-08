@@ -822,11 +822,11 @@ describe('Integration scenarios', () => {
       errorRateThreshold: 0.05,
     });
 
-    // Simulate 100 requests with various characteristics
+    // Simulate 100 requests with various characteristics (deterministic to avoid flaky tests).
     for (let i = 0; i < 100; i++) {
       const metric = collector.startRequest(`req-${i}`, 'slack', '/api/test', 'GET');
-      const duration = Math.random() * 300; // 0-300ms
-      const status = Math.random() < 0.95 ? 200 : 500; // 5% error rate
+      const duration = (i * 7) % 300; // 0-299ms (deterministic)
+      const status = i < 5 ? 500 : 200; // exactly 5% error rate
 
       vi.spyOn(Date, 'now').mockReturnValue(metric.startTime + duration);
       collector.endRequest(metric, status);

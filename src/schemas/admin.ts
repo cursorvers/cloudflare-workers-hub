@@ -23,3 +23,25 @@ export const DeleteAPIKeyMappingSchema = z.object({
 });
 
 export type DeleteAPIKeyMappingInput = z.infer<typeof DeleteAPIKeyMappingSchema>;
+
+/**
+ * Schema for queue KV -> D1 migration
+ */
+export const MigrateQueueKVToD1Schema = z.object({
+  cursor: z.string().optional(),
+  limit: z.number().int().min(1).max(500).optional().default(200),
+  cleanup: z.boolean().optional().default(false),
+});
+
+export type MigrateQueueKVToD1Input = z.infer<typeof MigrateQueueKVToD1Schema>;
+
+/**
+ * Schema for result KV -> D1 migration
+ */
+export const MigrateResultsKVToD1Schema = z.object({
+  cursor: z.string().optional(),
+  limit: z.number().int().min(1).max(500).optional().default(200),
+  cleanup: z.boolean().optional().default(false),
+});
+
+export type MigrateResultsKVToD1Input = z.infer<typeof MigrateResultsKVToD1Schema>;

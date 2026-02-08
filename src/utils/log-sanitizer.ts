@@ -270,7 +270,8 @@ function emitLog(level: LogLevel, message: string, context?: unknown): void {
   } else if (level === 'debug') {
     console.debug(payload);
   } else {
-    console.info(payload);
+    // Use console.log so test spies and most log collectors see info-level logs consistently.
+    console.log(payload);
   }
 }
 

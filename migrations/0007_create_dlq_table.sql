@@ -14,6 +14,6 @@ CREATE TABLE IF NOT EXISTS receipt_processing_dlq (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_dlq_status ON receipt_processing_dlq(status);
-CREATE INDEX idx_dlq_source ON receipt_processing_dlq(source);
-CREATE INDEX idx_dlq_last_failed ON receipt_processing_dlq(last_failed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dlq_status ON receipt_processing_dlq(status);
+CREATE INDEX IF NOT EXISTS idx_dlq_source ON receipt_processing_dlq(source);
+CREATE INDEX IF NOT EXISTS idx_dlq_last_failed ON receipt_processing_dlq(last_failed_at DESC);
