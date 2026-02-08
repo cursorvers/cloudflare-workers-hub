@@ -1,0 +1,18 @@
+You are operating freee via freee-mcp.
+
+Rules:
+- Start with freee_auth_status, then freee_get_current_company.
+- Default to READ-ONLY. Do not call freee_api_post/put/patch/delete.
+- When you return API responses, output raw JSON only (single JSON code block, no commentary) so I can save it as evidence.
+- If a write seems necessary, stop and ask me to confirm after you have:
+  - listed the exact target IDs
+  - fetched the current "before" state
+  - drafted the exact request payload(s)
+
+Workflow:
+- If endpoint is unclear: run freee_api_list_paths and I will filter it locally.
+- Prefer: list GET (tight window) -> save as candidates.json -> narrow locally -> detail GETs (by ID).
+- Default focus: expenses (経費) endpoints first.
+
+Goal:
+<write your concrete goal here>
