@@ -10,6 +10,7 @@
 import { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
+import { verifyAPIKey } from '../utils/api-auth';
 import { detectPHI } from '../services/phi-detector';
 import {
   CreateReflectionRequestSchema,
@@ -33,11 +34,9 @@ export async function handleLimitlessReflectionAPI(
   env: Env,
   path: string
 ): Promise<Response> {
-  // Verify API key (support header OR query parameter for iOS Shortcut)
-  const apiKey = extractAPIKey(request);
-  if (!apiKey || !verifyAPIKey(apiKey, env)) {
+  // Verify API key using shared auth module (constant-time comparison)
+  if (!verifyAPIKey(request, env, 'limitless')) {
     safeLog.warn('[Reflection API] Unauthorized access attempt', {
-      hasApiKey: !!apiKey,
       ip: request.headers.get('CF-Connecting-IP') || 'unknown',
     });
     return new Response(
@@ -49,11 +48,17 @@ export async function handleLimitlessReflectionAPI(
     );
   }
 
-  // Rate limit check
+  // Rate limit check (use partial API key as identifier, supporting all extraction methods)
+  const rateLimitKey = (
+    request.headers.get('X-API-Key') ||
+    request.headers.get('Authorization')?.slice(7) ||
+    new URL(request.url).searchParams.get('apiKey') ||
+    'unknown'
+  ).substring(0, 8);
   const rateLimitResult = await checkRateLimit(
     request,
     env,
-    apiKey.substring(0, 8)
+    rateLimitKey
   );
   if (!rateLimitResult.allowed) {
     return createRateLimitResponse(rateLimitResult);
@@ -211,7 +216,7 @@ async function handleCreateReflection(
       is_public, // Use computed is_public (forced to false if needs_verification)
     };
 
-    const { data: insertedReflection, error: insertError } = await supabaseInsert<UserReflection>(
+    const { data: insertedReflection, error: insertError } = await supabaseInsert<UserReflection[]>(
       config,
       'user_reflections',
       insertData
@@ -543,7 +548,7 @@ async function handleUpdateReflection(
       contains_phi,
     };
 
-    const { data: updatedReflection, error: updateError } = await supabaseUpdate<UserReflection>(
+    const { data: updatedReflection, error: updateError } = await supabaseUpdate<UserReflection[]>(
       config,
       'user_reflections',
       finalUpdateData,
@@ -604,45 +609,3 @@ async function handleUpdateReflection(
   }
 }
 
-/**
- * Extract API key from request headers or query parameters
- */
-function extractAPIKey(request: Request): string | null {
-  // Check Authorization header
-  const authHeader = request.headers.get('Authorization');
-  if (authHeader?.startsWith('Bearer ')) {
-    return authHeader.substring(7);
-  }
-
-  // Check X-API-Key header
-  const apiKeyHeader = request.headers.get('X-API-Key');
-  if (apiKeyHeader) {
-    return apiKeyHeader;
-  }
-
-  // Check query parameter (iOS Shortcut fallback)
-  const url = new URL(request.url);
-  const apiKeyQuery = url.searchParams.get('apiKey');
-  if (apiKeyQuery) {
-    return apiKeyQuery;
-  }
-
-  return null;
-}
-
-/**
- * Verify API key against environment variables
- */
-function verifyAPIKey(apiKey: string, env: Env): boolean {
-  // Check against MONITORING_API_KEY (for reflection operations)
-  if (env.MONITORING_API_KEY && apiKey === env.MONITORING_API_KEY) {
-    return true;
-  }
-
-  // Check against HIGHLIGHT_API_KEY (for compatibility)
-  if (env.HIGHLIGHT_API_KEY && apiKey === env.HIGHLIGHT_API_KEY) {
-    return true;
-  }
-
-  return false;
-}

@@ -11,54 +11,30 @@
 import { Env } from '../types';
 import { metricsCollector, featureFlags, rollbackManager } from '../utils/monitoring';
 import { safeLog } from '../utils/log-sanitizer';
+import { verifyAPIKey } from '../utils/api-auth';
 
 /**
- * Verify API Key for monitoring endpoints with constant-time comparison
- * Falls back to ADMIN_API_KEY if MONITORING_API_KEY is not configured
- * If neither key is configured, allows public access (for initial setup)
+ * Verify API Key for monitoring endpoints
+ * Uses shared api-auth module for constant-time comparison.
+ * If neither MONITORING_API_KEY nor ADMIN_API_KEY is configured, allows public access (for initial setup).
  */
 function verifyMonitoringKey(request: Request, env: Env): boolean {
-  // Get monitoring key or fall back to admin key
-  const expectedKey = env.MONITORING_API_KEY || env.ADMIN_API_KEY;
-
-  // SECURITY: If no key configured, allow public access for initial setup
-  // This provides backward compatibility while encouraging secure configuration
-  if (!expectedKey) {
+  // If no key configured, allow public access for initial setup
+  if (!env.MONITORING_API_KEY && !env.ADMIN_API_KEY) {
     safeLog.warn('[Monitoring] No MONITORING_API_KEY or ADMIN_API_KEY configured - allowing public access');
     return true;
   }
 
-  const apiKey = request.headers.get('X-API-Key');
-  if (!apiKey) {
-    safeLog.warn('[Monitoring] Missing API key');
-    return false;
-  }
-
-  // Constant-time comparison to prevent timing attacks
-  // Always execute full comparison regardless of length to prevent timing leaks
-  let result = apiKey.length === expectedKey.length ? 0 : 1;
-  const maxLen = Math.max(apiKey.length, expectedKey.length);
-  for (let i = 0; i < maxLen; i++) {
-    const a = i < apiKey.length ? apiKey.charCodeAt(i) : 0;
-    const b = i < expectedKey.length ? expectedKey.charCodeAt(i) : 0;
-    result |= a ^ b;
-  }
-
-  if (result !== 0) {
-    safeLog.warn('[Monitoring] Invalid API key');
-    return false;
-  }
-
-  return true;
+  return verifyAPIKey(request, env, 'monitoring');
 }
 
 export async function handleHealthCheck(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const detailed = url.searchParams.get('detailed') === 'true';
 
-  // Basic health check is always public (for load balancers, monitoring)
-  // Detailed metrics require authentication
-  if (detailed && !verifyMonitoringKey(request, env)) {
+  // If a monitoring/admin key is configured, require it for health as well.
+  // Backward compatibility: if no key is configured, allow public access.
+  if (!verifyMonitoringKey(request, env)) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
       status: 401,
       headers: { 'Content-Type': 'application/json' },
@@ -67,25 +43,7 @@ export async function handleHealthCheck(request: Request, env: Env): Promise<Res
 
   const metrics = metricsCollector.getSummary();
 
-  // Basic health check (public)
-  if (!detailed) {
-    return new Response(JSON.stringify({
-      status: metrics.errorRate > 0.1 ? 'degraded' : 'healthy',
-      timestamp: new Date().toISOString(),
-      services: {
-        ai: 'available',
-        db: env.DB ? 'available' : 'not_configured',
-        cache: env.CACHE ? 'available' : 'not_configured',
-      },
-    }), {
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
-  // Detailed health check (requires auth)
-  const flags = featureFlags.getAllFlags();
-
-  return new Response(JSON.stringify({
+  const base = {
     status: metrics.errorRate > 0.1 ? 'degraded' : 'healthy',
     environment: env.ENVIRONMENT,
     timestamp: new Date().toISOString(),
@@ -94,6 +52,18 @@ export async function handleHealthCheck(request: Request, env: Env): Promise<Res
       db: env.DB ? 'available' : 'not_configured',
       cache: env.CACHE ? 'available' : 'not_configured',
     },
+  };
+
+  if (!detailed) {
+    return new Response(JSON.stringify(base), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const flags = featureFlags.getAllFlags();
+
+  return new Response(JSON.stringify({
+    ...base,
     metrics: {
       totalRequests: metrics.totalRequests,
       averageResponseTime: Math.round(metrics.averageResponseTime),

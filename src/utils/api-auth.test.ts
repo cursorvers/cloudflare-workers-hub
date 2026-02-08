@@ -166,6 +166,147 @@ describe('API Authentication', () => {
 
       expect(verifyAPIKey(request, env, 'queue')).toBe(false);
     });
+
+    // ========================================================================
+    // New scopes: highlight, limitless, monitoring
+    // ========================================================================
+
+    describe('highlight scope', () => {
+      it('should accept HIGHLIGHT_API_KEY via X-API-Key header', () => {
+        const key = 'highlight-key-abc';
+        const env = createEnv({ HIGHLIGHT_API_KEY: key });
+        const request = createRequest({ 'X-API-Key': key });
+
+        expect(verifyAPIKey(request, env, 'highlight')).toBe(true);
+      });
+
+      it('should accept HIGHLIGHT_API_KEY via query param (iOS Shortcut)', () => {
+        const key = 'highlight-key-abc';
+        const env = createEnv({ HIGHLIGHT_API_KEY: key });
+        const request = new Request(`http://localhost/api/highlight?apiKey=${key}`);
+
+        expect(verifyAPIKey(request, env, 'highlight')).toBe(true);
+      });
+
+      it('should reject wrong key via query param', () => {
+        const env = createEnv({ HIGHLIGHT_API_KEY: 'correct-key' });
+        const request = new Request('http://localhost/api/highlight?apiKey=wrong-key');
+
+        expect(verifyAPIKey(request, env, 'highlight')).toBe(false);
+      });
+
+      it('should accept WORKERS_API_KEY as super key', () => {
+        const superKey = 'workers-super-key';
+        const env = createEnv({ WORKERS_API_KEY: superKey, HIGHLIGHT_API_KEY: 'other' });
+        const request = createRequest({ 'X-API-Key': superKey });
+
+        expect(verifyAPIKey(request, env, 'highlight')).toBe(true);
+      });
+    });
+
+    describe('limitless scope', () => {
+      it('should accept MONITORING_API_KEY', () => {
+        const key = 'monitoring-key-123';
+        const env = createEnv({ MONITORING_API_KEY: key });
+        const request = createRequest({ 'X-API-Key': key });
+
+        expect(verifyAPIKey(request, env, 'limitless')).toBe(true);
+      });
+
+      it('should accept HIGHLIGHT_API_KEY as cross-scope fallback', () => {
+        const highlightKey = 'highlight-key-for-limitless';
+        const env = createEnv({
+          MONITORING_API_KEY: 'monitoring-key',
+          HIGHLIGHT_API_KEY: highlightKey,
+        });
+        const request = createRequest({ 'X-API-Key': highlightKey });
+
+        expect(verifyAPIKey(request, env, 'limitless')).toBe(true);
+      });
+
+      it('should accept via query param (iOS Shortcut)', () => {
+        const key = 'monitoring-key-456';
+        const env = createEnv({ MONITORING_API_KEY: key });
+        const request = new Request(`http://localhost/api/limitless?apiKey=${key}`);
+
+        expect(verifyAPIKey(request, env, 'limitless')).toBe(true);
+      });
+
+      it('should reject when no keys configured (fail-closed)', () => {
+        const env = createEnv({});
+        const request = createRequest({ 'X-API-Key': 'any-key' });
+
+        expect(verifyAPIKey(request, env, 'limitless')).toBe(false);
+      });
+    });
+
+    describe('monitoring scope', () => {
+      it('should accept MONITORING_API_KEY', () => {
+        const key = 'monitoring-key-789';
+        const env = createEnv({ MONITORING_API_KEY: key });
+        const request = createRequest({ 'X-API-Key': key });
+
+        expect(verifyAPIKey(request, env, 'monitoring')).toBe(true);
+      });
+
+      it('should fall back to ADMIN_API_KEY when MONITORING_API_KEY not set', () => {
+        const adminKey = 'admin-key-for-monitoring';
+        const env = createEnv({ ADMIN_API_KEY: adminKey });
+        const request = createRequest({ 'X-API-Key': adminKey });
+
+        expect(verifyAPIKey(request, env, 'monitoring')).toBe(true);
+      });
+
+      it('should NOT accept query param (security: URL logging)', () => {
+        const key = 'monitoring-key-789';
+        const env = createEnv({ MONITORING_API_KEY: key });
+        const request = new Request(`http://localhost/health?apiKey=${key}`);
+
+        expect(verifyAPIKey(request, env, 'monitoring')).toBe(false);
+      });
+
+      it('should prefer MONITORING_API_KEY over ADMIN_API_KEY', () => {
+        const monKey = 'monitoring-key';
+        const adminKey = 'admin-key';
+        const env = createEnv({ MONITORING_API_KEY: monKey, ADMIN_API_KEY: adminKey });
+
+        // monitoring key works
+        expect(verifyAPIKey(
+          createRequest({ 'X-API-Key': monKey }), env, 'monitoring'
+        )).toBe(true);
+
+        // admin key does NOT work (MONITORING_API_KEY takes precedence)
+        expect(verifyAPIKey(
+          createRequest({ 'X-API-Key': adminKey }), env, 'monitoring'
+        )).toBe(false);
+      });
+    });
+
+    describe('query param scope restriction', () => {
+      it('should NOT accept query param for admin scope', () => {
+        const key = 'admin-key-secret';
+        const env = createEnv({ ADMIN_API_KEY: key });
+        const request = new Request(`http://localhost/api/admin?apiKey=${key}`);
+
+        expect(verifyAPIKey(request, env, 'admin')).toBe(false);
+      });
+
+      it('should NOT accept query param for queue scope', () => {
+        const key = 'queue-key-secret';
+        const env = createEnv({ QUEUE_API_KEY: key });
+        const request = new Request(`http://localhost/api/queue?apiKey=${key}`);
+
+        expect(verifyAPIKey(request, env, 'queue')).toBe(false);
+      });
+
+      it('should NOT accept query param for memory scope', () => {
+        const key = 'memory-key-secret';
+        const env = createEnv({ MEMORY_API_KEY: key });
+        const request = new Request(`http://localhost/api/memory?apiKey=${key}`);
+
+        expect(verifyAPIKey(request, env, 'memory')).toBe(false);
+      });
+    });
   });
 
   // ==========================================================================

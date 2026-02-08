@@ -24,6 +24,7 @@ import {
 } from '../services/strategic-context';
 import { safeLog } from '../utils/log-sanitizer';
 import { authenticateWithAccess, mapAccessUserToInternal } from '../utils/cloudflare-access';
+import { verifyAPIKey } from '../utils/api-auth';
 import { recordFeedback, getFeedbackAnalytics } from '../services/feedback-learning';
 import type { InsightType } from '../schemas/strategic-advisor';
 
@@ -70,9 +71,8 @@ async function authenticateRequest(request: Request, env: Env): Promise<AuthResu
     }
   }
 
-  // 2. Try API Key authentication (for internal services)
-  const apiKey = request.headers.get('X-API-Key');
-  if (apiKey && env.QUEUE_API_KEY && apiKey === env.QUEUE_API_KEY) {
+  // 2. Try API Key authentication (for internal services) — constant-time comparison
+  if (verifyAPIKey(request, env, 'queue')) {
     return {
       authenticated: true,
       userId: 'system',

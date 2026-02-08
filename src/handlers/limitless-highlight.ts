@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import type { Env } from '../types';
 import { logWithTimestamp } from '../utils/logger';
+import { verifyAPIKey } from '../utils/api-auth';
 
 // Request validation schema
 const HighlightTriggerSchema = z.object({
@@ -38,14 +39,10 @@ export async function handleHighlightTrigger(
   env: Env
 ): Promise<Response> {
   try {
-    // 0. API Key authentication (Codex HIGH severity fix)
-    // Accept API Key from header OR query parameter (iOS Shortcut fallback)
+    // 0. API Key authentication using shared auth module (constant-time comparison)
     const url = new URL(request.url);
-    const apiKey = request.headers.get('X-API-Key') || url.searchParams.get('apiKey');
-
-    if (!apiKey || apiKey !== env.HIGHLIGHT_API_KEY) {
+    if (!verifyAPIKey(request, env, 'highlight')) {
       logWithTimestamp('warn', '[Highlight] Unauthorized access attempt', {
-        hasApiKey: !!apiKey,
         hasHeader: !!request.headers.get('X-API-Key'),
         hasQuery: !!url.searchParams.get('apiKey'),
         ip: request.headers.get('CF-Connecting-IP') || 'unknown',
@@ -115,26 +112,34 @@ export async function handleHighlightTrigger(
     const oneHourAgo = new Date(highlightTime.getTime() - 60 * 60 * 1000);
     const supabaseUrl = env.SUPABASE_URL;
     const supabaseKey = env.SUPABASE_SERVICE_ROLE_KEY; // GLM condition: env var usage
+    if (!supabaseUrl || !supabaseKey) {
+      logWithTimestamp('error', '[Highlight] Supabase is not configured');
+      throw new Error('Supabase is not configured');
+    }
 
     const lifelogsResponse = await fetch(
       `${supabaseUrl}/rest/v1/processed_lifelogs?start_time=gte.${oneHourAgo.toISOString()}&start_time=lte.${endTime.toISOString()}&order=start_time.desc&limit=10`,
       {
-        headers: {
+        headers: new Headers({
           apikey: supabaseKey,
           Authorization: `Bearer ${supabaseKey}`,
           'Content-Type': 'application/json',
-        },
+        }),
       }
     );
 
     // GLM condition: network error handling
     if (!lifelogsResponse.ok) {
+      logWithTimestamp('error', '[Highlight] Supabase query failed', {
+        status: lifelogsResponse.status,
+        statusText: lifelogsResponse.statusText,
+      });
       throw new Error(
         `Supabase query failed: ${lifelogsResponse.status} ${lifelogsResponse.statusText}`
       );
     }
 
-    const lifelogsRaw = await lifelogsResponse.json();
+    const lifelogsRaw = z.array(ProcessedLifelogSchema).parse(await lifelogsResponse.json());
     logWithTimestamp('info', '[Highlight] Lifelogs retrieved', {
       count: lifelogsRaw.length,
     });
@@ -244,12 +249,12 @@ export async function handleHighlightTrigger(
       `${supabaseUrl}/rest/v1/lifelog_highlights`,
       {
         method: 'POST',
-        headers: {
+        headers: new Headers({
           apikey: supabaseKey,
           Authorization: `Bearer ${supabaseKey}`,
           'Content-Type': 'application/json',
           Prefer: 'return=representation',
-        },
+        }),
         body: JSON.stringify(highlightData),
       }
     );
@@ -257,12 +262,16 @@ export async function handleHighlightTrigger(
     // GLM condition: error handling for insert
     if (!insertResponse.ok) {
       const errorText = await insertResponse.text();
+      logWithTimestamp('error', '[Highlight] Failed to insert highlight', {
+        status: insertResponse.status,
+        errorText: errorText.substring(0, 200),
+      });
       throw new Error(
         `Failed to insert highlight: ${insertResponse.status} ${errorText}`
       );
     }
 
-    const insertedHighlight = await insertResponse.json();
+    const insertedHighlight = (await insertResponse.json()) as Array<{ id?: string }>;
 
     logWithTimestamp('info', '[Highlight] Successfully inserted', {
       highlightId: insertedHighlight[0]?.id,
@@ -316,14 +325,18 @@ async function insertPendingHighlight(
 ): Promise<void> {
   const supabaseUrl = env.SUPABASE_URL;
   const supabaseKey = env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) {
+    logWithTimestamp('error', '[Highlight] Supabase is not configured (saveHighlightEvent)');
+    throw new Error('Supabase is not configured');
+  }
 
   await fetch(`${supabaseUrl}/rest/v1/lifelog_highlights`, {
     method: 'POST',
-    headers: {
+    headers: new Headers({
       apikey: supabaseKey,
       Authorization: `Bearer ${supabaseKey}`,
       'Content-Type': 'application/json',
-    },
+    }),
     body: JSON.stringify({
       ...data,
       retry_count: 0,

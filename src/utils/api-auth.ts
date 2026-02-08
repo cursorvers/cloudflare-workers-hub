@@ -14,7 +14,7 @@
 import { Env } from '../types';
 import { safeLog, maskUserId } from './log-sanitizer';
 
-export type APIScope = 'queue' | 'memory' | 'admin';
+export type APIScope = 'queue' | 'memory' | 'receipts' | 'admin' | 'limitless' | 'highlight' | 'monitoring';
 
 export interface APIKeyMapping {
   userId: string;
@@ -40,7 +40,20 @@ function constantTimeCompare(a: string, b: string): boolean {
  * Accepts BOTH scoped key AND ASSISTANT_API_KEY for backward compatibility
  */
 export function verifyAPIKey(request: Request, env: Env, scope: APIScope = 'queue'): boolean {
-  const apiKey = request.headers.get('X-API-Key');
+  // Support legacy `X-API-Key` and `Authorization: Bearer <key>` for all scopes.
+  // Query param `apiKey` is ONLY allowed for limitless/highlight (iOS Shortcut compatibility).
+  // SECURITY: query params leak into access logs, referer headers, and browser history,
+  // so they must NOT be accepted for admin/queue/memory/receipts/monitoring scopes.
+  const QUERY_PARAM_SCOPES: ReadonlySet<APIScope> = new Set(['limitless', 'highlight']);
+
+  const apiKey =
+    request.headers.get('X-API-Key') ||
+    (request.headers.get('Authorization')?.startsWith('Bearer ')
+      ? request.headers.get('Authorization')?.slice('Bearer '.length)
+      : null) ||
+    (QUERY_PARAM_SCOPES.has(scope)
+      ? new URL(request.url).searchParams.get('apiKey')
+      : null);
   if (!apiKey) {
     safeLog.warn(`[API] Missing API key for scope: ${scope}`);
     return false;
@@ -50,19 +63,36 @@ export function verifyAPIKey(request: Request, env: Env, scope: APIScope = 'queu
   // SECURITY FIX: Accept BOTH scoped key AND ASSISTANT_API_KEY (not just first defined)
   const validKeys: string[] = [];
 
+  // Legacy "super key" for backward compatibility (accepts all endpoints/scopes).
+  // Prefer scoped keys where possible, but allow WORKERS_API_KEY so existing deployments
+  // can securely authenticate without reconfiguring every scope.
+  if (env.WORKERS_API_KEY) {
+    validKeys.push(env.WORKERS_API_KEY);
+  }
+
   // Add scoped key if defined
   const scopedKeys: Record<APIScope, string | undefined> = {
     queue: env.QUEUE_API_KEY,
     memory: env.MEMORY_API_KEY,
+    receipts: env.RECEIPTS_API_KEY,
     admin: env.ADMIN_API_KEY,
+    limitless: env.MONITORING_API_KEY,
+    highlight: env.HIGHLIGHT_API_KEY,
+    monitoring: env.MONITORING_API_KEY || env.ADMIN_API_KEY,
   };
   const scopedKey = scopedKeys[scope];
   if (scopedKey) {
     validKeys.push(scopedKey);
   }
 
-  // Add ASSISTANT_API_KEY as fallback (except for admin scope)
-  if (scope !== 'admin' && env.ASSISTANT_API_KEY) {
+  // Cross-scope fallback: limitless scope also accepts HIGHLIGHT_API_KEY
+  if (scope === 'limitless' && env.HIGHLIGHT_API_KEY && env.HIGHLIGHT_API_KEY !== scopedKey) {
+    validKeys.push(env.HIGHLIGHT_API_KEY);
+  }
+
+  // Add ASSISTANT_API_KEY as fallback only when no scoped key is configured
+  // (except for admin scope which never allows the legacy fallback).
+  if (!scopedKey && scope !== 'admin' && env.ASSISTANT_API_KEY) {
     validKeys.push(env.ASSISTANT_API_KEY);
   }
 
@@ -113,19 +143,53 @@ export async function hashAPIKey(apiKey: string): Promise<string> {
  * Service role keys (role: 'service') bypass per-user checks for system daemons.
  */
 export async function extractUserIdFromKey(apiKey: string, env: Env): Promise<APIKeyMapping | null> {
-  if (!env.CACHE) {
-    safeLog.error('[API] CACHE KV namespace not available');
-    return null;
-  }
-
   const keyHash = await hashAPIKey(apiKey);
   const mappingKey = `apikey:mapping:${keyHash}`;
 
+  // Prefer D1 (control-plane state must not depend on KV).
+  if (env.DB) {
+    try {
+      const row = await env.DB.prepare(
+        `SELECT user_id as userId, role
+         FROM api_key_mappings
+         WHERE key_hash = ?
+         LIMIT 1`
+      ).bind(keyHash).first() as APIKeyMapping | null;
+
+      if (row?.userId) return row;
+    } catch (error) {
+      safeLog.warn('[API] D1 lookup failed for API key mapping (falling back)', { error: String(error) });
+    }
+  }
+
+  // Backward compatibility: KV fallback (older deployments).
+  if (!env.CACHE) {
+    safeLog.error('[API] Neither DB nor CACHE available for API key mapping lookup');
+    return null;
+  }
+
+  // kv-optimizer:ignore-next
   const mapping = await env.CACHE.get(mappingKey, 'json') as APIKeyMapping | null;
 
   if (!mapping || !mapping.userId) {
     safeLog.warn('[API] No userId mapping found for API key', { keyHash: keyHash.substring(0, 8) });
     return null;
+  }
+
+  // Opportunistic migration KV -> D1 (one-time).
+  if (env.DB) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO api_key_mappings (key_hash, user_id, role, updated_at)
+         VALUES (?, ?, ?, strftime('%s','now'))
+         ON CONFLICT(key_hash) DO UPDATE SET
+           user_id=excluded.user_id,
+           role=excluded.role,
+           updated_at=strftime('%s','now')`
+      ).bind(keyHash, mapping.userId, mapping.role ?? 'user').run();
+    } catch (error) {
+      safeLog.warn('[API] KV->D1 API key mapping migration failed (continuing)', { error: String(error) });
+    }
   }
 
   return mapping;

@@ -8,6 +8,7 @@
 import { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
+import { verifyAPIKey as verifyAPIKeyShared } from '../utils/api-auth';
 import { supabaseSelect, supabaseUpdate, SupabaseConfig } from '../services/supabase-client';
 import { z } from 'zod';
 
@@ -38,9 +39,8 @@ export async function handlePhiVerificationAPI(
   env: Env,
   path: string
 ): Promise<Response> {
-  // Verify API key
-  const apiKey = extractAPIKey(request);
-  if (!apiKey || !verifyAPIKey(apiKey, env)) {
+  // Verify API key using shared auth utility (constant-time comparison)
+  if (!verifyAPIKeyShared(request, env, 'limitless')) {
     return new Response(
       JSON.stringify({ success: false, error: 'Unauthorized' }),
       {
@@ -50,11 +50,12 @@ export async function handlePhiVerificationAPI(
     );
   }
 
-  // Rate limit check
+  // Rate limit check (support all API key extraction methods for identifier)
+  const apiKeyHeader = request.headers.get('X-API-Key') || request.headers.get('Authorization')?.slice(7) || new URL(request.url).searchParams.get('apiKey') || 'unknown';
   const rateLimitResult = await checkRateLimit(
     request,
     env,
-    apiKey.substring(0, 8)
+    apiKeyHeader.substring(0, 8)
   );
   if (!rateLimitResult.allowed) {
     return createRateLimitResponse(rateLimitResult);
@@ -76,18 +77,135 @@ export async function handlePhiVerificationAPI(
 }
 
 /**
- * Handle batch PHI verification
+ * Batch verification result (shared between API and Cron)
+ */
+export interface PhiVerificationBatchResult {
+  processed: number;
+  verified: number;
+  failed: number;
+  next_batch_available: boolean;
+}
+
+/**
+ * Core batch PHI verification logic (callable from both API and Cron)
+ */
+export async function processPhiVerificationBatch(
+  env: Env,
+  maxItems: number = 10
+): Promise<PhiVerificationBatchResult> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    safeLog.error('[PHI Verification] Supabase not configured');
+    throw new Error('Supabase not configured');
+  }
+
+  const supabaseConfig: SupabaseConfig = {
+    url: env.SUPABASE_URL,
+    serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+  };
+
+  const { data: highlights, error: fetchError } = await supabaseSelect<{
+    id: string;
+    extracted_text: string;
+    phi_confidence_score: number;
+  }>(
+    supabaseConfig,
+    'lifelog_highlights',
+    `select=id,extracted_text,phi_confidence_score&needs_ai_verification=eq.true&order=highlight_time.desc&limit=${maxItems}`
+  );
+
+  if (fetchError) {
+    safeLog.error('[PHI Verification] Failed to fetch highlights', { error: fetchError.message });
+    throw new Error(`Failed to fetch highlights: ${fetchError.message}`);
+  }
+
+  if (!highlights || highlights.length === 0) {
+    safeLog.info('[PHI Verification] No highlights pending verification');
+    return { processed: 0, verified: 0, failed: 0, next_batch_available: false };
+  }
+
+  let verified = 0;
+  let failed = 0;
+
+  for (const highlight of highlights) {
+    try {
+      const aiResult = await verifyWithAi(
+        env,
+        highlight.extracted_text || '',
+        highlight.phi_confidence_score || 0
+      );
+
+      const newConfidence = Math.round(
+        (highlight.phi_confidence_score || 0) * 0.3 + aiResult.confidence * 0.7
+      );
+
+      await supabaseUpdate(
+        supabaseConfig,
+        'lifelog_highlights',
+        {
+          phi_confidence_score: newConfidence,
+          needs_ai_verification: false,
+        },
+        `id=eq.${highlight.id}`
+      );
+
+      verified++;
+
+      safeLog.info('[PHI Verification] Verified highlight', {
+        id: highlight.id,
+        original_confidence: highlight.phi_confidence_score,
+        ai_confidence: aiResult.confidence,
+        final_confidence: newConfidence,
+        contains_phi: aiResult.contains_phi,
+      });
+    } catch (error) {
+      failed++;
+      safeLog.error('[PHI Verification] Failed to verify highlight', {
+        id: highlight.id,
+        error: String(error),
+      });
+    }
+
+    // Rate limiting: 1 request per second
+    if (env.ENVIRONMENT !== 'test' && highlights.indexOf(highlight) < highlights.length - 1) {
+      await sleep(1000);
+    }
+  }
+
+  const { data: remainingHighlights } = await supabaseSelect(
+    supabaseConfig,
+    'lifelog_highlights',
+    `select=id&needs_ai_verification=eq.true&limit=1`
+  );
+
+  const nextBatchAvailable = (remainingHighlights?.length || 0) > 0;
+
+  safeLog.info('[PHI Verification] Batch processing completed', {
+    processed: highlights.length,
+    verified,
+    failed,
+    next_batch_available: nextBatchAvailable,
+  });
+
+  return {
+    processed: highlights.length,
+    verified,
+    failed,
+    next_batch_available: nextBatchAvailable,
+  };
+}
+
+/**
+ * Handle batch PHI verification (HTTP API wrapper)
  */
 async function handleVerifyPhiBatch(
   request: Request,
   env: Env
 ): Promise<Response> {
-  // Parse and validate request body
   let body: unknown;
   try {
     body = await request.json();
   } catch (error) {
-    body = {}; // Use defaults
+    body = {};
   }
 
   const validation = VerifyPhiBatchRequestSchema.safeParse(body);
@@ -98,168 +216,21 @@ async function handleVerifyPhiBatch(
         error: 'Validation failed',
         details: validation.error.errors,
       }),
-      {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
-  const params = validation.data;
-
-  // Create Supabase config
-  const supabaseConfig: SupabaseConfig = {
-    url: env.SUPABASE_URL,
-    serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
-  };
-
   try {
-    // Fetch highlights that need AI verification
-    const { data: highlights, error: fetchError } = await supabaseSelect<{
-      id: string;
-      extracted_text: string;
-      phi_confidence_score: number;
-    }>(
-      supabaseConfig,
-      'lifelog_highlights',
-      `select=id,extracted_text,phi_confidence_score&needs_ai_verification=eq.true&order=highlight_time.desc&limit=${params.max_items}`
-    );
-
-    if (fetchError) {
-      safeLog.error('[PHI Verification] Failed to fetch highlights', {
-        error: fetchError.message,
-      });
-
-      return new Response(
-        JSON.stringify({
-          success: false,
-          error: 'Failed to fetch highlights',
-          details: fetchError.message,
-        }),
-        {
-          status: 500,
-          headers: { 'Content-Type': 'application/json' },
-        }
-      );
-    }
-
-    if (!highlights || highlights.length === 0) {
-      safeLog.info('[PHI Verification] No highlights pending verification');
-
-      return new Response(
-        JSON.stringify({
-          success: true,
-          data: {
-            processed: 0,
-            verified: 0,
-            failed: 0,
-            next_batch_available: false,
-          },
-        }),
-        {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        }
-      );
-    }
-
-    // Process each highlight with AI verification
-    let verified = 0;
-    let failed = 0;
-
-    for (const highlight of highlights) {
-      try {
-        // Call AI Gateway for verification
-        const aiResult = await verifyWithAi(
-          env,
-          highlight.extracted_text || '',
-          highlight.phi_confidence_score || 0
-        );
-
-        // Update highlight with AI verification result
-        const newConfidence = Math.round(
-          (highlight.phi_confidence_score || 0) * 0.3 + aiResult.confidence * 0.7
-        );
-
-        await supabaseUpdate(
-          supabaseConfig,
-          'lifelog_highlights',
-          {
-            phi_confidence_score: newConfidence,
-            needs_ai_verification: false,
-          },
-          `id=eq.${highlight.id}`
-        );
-
-        verified++;
-
-        safeLog.info('[PHI Verification] Verified highlight', {
-          id: highlight.id,
-          original_confidence: highlight.phi_confidence_score,
-          ai_confidence: aiResult.confidence,
-          final_confidence: newConfidence,
-          contains_phi: aiResult.contains_phi,
-        });
-      } catch (error) {
-        failed++;
-        safeLog.error('[PHI Verification] Failed to verify highlight', {
-          id: highlight.id,
-          error: String(error),
-        });
-      }
-
-      // Rate limiting: 1 request per second
-      if (highlights.indexOf(highlight) < highlights.length - 1) {
-        await sleep(1000);
-      }
-    }
-
-    // Check if more batches are available
-    const { data: remainingHighlights } = await supabaseSelect(
-      supabaseConfig,
-      'lifelog_highlights',
-      `select=id&needs_ai_verification=eq.true&limit=1`
-    );
-
-    const nextBatchAvailable = (remainingHighlights?.length || 0) > 0;
-
-    safeLog.info('[PHI Verification] Batch processing completed', {
-      processed: highlights.length,
-      verified,
-      failed,
-      next_batch_available: nextBatchAvailable,
-    });
-
+    const result = await processPhiVerificationBatch(env, validation.data.max_items);
     return new Response(
-      JSON.stringify({
-        success: true,
-        data: {
-          processed: highlights.length,
-          verified,
-          failed,
-          next_batch_available: nextBatchAvailable,
-        },
-      }),
-      {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      JSON.stringify({ success: true, data: result }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
     );
   } catch (error) {
-    safeLog.error('[PHI Verification] Unexpected error', {
-      error: String(error),
-    });
-
+    safeLog.error('[PHI Verification] Unexpected error', { error: String(error) });
     return new Response(
-      JSON.stringify({
-        success: false,
-        error: 'Internal server error',
-        details: String(error),
-      }),
-      {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      JSON.stringify({ success: false, error: 'Internal server error', details: String(error) }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
   }
 }
@@ -276,14 +247,18 @@ async function verifyWithAi(
   const prompt = buildVerificationPrompt(text, regexConfidence);
 
   // Call Workers AI via AI Gateway
-  const response = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+  const response = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
     prompt,
     max_tokens: 200,
   });
 
+  const responseText = typeof response === 'string'
+    ? response
+    : (response as { response?: string }).response ?? JSON.stringify(response);
+
   // Parse AI response
   try {
-    const result = JSON.parse(response.response || '{}');
+    const result = JSON.parse(responseText || '{}');
     return {
       contains_phi: result.contains_phi || false,
       confidence: result.confidence || 0,
@@ -291,8 +266,8 @@ async function verifyWithAi(
     };
   } catch (error) {
     // Fallback: parse text response
-    const containsPhi = /contains_phi.*true/i.test(response.response || '');
-    const confidenceMatch = /confidence.*?(\d+)/i.exec(response.response || '');
+    const containsPhi = /contains_phi.*true/i.test(responseText || '');
+    const confidenceMatch = /confidence.*?(\d+)/i.exec(responseText || '');
     const confidence = confidenceMatch ? parseInt(confidenceMatch[1]) : 50;
 
     return {
@@ -339,41 +314,3 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Extract API key from request headers
- */
-function extractAPIKey(request: Request): string | null {
-  const authHeader = request.headers.get('Authorization');
-  if (authHeader?.startsWith('Bearer ')) {
-    return authHeader.substring(7);
-  }
-
-  const apiKeyHeader = request.headers.get('X-API-Key');
-  if (apiKeyHeader) {
-    return apiKeyHeader;
-  }
-
-  return null;
-}
-
-/**
- * Verify API key
- */
-function verifyAPIKey(apiKey: string, env: Env): boolean {
-  // Check against MONITORING_API_KEY
-  if (env.MONITORING_API_KEY && apiKey === env.MONITORING_API_KEY) {
-    return true;
-  }
-
-  // Check against ADMIN_API_KEY
-  if (env.ADMIN_API_KEY && apiKey === env.ADMIN_API_KEY) {
-    return true;
-  }
-
-  // Check against legacy ASSISTANT_API_KEY
-  if (env.ASSISTANT_API_KEY && apiKey === env.ASSISTANT_API_KEY) {
-    return true;
-  }
-
-  return false;
-}

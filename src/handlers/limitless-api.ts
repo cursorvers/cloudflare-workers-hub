@@ -11,7 +11,8 @@
 import { Env } from '../types';
 import { safeLog, maskUserId } from '../utils/log-sanitizer';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
-import { syncToSupabase, LimitlessConfig } from '../services/limitless';
+import { verifyAPIKey as verifyAPIKeyShared } from '../utils/api-auth';
+import { syncToSupabase, syncRangeToSupabase, LimitlessConfig } from '../services/limitless';
 import { z } from 'zod';
 
 // Validation schemas
@@ -19,6 +20,16 @@ const SyncRequestSchema = z.object({
   userId: z.string().min(1, 'User ID is required'),
   maxAgeHours: z.number().min(1).max(168).optional().default(24),
   includeAudio: z.boolean().optional().default(false),
+  syncSource: z.enum(['webhook', 'backup', 'manual']).optional(),
+});
+
+const BackfillRangeSchema = z.object({
+  userId: z.string().min(1, 'User ID is required'),
+  startTime: z.string().datetime(),
+  endTime: z.string().datetime(),
+  cursor: z.string().optional(),
+  pageSize: z.number().min(1).max(10).optional(),
+  maxPages: z.number().min(1).max(20).optional(),
   syncSource: z.enum(['webhook', 'backup', 'manual']).optional(),
 });
 
@@ -30,17 +41,17 @@ export async function handleLimitlessAPI(
   env: Env,
   path: string
 ): Promise<Response> {
-  // Verify API key (require MONITORING_API_KEY for sync operations)
-  const apiKey = extractAPIKey(request);
-  if (!apiKey || !verifyAPIKey(apiKey, env)) {
+  // Verify API key using shared auth utility (constant-time comparison)
+  if (!verifyAPIKeyShared(request, env, 'limitless')) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
       status: 401,
       headers: { 'Content-Type': 'application/json' },
     });
   }
 
-  // Rate limit check
-  const rateLimitResult = await checkRateLimit(request, env, apiKey.substring(0, 8));
+  // Rate limit check (use first 8 chars of API key for bucket, supporting all extraction methods)
+  const apiKeyHeader = request.headers.get('X-API-Key') || request.headers.get('Authorization')?.slice(7) || new URL(request.url).searchParams.get('apiKey') || 'unknown';
+  const rateLimitResult = await checkRateLimit(request, env, apiKeyHeader.substring(0, 8));
   if (!rateLimitResult.allowed) {
     return createRateLimitResponse(rateLimitResult);
   }
@@ -53,6 +64,11 @@ export async function handleLimitlessAPI(
   // POST /api/limitless/sync - Sync with custom options
   if (path === '/api/limitless/sync' && request.method === 'POST') {
     return handleCustomSync(request, env);
+  }
+
+  // POST /api/limitless/backfill - Range-based backfill (resumable via cursor)
+  if (path === '/api/limitless/backfill' && request.method === 'POST') {
+    return handleBackfillRange(request, env);
   }
 
   // GET /api/limitless/config - Get configuration
@@ -270,6 +286,100 @@ async function handleCustomSync(request: Request, env: Env): Promise<Response> {
 }
 
 /**
+ * Backfill a specific time range (POST /api/limitless/backfill)
+ *
+ * Body:
+ * {
+ *   "userId": "masayuki",
+ *   "startTime": "2026-01-29T00:00:00+09:00",
+ *   "endTime": "2026-02-07T00:00:00+09:00",
+ *   "cursor": "...",      // optional, for pagination
+ *   "pageSize": 3,        // optional, default is conservative
+ *   "maxPages": 1         // optional
+ * }
+ */
+async function handleBackfillRange(request: Request, env: Env): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return new Response(JSON.stringify({ error: 'Invalid JSON in request body' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const validation = BackfillRangeSchema.safeParse(body);
+  if (!validation.success) {
+    return new Response(
+      JSON.stringify({
+        error: 'Validation failed',
+        details: validation.error.errors,
+      }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  const input = validation.data;
+
+  const apiKey = env.LIMITLESS_API_KEY;
+  if (!apiKey) {
+    safeLog.error('[Limitless API] LIMITLESS_API_KEY not configured');
+    return new Response(JSON.stringify({ error: 'Limitless API not configured' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  safeLog.info('[Limitless API] Range backfill triggered', {
+    userId: maskUserId(input.userId),
+    startTime: input.startTime,
+    endTime: input.endTime,
+    hasCursor: !!input.cursor,
+    pageSize: input.pageSize,
+    maxPages: input.maxPages,
+  });
+
+  try {
+    const result = await syncRangeToSupabase(env, apiKey, {
+      userId: input.userId,
+      startTime: input.startTime,
+      endTime: input.endTime,
+      cursor: input.cursor,
+      pageSize: input.pageSize ?? 3,
+      maxPages: input.maxPages ?? 1,
+      includeAudio: false,
+      syncSource: input.syncSource ?? 'manual',
+    });
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        result: {
+          synced: result.synced,
+          skipped: result.skipped,
+          errors: result.errors.length,
+          errorSample: result.errors.slice(0, 3),
+          nextCursor: result.nextCursor || null,
+          pagesProcessed: result.pagesProcessed,
+          done: result.done,
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  } catch (error) {
+    safeLog.error('[Limitless API] Range backfill failed', {
+      userId: maskUserId(input.userId),
+      error: String(error),
+    });
+    return new Response(JSON.stringify({ error: 'Backfill failed', details: String(error) }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+}
+
+/**
  * Handle get configuration (GET /api/limitless/config)
  */
 async function handleGetConfig(env: Env): Promise<Response> {
@@ -283,45 +393,6 @@ async function handleGetConfig(env: Env): Promise<Response> {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
   });
-}
-
-/**
- * Extract API key from request headers
- */
-function extractAPIKey(request: Request): string | null {
-  const authHeader = request.headers.get('Authorization');
-  if (authHeader?.startsWith('Bearer ')) {
-    return authHeader.substring(7);
-  }
-
-  const apiKeyHeader = request.headers.get('X-API-Key');
-  if (apiKeyHeader) {
-    return apiKeyHeader;
-  }
-
-  return null;
-}
-
-/**
- * Verify API key
- */
-function verifyAPIKey(apiKey: string, env: Env): boolean {
-  // Check against MONITORING_API_KEY (for sync operations)
-  if (env.MONITORING_API_KEY && apiKey === env.MONITORING_API_KEY) {
-    return true;
-  }
-
-  // Check against ADMIN_API_KEY (for config operations)
-  if (env.ADMIN_API_KEY && apiKey === env.ADMIN_API_KEY) {
-    return true;
-  }
-
-  // Check against legacy ASSISTANT_API_KEY
-  if (env.ASSISTANT_API_KEY && apiKey === env.ASSISTANT_API_KEY) {
-    return true;
-  }
-
-  return false;
 }
 
 /**
