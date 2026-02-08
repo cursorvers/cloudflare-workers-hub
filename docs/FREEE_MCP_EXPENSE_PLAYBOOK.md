@@ -11,17 +11,26 @@ bash scripts/freee-mcp/start-session.sh "expense-incident"
 
 In Claude (freee-mcp session), follow the prompt in `00_prompt_readonly.txt`.
 
+Tip: to refer to the latest session without copy-pasting paths:
+
+```bash
+SESSION="$(bash scripts/freee-mcp/latest-session.sh)"
+echo "$SESSION"
+```
+
 ## Step 1: Endpoint Selection (Read-Only)
 
 1. Run `freee_api_list_paths`.
 2. Save output:
-   - JSON: `30_results/paths.json` via `save-json`
-   - or text: `30_results/paths.txt` via `save-text`
+   - If you copied JSON: save as `30_results/paths.json`
+     - `bash scripts/freee-mcp/save-json-from-clipboard.sh <sessionDir>/30_results/paths.json`
+   - If you copied plain text: save as `30_results/paths.txt`
+     - `bash scripts/freee-mcp/save-text-from-clipboard.sh <sessionDir>/30_results/paths.txt`
 3. Filter locally (start with expense keywords):
 
 ```bash
-node scripts/freee-mcp/filter-paths.mjs <sessionDir>/30_results/paths.json --query expense
-node scripts/freee-mcp/filter-paths.mjs <sessionDir>/30_results/paths.json --query expense_application
+node scripts/freee-mcp/filter-paths.mjs <sessionDir>/30_results/paths.txt --query expense
+node scripts/freee-mcp/filter-paths.mjs <sessionDir>/30_results/paths.txt --query expense_application
 ```
 
 Pick the best **GET list** endpoint.
@@ -33,6 +42,7 @@ In freee-mcp, run a list `freee_api_get` for the smallest possible time window (
 Save raw response as:
 
 - `<sessionDir>/30_results/candidates.json`
+  - `bash scripts/freee-mcp/save-json-from-clipboard.sh <sessionDir>/30_results/candidates.json`
 
 ## Step 3: Triage By Incident Type (Local, Read-Only)
 
