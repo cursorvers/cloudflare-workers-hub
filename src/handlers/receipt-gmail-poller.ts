@@ -1083,7 +1083,7 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
     try {
       emails = await fetchReceiptEmailsWithRetry(env, {
         maxResults: MAX_RESULTS,
-        newerThan: '2h',
+        newerThan: '24h',
         ...buildShouldDownload(),
       });
     } catch (error) {
@@ -1148,7 +1148,7 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
           {
             senderAllowlist: senderAllowlist.length > 0 ? senderAllowlist : undefined,
             maxResults: 10,
-            newerThan: '2h',
+            newerThan: '24h',
           }
         );
       } catch (error) {
