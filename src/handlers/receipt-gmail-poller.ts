@@ -1041,58 +1041,61 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
       }
     }
 
-    // Phase 2: HTML receipt polling (feature-flagged)
+    // Phase 2: HTML receipt polling (feature-flagged, subject-keyword matching)
     let htmlMetrics = { processed: 0, skipped: 0, failed: 0 };
     if (env.GMAIL_HTML_RECEIPTS_ENABLED === 'true') {
+      // Optional sender allowlist (additive, not restrictive)
       const senderAllowlist = (env.GMAIL_HTML_RECEIPT_SENDERS || '')
         .split(',')
         .map(s => s.trim())
         .filter(Boolean);
 
-      if (senderAllowlist.length > 0) {
-        let htmlEmails: GmailHtmlReceiptEmail[] = [];
-        try {
-          htmlEmails = await fetchHtmlReceiptEmails(
-            {
-              clientId: env.GMAIL_CLIENT_ID!,
-              clientSecret: env.GMAIL_CLIENT_SECRET!,
-              refreshToken: env.GMAIL_REFRESH_TOKEN!,
-            },
-            { senderAllowlist, maxResults: 10, newerThan: '2h' }
-          );
-        } catch (error) {
-          safeLog.error('[Gmail Poller] HTML receipt fetch failed', {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-
-        // Filter already-processed HTML emails
-        const unprocessed: GmailHtmlReceiptEmail[] = [];
-        for (const htmlEmail of htmlEmails) {
-          if (env.CACHE) {
-            try {
-              const existing = await env.CACHE.get(htmlProcessedKey(htmlEmail.messageId));
-              if (existing) {
-                htmlMetrics.skipped += 1;
-                continue;
-              }
-            } catch {
-              // fail-open
-            }
+      let htmlEmails: GmailHtmlReceiptEmail[] = [];
+      try {
+        htmlEmails = await fetchHtmlReceiptEmails(
+          {
+            clientId: env.GMAIL_CLIENT_ID!,
+            clientSecret: env.GMAIL_CLIENT_SECRET!,
+            refreshToken: env.GMAIL_REFRESH_TOKEN!,
+          },
+          {
+            senderAllowlist: senderAllowlist.length > 0 ? senderAllowlist : undefined,
+            maxResults: 10,
+            newerThan: '2h',
           }
-          unprocessed.push(htmlEmail);
-        }
-
-        const htmlDealMetrics = { ...metrics }; // Share deal counter with PDF path
-        for (const htmlEmail of unprocessed) {
-          await processHtmlReceipt(env, bucket, freeeClient, htmlEmail, htmlDealMetrics);
-        }
-        htmlMetrics = {
-          processed: htmlDealMetrics.processed - metrics.processed,
-          skipped: htmlMetrics.skipped + (htmlDealMetrics.skipped - metrics.skipped),
-          failed: htmlDealMetrics.failed - metrics.failed,
-        };
+        );
+      } catch (error) {
+        safeLog.error('[Gmail Poller] HTML receipt fetch failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
+
+      // Filter already-processed HTML emails
+      const unprocessed: GmailHtmlReceiptEmail[] = [];
+      for (const htmlEmail of htmlEmails) {
+        if (env.CACHE) {
+          try {
+            const existing = await env.CACHE.get(htmlProcessedKey(htmlEmail.messageId));
+            if (existing) {
+              htmlMetrics.skipped += 1;
+              continue;
+            }
+          } catch {
+            // fail-open
+          }
+        }
+        unprocessed.push(htmlEmail);
+      }
+
+      const htmlDealMetrics = { ...metrics }; // Share deal counter with PDF path
+      for (const htmlEmail of unprocessed) {
+        await processHtmlReceipt(env, bucket, freeeClient, htmlEmail, htmlDealMetrics);
+      }
+      htmlMetrics = {
+        processed: htmlDealMetrics.processed - metrics.processed,
+        skipped: htmlMetrics.skipped + (htmlDealMetrics.skipped - metrics.skipped),
+        failed: htmlDealMetrics.failed - metrics.failed,
+      };
     }
 
     const pdfExtractionEnabled = env.PDF_TEXT_EXTRACTION_ENABLED === 'true';

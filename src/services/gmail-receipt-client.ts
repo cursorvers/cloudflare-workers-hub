@@ -562,11 +562,24 @@ export async function fetchReceiptEmails(
 }
 
 /**
+ * Subject keywords for detecting receipt/invoice emails (broad matching).
+ * Prefers false positives over false negatives.
+ */
+const RECEIPT_SUBJECT_KEYWORDS = [
+  // Japanese
+  '領収', '請求', 'ご利用明細', 'お支払い', '注文確認', '購入', '決済',
+  // English
+  'receipt', 'invoice', 'billing', 'payment', 'statement',
+  'order confirmation', 'your order', 'purchase', 'subscription',
+] as const;
+
+/**
  * Fetch recent HTML receipt emails (no PDF attachment required).
- * Only fetches from an explicit sender allowlist for safety.
+ * Uses broad subject-line keyword matching — prefers over-capture.
+ * Excludes emails that already have PDF attachments (handled by fetchReceiptEmails).
  *
  * @param config - OAuth credentials
- * @param options - Search options including sender allowlist
+ * @param options - Search options
  * @returns Array of emails with HTML bodies
  */
 export async function fetchHtmlReceiptEmails(
@@ -576,25 +589,22 @@ export async function fetchHtmlReceiptEmails(
     refreshToken: string;
   },
   options: {
-    senderAllowlist: string[];   // Required: only fetch from these senders
+    senderAllowlist?: string[];   // Optional: if provided, also match these senders
     maxResults?: number;
     newerThan?: string;
-  }
+  } = {}
 ): Promise<GmailHtmlReceiptEmail[]> {
   const { clientId, clientSecret, refreshToken } = config;
-  const { senderAllowlist, maxResults = 10, newerThan = '2h' } = options;
-
-  if (senderAllowlist.length === 0) {
-    return [];
-  }
+  const { senderAllowlist = [], maxResults = 10, newerThan = '2h' } = options;
 
   const accessToken = await refreshAccessToken(clientId, clientSecret, refreshToken);
 
-  // Build query: sender allowlist + receipt keywords, explicitly exclude PDF-attached emails
-  // to avoid double-processing with fetchReceiptEmails().
-  const senderFilter = senderAllowlist.map(s => `from:${s}`).join(' OR ');
-  const subjectFilter = '(subject:receipt OR subject:invoice OR subject:billing OR subject:payment OR subject:領収 OR subject:請求)';
-  const query = `(${senderFilter}) ${subjectFilter} -has:attachment newer_than:${newerThan}`;
+  // Build query: broad subject keywords, exclude PDF-attached emails to avoid
+  // double-processing with fetchReceiptEmails().
+  const subjectClauses = RECEIPT_SUBJECT_KEYWORDS.map(kw => `subject:${kw}`);
+  const senderClauses = senderAllowlist.filter(Boolean).map(s => `from:${s}`);
+  const matchFilter = [...subjectClauses, ...senderClauses].join(' OR ');
+  const query = `(${matchFilter}) -has:attachment newer_than:${newerThan}`;
 
   const messageRefs = await searchMessages(accessToken, query, maxResults);
 
