@@ -116,7 +116,7 @@ FEATURE_HIGHLIGHTS_ENABLED = "true"
 # Cron mode: when true, scheduled handler will run Gmail polling only (skip Limitless backup sync).
 SCHEDULED_GMAIL_ONLY = "false"
 # One-time backfill: re-classify existing receipts and create deals (set to "false" after completion)
-RECEIPT_BACKFILL_ENABLED = "true"
+RECEIPT_BACKFILL_ENABLED = "false"
 # HTML receipt processing (Phase 2)
 GMAIL_HTML_RECEIPTS_ENABLED = "true"
 GMAIL_HTML_RECEIPT_SENDERS = ""

@@ -154,6 +154,20 @@ async function backfillReceipt(
     classificationText = buildClassificationTextFromD1(receipt);
   }
 
+  // Skip reclassification if amount=0 and no R2 data (can't extract amount from D1 alone)
+  if (receipt.amount <= 0 && !r2Available) {
+    return {
+      result: {
+        id: receipt.id,
+        vendor_name: receipt.vendor_name,
+        status: 'skipped',
+        r2Available: false,
+        error: 'amount=0 with no R2 data: cannot extract amount',
+      },
+      newDealsCreated: dealsCreated,
+    };
+  }
+
   // Step 2: Re-classify
   const classification = await classifyReceipt(env, classificationText, {
     vendor_name: receipt.vendor_name,

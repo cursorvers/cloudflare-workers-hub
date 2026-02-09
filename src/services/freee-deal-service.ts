@@ -237,6 +237,26 @@ export async function createDealFromReceipt(
 ): Promise<DealResult> {
   const idempotencyKey = buildIdempotencyKey(receipt);
 
+  // Guard: amount must be positive to create a freee deal.
+  // Zero-amount receipts indicate extraction failure (e.g., R2 missing) — skip deal creation.
+  if (receipt.amount <= 0) {
+    safeLog(env, 'warn', '[FreeeDealService] skipping deal: amount <= 0 (extraction failure)', {
+      receiptId: receipt.id,
+      vendorName: receipt.vendor_name,
+      amount: receipt.amount,
+    });
+    return {
+      dealId: null,
+      partnerId: null,
+      mappingConfidence: 0,
+      status: 'needs_review',
+      accountItemId: null,
+      taxCode: null,
+      mappingMethod: null,
+      selectionProvider: null,
+    };
+  }
+
   const existing = await getExistingDeal(env, receipt.id);
   if (existing) {
     return {
