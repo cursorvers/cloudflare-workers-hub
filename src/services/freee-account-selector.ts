@@ -56,12 +56,15 @@ const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
 const WORKERS_TIMEOUT_MS = 12_000;
 const OPENAI_TIMEOUT_MS = 25_000;
 
+// Import centralized thresholds
+import { CONFIDENCE as CONF_THRESHOLDS, AMOUNT as AMOUNT_THRESHOLDS } from '../config/confidence-thresholds';
+
 // Escalate to OpenAI if Workers AI confidence is below this.
-const WORKERS_CONFIDENCE_ESCALATE = 0.85;
+const WORKERS_CONFIDENCE_ESCALATE = CONF_THRESHOLDS.WORKERS_ESCALATE;
 // If top-2 candidates are too close, treat as ambiguous.
-const SCORE_GAP_AMBIGUOUS = 0.06;
+const SCORE_GAP_AMBIGUOUS = CONF_THRESHOLDS.SCORE_GAP_AMBIGUOUS;
 // High-risk amount (JPY). Above this, we prefer higher-quality model or review.
-const HIGH_AMOUNT_JPY = 100_000;
+const HIGH_AMOUNT_JPY = AMOUNT_THRESHOLDS.HIGH_AMOUNT_JPY;
 
 // Tax selection defaults (freee tax names vary by account setup but commonly these exist).
 const DEFAULT_TAX_NAME = '課税10%';
@@ -83,11 +86,86 @@ const COMMON_EXPENSE_CATEGORIES = [
 ] as const;
 
 // Vendor priors (best-effort; org-specific. Used only for candidate scoring, not hard decisions.)
+// Sorted by specificity (most specific first) to avoid regex collisions.
 const VENDOR_PRIORS: Array<{ pattern: RegExp; category: string }> = [
-  { pattern: /amazon|アマゾン/i, category: '消耗品費' },
+  // 通信費 (Communication / Internet)
   { pattern: /cloudflare/i, category: '通信費' },
-  { pattern: /stripe/i, category: '支払手数料' },
+  { pattern: /aws|amazon\s*web\s*services/i, category: '通信費' },
+  { pattern: /digitalocean/i, category: '通信費' },
+  { pattern: /heroku/i, category: '通信費' },
+  { pattern: /vercel/i, category: '通信費' },
+  { pattern: /netlify/i, category: '通信費' },
+  { pattern: /さくらインターネット|sakura/i, category: '通信費' },
+  { pattern: /ntt|ソフトバンク|softbank|kddi|au|ドコモ|docomo|楽天モバイル/i, category: '通信費' },
+  { pattern: /twilio/i, category: '通信費' },
+
+  // 広告宣伝費 (Advertising)
+  { pattern: /google\s*ads|google\s*広告/i, category: '広告宣伝費' },
+  { pattern: /meta\s*ads|facebook\s*ads|instagram\s*ads/i, category: '広告宣伝費' },
+  { pattern: /twitter\s*ads|x\s*ads/i, category: '広告宣伝費' },
+  { pattern: /linkedin/i, category: '広告宣伝費' },
   { pattern: /google|グーグル/i, category: '広告宣伝費' },
+
+  // 支払手数料 (Payment Fees)
+  { pattern: /stripe/i, category: '支払手数料' },
+  { pattern: /paypal/i, category: '支払手数料' },
+  { pattern: /square/i, category: '支払手数料' },
+  { pattern: /wise|transferwise/i, category: '支払手数料' },
+  { pattern: /振込手数料|送金手数料/i, category: '支払手数料' },
+
+  // 消耗品費 (Supplies / Software)
+  { pattern: /amazon|アマゾン/i, category: '消耗品費' },
+  { pattern: /apple/i, category: '消耗品費' },
+  { pattern: /microsoft|マイクロソフト/i, category: '消耗品費' },
+  { pattern: /jetbrains/i, category: '消耗品費' },
+  { pattern: /adobe/i, category: '消耗品費' },
+  { pattern: /github/i, category: '消耗品費' },
+  { pattern: /notion/i, category: '消耗品費' },
+  { pattern: /slack/i, category: '消耗品費' },
+  { pattern: /figma/i, category: '消耗品費' },
+  { pattern: /kindle|書籍|book/i, category: '消耗品費' },
+  { pattern: /openai/i, category: '消耗品費' },
+  { pattern: /anthropic/i, category: '消耗品費' },
+
+  // 旅費交通費 (Travel / Transport)
+  { pattern: /JR|東日本|西日本|東海道/i, category: '旅費交通費' },
+  { pattern: /suica|pasmo|icoca/i, category: '旅費交通費' },
+  { pattern: /タクシー|taxi|uber|didi|go\s*taxi/i, category: '旅費交通費' },
+  { pattern: /ANA|JAL|航空|airline|エアライン/i, category: '旅費交通費' },
+  { pattern: /新幹線|特急|乗車券/i, category: '旅費交通費' },
+  { pattern: /hotels?\b|宿泊|ホテル|booking\.com|airbnb/i, category: '旅費交通費' },
+  { pattern: /高速|ETC|駐車/i, category: '旅費交通費' },
+
+  // 水道光熱費 (Utilities)
+  { pattern: /電力|東京電力|関西電力|電気料金|でんき/i, category: '水道光熱費' },
+  { pattern: /ガス|東京ガス|大阪ガス/i, category: '水道光熱費' },
+  { pattern: /水道|上下水道/i, category: '水道光熱費' },
+
+  // 地代家賃 (Rent)
+  { pattern: /不動産|賃貸|家賃|管理費|共益費/i, category: '地代家賃' },
+  { pattern: /coworking|コワーキング|wework/i, category: '地代家賃' },
+
+  // 会議費 (Meeting)
+  { pattern: /zoom/i, category: '会議費' },
+  { pattern: /teams/i, category: '会議費' },
+
+  // 外注費 (Outsourcing)
+  { pattern: /ランサーズ|lancers/i, category: '外注費' },
+  { pattern: /クラウドワークス|crowdworks/i, category: '外注費' },
+  { pattern: /upwork|fiverr|coconala|ココナラ/i, category: '外注費' },
+
+  // 租税公課 (Tax)
+  { pattern: /税務署|国税|地方税|住民税|固定資産税|印紙/i, category: '租税公課' },
+  { pattern: /社会保険|厚生年金|健康保険/i, category: '租税公課' },
+
+  // 保険料 (Insurance)
+  { pattern: /保険|損害保険|生命保険|火災保険/i, category: '保険料' },
+
+  // 接待交際費 (Entertainment)
+  { pattern: /接待|贈答|お中元|お歳暮/i, category: '接待交際費' },
+
+  // 雑費 (Miscellaneous - lowest priority fallback)
+  { pattern: /cotobox|特許|商標/i, category: '雑費' },
 ];
 
 // =============================================================================

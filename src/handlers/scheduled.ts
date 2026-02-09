@@ -20,6 +20,7 @@ import {
 import { handlePhiVerificationCron } from './phi-verification-cron';
 import { handleLimitlessPollerCron } from './limitless-poller';
 import { handleGmailReceiptPolling } from './receipt-gmail-poller';
+import { HEALTH } from '../config/confidence-thresholds';
 
 // ============================================================================
 // Cron Expression Constants
@@ -133,6 +134,30 @@ export async function handleScheduled(
 
       // Run Gmail polling first (primary purpose of this cron).
       await handleGmailReceiptPolling(env);
+
+      // Health check: alert if last successful poll is stale (>6h)
+      if (cache && env.DISCORD_WEBHOOK_URL) {
+        try {
+          const lastPoll = await cache.get(HEALTH.LAST_POLL_KEY);
+          if (lastPoll) {
+            const hoursSinceLastPoll = (Date.now() - new Date(lastPoll).getTime()) / (1000 * 60 * 60);
+            if (hoursSinceLastPoll > HEALTH.ALERT_NO_POLL_HOURS) {
+              await fetch(env.DISCORD_WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  content: `🚨 **Receipt Pipeline Stale**\n` +
+                    `Last successful poll: ${lastPoll} (${hoursSinceLastPoll.toFixed(1)}h ago)\n` +
+                    `Threshold: ${HEALTH.ALERT_NO_POLL_HOURS}h\n` +
+                    `Check Gmail poller logs.`,
+                }),
+              });
+            }
+          }
+        } catch {
+          // health check is best-effort
+        }
+      }
 
       // Limitless backup sync (secondary).
       await handleLimitlessSync(env);

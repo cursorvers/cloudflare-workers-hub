@@ -220,8 +220,8 @@ describe('createDealFromReceipt - existing deal early return', () => {
   });
 });
 
-describe('createDealFromReceipt - low confidence path', () => {
-  it('returns needs_review when weighted confidence is below threshold (ambiguous gap)', async () => {
+describe('createDealFromReceipt - low confidence path (two-threshold)', () => {
+  it('creates deal as needs_review when confidence is above MIN_CREATE but below MIN_AUTO (ambiguous gap)', async () => {
     const { env, requestMock } = setup();
     vi.mocked(selectAccountItemForReceipt).mockResolvedValue({
       accountItemId: 1,
@@ -233,29 +233,19 @@ describe('createDealFromReceipt - low confidence path', () => {
       scoreGap: 0.02,
     } as any);
 
-    const { safeLog } = (await import('../utils/log-sanitizer')) as any;
-
     const result = await createDealFromReceipt(env, { ...baseReceipt } as any);
 
+    // Two-threshold system: weighted conf = 0.3*0.7 + 1*0.3 = 0.51
+    // MIN_CREATE=0.25 → creates deal; MIN_AUTO_AMBIGUOUS=0.55 → needs_review (not auto-confirmed)
     expect(result).toEqual(
       expect.objectContaining({
-        dealId: null,
-        partnerId: null,
+        dealId: 101,
+        partnerId: 10,
         mappingConfidence: 0.3,
         status: 'needs_review',
         accountItemId: 1,
         taxCode: 2,
       })
-    );
-    expect(requestMock).not.toHaveBeenCalled();
-    expect(vi.mocked(findPartnerByName)).not.toHaveBeenCalled();
-    expect(vi.mocked(createPartner)).not.toHaveBeenCalled();
-    expect(vi.mocked(safeLog)).toHaveBeenCalledWith(
-      env,
-      'info',
-      '[FreeeDealService] confidence below auto threshold',
-      // weighted: mapping=0.3*0.7 + classification=1*0.3 = 0.51
-      expect.objectContaining({ receiptId: 'receipt-1', confidence: 0.51 })
     );
   });
 
@@ -476,22 +466,14 @@ describe('createDealFromReceipt - error handling and edge cases', () => {
 
     const result = await createDealFromReceipt(env, { ...baseReceipt } as any);
 
-    expect(result.dealId).toBe(null);
-    expect(result.partnerId).toBe(null);
+    // Two-threshold: weighted conf = 0*0.7 + 1*0.3 = 0.3, above MIN_CREATE(0.25)
+    // Deal IS created now with needs_review status (sensitivity-first design)
+    expect(result.dealId).toBe(101);
+    expect(result.partnerId).toBe(10);
     expect(result.mappingConfidence).toBe(0);
     expect(result.status).toBe('needs_review');
     expect(result.accountItemId).toBe(1);
     expect(result.taxCode).toBe(2);
-    // Should not mutate freee when confidence is invalid/low.
-    const client = vi.mocked(createFreeeClient).mock.results[0]?.value as any;
-    expect(client.request).not.toHaveBeenCalled();
-    // weighted: mapping=0*0.7 + classification=1*0.3 = 0.3
-    expect(vi.mocked(safeLog)).toHaveBeenCalledWith(
-      env,
-      'info',
-      '[FreeeDealService] confidence below auto threshold',
-      expect.objectContaining({ receiptId: 'receipt-1', confidence: 0.3 })
-    );
   });
 
   it('returns needs_review and does not create/link deal when selector returns invalid IDs', async () => {

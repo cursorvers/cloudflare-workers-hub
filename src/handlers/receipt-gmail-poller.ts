@@ -31,18 +31,14 @@ import { createStateMachine } from '../services/workflow-state-machine';
 import { withLock } from './scheduled';
 import { backupToGoogleDrive, type FreeeReceiptBackup } from '../services/google-drive-backup';
 import { maybeExtractPdfTextForClassification } from '../services/pdf-text-extraction';
+import { CONFIDENCE, RATE_LIMITS, HEALTH } from '../config/confidence-thresholds';
 
 const LOCK_KEY = 'gmail:polling';
 const LOCK_TTL_SECONDS = 300;
 const RETENTION_YEARS = 7;
 const DEFAULT_TENANT_ID = 'default';
-const MAX_RESULTS = 15;
-// Rate limit safety: freee allows 300 req/hr. Each deal creation uses ~4-6 API calls:
-// getAccountItems (cached), getTaxes (cached), findPartner, POST /deals, PUT /receipts/:id,
-// possibly createPartner. Plus receipt uploads (~1 call each).
-// Budget: 4 cron runs/hr × MAX_DEALS_PER_RUN × 6 calls + 15 uploads = must stay well under 300.
-// 4 × 8 × 6 = 192 + 60 uploads = 252 (~84% utilization, safe margin for retries).
-const MAX_DEALS_PER_RUN = 8;
+const MAX_RESULTS = RATE_LIMITS.MAX_RESULTS;
+const MAX_DEALS_PER_RUN = RATE_LIMITS.MAX_DEALS_PER_RUN;
 
 function getReceiptBucket(env: Env): R2Bucket | null {
   return env.RECEIPTS ?? env.R2 ?? null;
@@ -407,6 +403,7 @@ async function processAttachment(
         confidence: 0,
         method: 'ai_assisted',
         cache_hit: false,
+        amount_extracted: false,
       };
     }
 
@@ -420,12 +417,13 @@ async function processAttachment(
       ? Math.round(classificationResult.amount)
       : 0;
 
-    // Output validation: low-quality results get reduced confidence
+    // Output validation: low-quality results get reduced confidence (cap raised 0.3→0.6 per 2026-02-09 consensus)
     const vendorWasEmail = isEmailLikeVendor(rawVendor);
     const amountIsZero = roundedAmount === 0;
-    const hasQualityIssue = vendorWasEmail || amountIsZero;
+    const amountExtracted = classificationResult.amount_extracted ?? (roundedAmount > 0);
+    const hasQualityIssue = vendorWasEmail || (amountIsZero && !amountExtracted);
     const adjustedConfidence = hasQualityIssue
-      ? Math.min(classificationResult.confidence, 0.3)
+      ? Math.min(classificationResult.confidence, CONFIDENCE.QUALITY_ISSUE_CAP)
       : classificationResult.confidence;
 
     if (hasQualityIssue) {
@@ -433,6 +431,7 @@ async function processAttachment(
         receiptId,
         vendorWasEmail,
         amountIsZero,
+        amountExtracted,
         rawVendor,
         normalizedVendor,
         originalConfidence: classificationResult.confidence,
@@ -446,6 +445,7 @@ async function processAttachment(
       vendor_name: normalizedVendor,
       amount: roundedAmount,
       confidence: adjustedConfidence,
+      amount_extracted: amountExtracted,
     };
 
     await env.DB!.prepare(
@@ -531,10 +531,11 @@ async function processAttachment(
     );
 
     // Attempt automatic deal creation (fail-open: receipt is already in freee File Box)
+    // 2026-02-09: amount=0 gate REMOVED. Create deals regardless (as needs_review if low confidence).
     // Rate limit guard: cap deal creation per run to stay within freee 300 req/hr
     let dealStatus: 'created' | 'needs_review' | 'skipped' | 'failed' = 'skipped';
     try {
-      if (classificationResult.amount > 0 && metrics.dealsCreated < MAX_DEALS_PER_RUN) {
+      if (metrics.dealsCreated < MAX_DEALS_PER_RUN) {
         const receiptInput: ReceiptInput = {
           id: receiptId,
           freee_receipt_id: freeeResult.receipt.id,
@@ -584,6 +585,7 @@ async function processAttachment(
             receiptId,
             mappingConfidence: dealResult.mappingConfidence,
             provider: dealResult.selectionProvider,
+            amountExtracted: classificationResult.amount_extracted,
           });
         } else {
           safeLog.info('[Gmail Poller] Deal created', {
@@ -594,9 +596,6 @@ async function processAttachment(
           });
           metrics.dealsCreated += 1;
         }
-      } else if (classificationResult.amount <= 0) {
-        dealStatus = 'skipped';
-        safeLog.info('[Gmail Poller] Deal skipped (zero amount)', { receiptId });
       } else {
         dealStatus = 'skipped';
         safeLog.info('[Gmail Poller] Deal skipped (rate limit cap reached)', {
@@ -612,6 +611,21 @@ async function processAttachment(
         freeeReceiptId: freeeResult.receipt.id,
         error: dealError instanceof Error ? dealError.message : String(dealError),
       });
+      // Record to DLQ for retry
+      try {
+        await env.DB!.prepare(
+          `INSERT INTO receipt_dlq (receipt_id, error_code, error_message, source_type, message_id, attachment_id)
+           VALUES (?, ?, ?, 'pdf', ?, ?)`
+        ).bind(
+          receiptId,
+          'DEAL_CREATION_FAILED',
+          dealError instanceof Error ? dealError.message : String(dealError),
+          email.messageId,
+          attachmentId
+        ).run();
+      } catch {
+        // DLQ insert is best-effort
+      }
     }
 
     await workflow.complete(String(freeeResult.receipt.id));
@@ -798,10 +812,11 @@ async function processHtmlReceipt(
         confidence: 0,
         method: 'ai_assisted',
         cache_hit: false,
+        amount_extracted: false,
       };
     }
 
-    // Normalize & validate (same as PDF path)
+    // Normalize & validate (same as PDF path, confidence cap 0.3→0.6 per 2026-02-09 consensus)
     const rawVendor = classificationResult.vendor_name || fallbackVendor;
     const normalizedVendor = isEmailLikeVendor(rawVendor)
       ? normalizeVendorFromEmail(rawVendor)
@@ -809,9 +824,10 @@ async function processHtmlReceipt(
     const roundedAmount = Number.isFinite(classificationResult.amount)
       ? Math.round(classificationResult.amount)
       : 0;
-    const hasQualityIssue = isEmailLikeVendor(rawVendor) || roundedAmount === 0;
+    const amountExtracted = classificationResult.amount_extracted ?? (roundedAmount > 0);
+    const hasQualityIssue = isEmailLikeVendor(rawVendor) || (roundedAmount === 0 && !amountExtracted);
     const adjustedConfidence = hasQualityIssue
-      ? Math.min(classificationResult.confidence, 0.3)
+      ? Math.min(classificationResult.confidence, CONFIDENCE.QUALITY_ISSUE_CAP)
       : classificationResult.confidence;
 
     classificationResult = {
@@ -820,6 +836,7 @@ async function processHtmlReceipt(
       vendor_name: normalizedVendor,
       amount: roundedAmount,
       confidence: adjustedConfidence,
+      amount_extracted: amountExtracted,
     };
 
     await env.DB!.prepare(
@@ -891,6 +908,76 @@ async function processHtmlReceipt(
 
     const fileBlob = new Blob([htmlBytes], { type: 'text/html' });
     const freeeResult = await freeeClient.uploadReceipt(fileBlob, 'receipt.html', idempotencyKey);
+
+    // Deal creation for HTML receipts (same as PDF path, added 2026-02-09)
+    try {
+      if (metrics.dealsCreated < MAX_DEALS_PER_RUN) {
+        const receiptInput: ReceiptInput = {
+          id: receiptId,
+          freee_receipt_id: freeeResult.receipt.id,
+          file_hash: fileHash,
+          vendor_name: classificationResult.vendor_name,
+          amount: classificationResult.amount,
+          transaction_date: classificationResult.transaction_date,
+          account_category: classificationResult.account_category ?? null,
+          classification_confidence: classificationResult.confidence ?? null,
+          tenant_id: DEFAULT_TENANT_ID,
+        };
+
+        const dealResult = await createDealFromReceipt(env, receiptInput);
+
+        try {
+          await env.DB!.prepare(
+            `UPDATE receipts
+             SET freee_deal_id = ?, freee_partner_id = ?,
+                 account_item_id = ?, tax_code = ?,
+                 account_mapping_confidence = ?,
+                 account_mapping_method = ?,
+                 updated_at = datetime('now')
+             WHERE id = ?`
+          ).bind(
+            dealResult.dealId,
+            dealResult.partnerId,
+            dealResult.accountItemId ?? null,
+            dealResult.taxCode ?? null,
+            dealResult.mappingConfidence,
+            dealResult.mappingMethod ?? null,
+            receiptId
+          ).run();
+        } catch {
+          // best-effort D1 update
+        }
+
+        if (dealResult.status === 'created') {
+          metrics.dealsCreated += 1;
+        }
+
+        safeLog.info('[Gmail Poller] HTML deal processed', {
+          receiptId,
+          dealId: dealResult.dealId,
+          status: dealResult.status,
+          mappingConfidence: dealResult.mappingConfidence,
+        });
+      }
+    } catch (dealError) {
+      safeLog.warn('[Gmail Poller] HTML deal creation failed (receipt saved)', {
+        receiptId,
+        error: dealError instanceof Error ? dealError.message : String(dealError),
+      });
+      try {
+        await env.DB!.prepare(
+          `INSERT INTO receipt_dlq (receipt_id, error_code, error_message, source_type, message_id)
+           VALUES (?, ?, ?, 'html_body', ?)`
+        ).bind(
+          receiptId,
+          'HTML_DEAL_CREATION_FAILED',
+          dealError instanceof Error ? dealError.message : String(dealError),
+          email.messageId
+        ).run();
+      } catch {
+        // DLQ insert is best-effort
+      }
+    }
 
     await workflow.complete(String(freeeResult.receipt.id));
 
@@ -1125,5 +1212,34 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
         : {}),
       durationMs: Date.now() - startTime,
     });
+
+    // Health tracking: record last successful poll timestamp
+    if (env.KV) {
+      try {
+        await env.KV.put(HEALTH.LAST_POLL_KEY, new Date().toISOString(), {
+          expirationTtl: 60 * 60 * 24 * 7, // 7 days
+        });
+      } catch {
+        // best-effort
+      }
+    }
+
+    // Alerting: notify on failures via Discord webhook (metadata only, no PII)
+    if (metrics.failed > 0 && env.DISCORD_WEBHOOK_URL) {
+      try {
+        await fetch(env.DISCORD_WEBHOOK_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content: `⚠️ **Receipt Pipeline Alert**\n` +
+              `Failed: ${metrics.failed} | Processed: ${metrics.processed} | Deals: ${metrics.dealsCreated}\n` +
+              `Duration: ${Date.now() - startTime}ms\n` +
+              `Check logs for details.`,
+          }),
+        });
+      } catch {
+        // alerting is best-effort
+      }
+    }
   });
 }

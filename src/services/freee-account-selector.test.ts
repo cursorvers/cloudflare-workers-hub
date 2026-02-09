@@ -214,13 +214,13 @@ describe('selectAccountItemForReceipt', () => {
     expect((globalThis.fetch as any).mock.calls.length).toBe(1);
   });
 
-  it('OpenAI escalation when amount >= 100,000 JPY (high-risk) even if Workers AI is confident', async () => {
+  it('OpenAI escalation when amount >= 500,000 JPY (high-risk) even if Workers AI is confident', async () => {
     const env = workersEnvWithResponse(JSON.stringify({ chosen_account_item_id: 1, confidence: 0.96, reason: '確信' }), {
       OPENAI_API_KEY: 'test-key',
     });
     mockOpenAIOnceJsonContent(JSON.stringify({ chosen_account_item_id: 2, confidence: 0.9, reason: '高額なので慎重に' }));
 
-    const receipt = makeReceipt({ vendor_name: 'Google', amount: 100_000, account_category: '広告宣伝費' });
+    const receipt = makeReceipt({ vendor_name: 'Google', amount: 500_000, account_category: '広告宣伝費' });
     const accountItems: AnyAccountItem[] = [
       { id: 1, name: '広告宣伝費' },
       { id: 2, name: '通信費' },

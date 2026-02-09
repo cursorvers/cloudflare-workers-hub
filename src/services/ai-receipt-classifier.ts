@@ -32,6 +32,8 @@ export interface ClassificationResult {
   confidence: number; // 0.0-1.0
   method: 'rule_based' | 'ai_assisted';
   cache_hit: boolean;
+  /** Whether amount was explicitly extracted (true) vs defaulted to 0 (false). */
+  amount_extracted: boolean;
 }
 
 interface RuleBasedResult {
@@ -40,47 +42,152 @@ interface RuleBasedResult {
 }
 
 // =============================================================================
-// Rule-Based Classification (Primary)
+// Amount / Date Extraction Helpers
 // =============================================================================
 
 /**
- * Attempt rule-based classification first
- * Rules are defined based on known vendors/patterns
+ * Extract amount (JPY) from text using regex patterns.
+ * Returns { amount, extracted } where extracted=true if a pattern matched.
+ */
+function extractAmount(text: string): { amount: number; extracted: boolean } {
+  const patterns = [
+    // ¥1,234 or ￥1,234
+    /[¥￥]\s*([\d,]+)/,
+    // 1,234円
+    /([\d,]+)\s*円/,
+    // JPY 1234
+    /JPY\s*([\d,]+)/i,
+    // 合計 1,234 / Total 1,234 / Amount: 1,234
+    /(?:合計|total|amount|金額|請求額|お支払い)[:\s]*([\d,]+)/i,
+    // $12.34 (convert later if needed, for now treat as JPY hint)
+    /\$\s*([\d,.]+)/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      const raw = match[1].replace(/,/g, '');
+      const amount = Math.round(Number.parseFloat(raw));
+      if (Number.isFinite(amount) && amount > 0) {
+        return { amount, extracted: true };
+      }
+    }
+  }
+  return { amount: 0, extracted: false };
+}
+
+/**
+ * Extract transaction date from text.
+ * Returns ISO date string or null.
+ */
+function extractDate(text: string): string | null {
+  const patterns: Array<{ regex: RegExp; format: (m: RegExpMatchArray) => string }> = [
+    // 2026-02-09
+    { regex: /(\d{4})-(\d{2})-(\d{2})/, format: (m) => `${m[1]}-${m[2]}-${m[3]}` },
+    // 2026/02/09
+    { regex: /(\d{4})\/(\d{1,2})\/(\d{1,2})/, format: (m) => `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}` },
+    // 2026年2月9日
+    { regex: /(\d{4})年(\d{1,2})月(\d{1,2})日/, format: (m) => `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}` },
+    // Feb 9, 2026
+    { regex: /(\w{3})\s+(\d{1,2}),?\s+(\d{4})/, format: (m) => {
+      const months: Record<string, string> = { Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06', Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12' };
+      const month = months[m[1]];
+      return month ? `${m[3]}-${month}-${m[2].padStart(2, '0')}` : '';
+    }},
+  ];
+
+  for (const { regex, format } of patterns) {
+    const match = text.match(regex);
+    if (match) {
+      const date = format(match);
+      if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return date;
+      }
+    }
+  }
+  return null;
+}
+
+// =============================================================================
+// Rule-Based Classification (Primary)
+// =============================================================================
+
+interface VendorRule {
+  pattern: RegExp;
+  vendor_name: string;
+  account_category: string;
+  confidence: number;
+}
+
+/**
+ * Vendor rules for rule-based classification.
+ * Sorted by specificity (most specific patterns first).
+ */
+const VENDOR_RULES: VendorRule[] = [
+  // Communication / Internet
+  { pattern: /cloudflare/i, vendor_name: 'Cloudflare Inc.', account_category: '通信費', confidence: 0.95 },
+  { pattern: /aws|amazon\s*web\s*services/i, vendor_name: 'Amazon Web Services', account_category: '通信費', confidence: 0.95 },
+  { pattern: /digitalocean/i, vendor_name: 'DigitalOcean', account_category: '通信費', confidence: 0.95 },
+  { pattern: /heroku/i, vendor_name: 'Heroku', account_category: '通信費', confidence: 0.95 },
+  { pattern: /vercel/i, vendor_name: 'Vercel Inc.', account_category: '通信費', confidence: 0.95 },
+  { pattern: /netlify/i, vendor_name: 'Netlify', account_category: '通信費', confidence: 0.90 },
+  { pattern: /さくらインターネット|sakura.*internet/i, vendor_name: 'さくらインターネット', account_category: '通信費', confidence: 0.90 },
+  { pattern: /twilio/i, vendor_name: 'Twilio', account_category: '通信費', confidence: 0.90 },
+
+  // Advertising
+  { pattern: /google\s*ads|google\s*広告/i, vendor_name: 'Google Ads', account_category: '広告宣伝費', confidence: 0.95 },
+  { pattern: /meta\s*ads|facebook\s*ads/i, vendor_name: 'Meta Platforms', account_category: '広告宣伝費', confidence: 0.95 },
+  { pattern: /google|グーグル/i, vendor_name: 'Google LLC', account_category: '広告宣伝費', confidence: 0.90 },
+
+  // Payment Fees
+  { pattern: /stripe/i, vendor_name: 'Stripe Inc.', account_category: '支払手数料', confidence: 0.95 },
+  { pattern: /paypal/i, vendor_name: 'PayPal', account_category: '支払手数料', confidence: 0.95 },
+  { pattern: /square/i, vendor_name: 'Square', account_category: '支払手数料', confidence: 0.90 },
+
+  // Supplies / Software
+  { pattern: /amazon|アマゾン/i, vendor_name: 'Amazon.co.jp', account_category: '消耗品費', confidence: 0.90 },
+  { pattern: /apple/i, vendor_name: 'Apple Inc.', account_category: '消耗品費', confidence: 0.90 },
+  { pattern: /microsoft|マイクロソフト/i, vendor_name: 'Microsoft', account_category: '消耗品費', confidence: 0.90 },
+  { pattern: /jetbrains/i, vendor_name: 'JetBrains', account_category: '消耗品費', confidence: 0.90 },
+  { pattern: /adobe/i, vendor_name: 'Adobe', account_category: '消耗品費', confidence: 0.90 },
+  { pattern: /github/i, vendor_name: 'GitHub', account_category: '消耗品費', confidence: 0.90 },
+  { pattern: /notion/i, vendor_name: 'Notion', account_category: '消耗品費', confidence: 0.85 },
+  { pattern: /openai/i, vendor_name: 'OpenAI', account_category: '消耗品費', confidence: 0.90 },
+  { pattern: /anthropic/i, vendor_name: 'Anthropic', account_category: '消耗品費', confidence: 0.90 },
+  { pattern: /figma/i, vendor_name: 'Figma', account_category: '消耗品費', confidence: 0.85 },
+  { pattern: /slack/i, vendor_name: 'Slack', account_category: '消耗品費', confidence: 0.85 },
+
+  // Travel / Transport
+  { pattern: /ANA|全日空/i, vendor_name: 'ANA', account_category: '旅費交通費', confidence: 0.90 },
+  { pattern: /JAL|日本航空/i, vendor_name: 'JAL', account_category: '旅費交通費', confidence: 0.90 },
+  { pattern: /suica|pasmo|icoca/i, vendor_name: '交通系IC', account_category: '旅費交通費', confidence: 0.85 },
+  { pattern: /タクシー|taxi|uber/i, vendor_name: 'タクシー', account_category: '旅費交通費', confidence: 0.85 },
+
+  // Outsourcing
+  { pattern: /ランサーズ|lancers/i, vendor_name: 'ランサーズ', account_category: '外注費', confidence: 0.90 },
+  { pattern: /クラウドワークス|crowdworks/i, vendor_name: 'クラウドワークス', account_category: '外注費', confidence: 0.90 },
+  { pattern: /upwork/i, vendor_name: 'Upwork', account_category: '外注費', confidence: 0.90 },
+
+  // Meeting
+  { pattern: /zoom/i, vendor_name: 'Zoom', account_category: '会議費', confidence: 0.85 },
+
+  // Misc
+  { pattern: /cotobox/i, vendor_name: 'cotobox', account_category: '雑費', confidence: 0.85 },
+];
+
+/**
+ * Attempt rule-based classification first.
+ * Now also extracts amount and date from text.
  */
 function tryRuleBasedClassification(
   text: string,
-  metadata: Record<string, any>
+  _metadata: Record<string, unknown>
 ): RuleBasedResult {
-  // Example rules (expand based on business needs)
-  const rules = [
-    {
-      pattern: /amazon|アマゾン/i,
-      vendor_name: 'Amazon.co.jp',
-      account_category: '消耗品費',
-      confidence: 0.95,
-    },
-    {
-      pattern: /google|グーグル/i,
-      vendor_name: 'Google LLC',
-      account_category: '広告宣伝費',
-      confidence: 0.95,
-    },
-    {
-      pattern: /cloudflare/i,
-      vendor_name: 'Cloudflare Inc.',
-      account_category: '通信費',
-      confidence: 0.95,
-    },
-    {
-      pattern: /stripe/i,
-      vendor_name: 'Stripe Inc.',
-      account_category: '支払手数料',
-      confidence: 0.95,
-    },
-  ];
-
-  for (const rule of rules) {
+  for (const rule of VENDOR_RULES) {
     if (rule.pattern.test(text)) {
+      const { amount, extracted: amountExtracted } = extractAmount(text);
+      const date = extractDate(text);
+
       return {
         matched: true,
         result: {
@@ -88,6 +195,9 @@ function tryRuleBasedClassification(
           account_category: rule.account_category,
           confidence: rule.confidence,
           method: 'rule_based',
+          amount,
+          amount_extracted: amountExtracted,
+          ...(date ? { transaction_date: date } : {}),
         },
       };
     }
@@ -185,10 +295,11 @@ Extract and return ONLY a JSON object with the following structure:
     throw new Error('AI response parsing failed');
   }
 
+  const aiAmount = typeof aiResult.amount === 'number' ? aiResult.amount : 0;
   return {
     document_type: aiResult.document_type || 'other',
     vendor_name: aiResult.vendor_name || 'Unknown',
-    amount: aiResult.amount || 0,
+    amount: aiAmount,
     currency: aiResult.currency || 'JPY',
     transaction_date: aiResult.transaction_date || new Date().toISOString().split('T')[0],
     account_category: aiResult.account_category,
@@ -196,6 +307,7 @@ Extract and return ONLY a JSON object with the following structure:
     confidence: aiResult.confidence || 0.5,
     method: 'ai_assisted',
     cache_hit: false,
+    amount_extracted: aiAmount > 0,
   };
 }
 
@@ -218,9 +330,19 @@ export async function classifyReceipt(
       vendor: ruleResult.result.vendor_name,
     });
     return {
-      ...ruleResult.result,
+      document_type: 'receipt',
+      vendor_name: ruleResult.result.vendor_name ?? 'Unknown',
+      amount: ruleResult.result.amount ?? 0,
+      currency: 'JPY',
+      transaction_date: ruleResult.result.transaction_date ?? new Date().toISOString().split('T')[0],
+      account_category: ruleResult.result.account_category,
+      tax_type: undefined,
+      department: undefined,
+      confidence: ruleResult.result.confidence ?? 0.9,
+      method: 'rule_based' as const,
       cache_hit: false,
-    } as ClassificationResult;
+      amount_extracted: ruleResult.result.amount_extracted ?? false,
+    };
   }
 
   if (!env.KV) {
@@ -289,16 +411,18 @@ export async function classifyBatch(
 // Confidence Thresholds
 // =============================================================================
 
+import { CONFIDENCE } from '../config/confidence-thresholds';
+
 /**
  * Check if confidence is sufficient for auto-submission
  */
 export function isConfidentEnough(confidence: number): boolean {
-  return confidence >= 0.8;
+  return confidence >= CONFIDENCE.MIN_AUTO;
 }
 
 /**
  * Check if manual review is required
  */
 export function requiresManualReview(confidence: number): boolean {
-  return confidence < 0.5;
+  return confidence < CONFIDENCE.MIN_CREATE;
 }

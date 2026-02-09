@@ -15,6 +15,7 @@ import {
   getTaxes,
 } from './freee-master-cache';
 import { selectAccountItemForReceipt } from './freee-account-selector';
+import { CONFIDENCE, AMOUNT, decideDealStatus } from '../config/confidence-thresholds';
 
 // =============================================================================
 // Types
@@ -196,8 +197,10 @@ async function recordDealLink(
     .run();
 }
 
-function decideStatus(confidence: number): DealStatus {
-  return confidence >= 0.7 ? 'created' : 'needs_review';
+function decideStatus(confidence: number, amount: number, scoreGap: number): DealStatus {
+  const result = decideDealStatus(confidence, amount, scoreGap);
+  // 'skip' should not reach here (caller handles it), but fallback to needs_review
+  return result === 'skip' ? 'needs_review' : result;
 }
 
 function logConfidence(env: Env, confidence: number, receipt: ReceiptInput): void {
@@ -309,14 +312,13 @@ export async function createDealFromReceipt(
   const overallConfidence = mappingConfidence * 0.7 + classificationConfidence * 0.3;
   logConfidence(env, overallConfidence, receipt);
 
-  // Safety gate: conservative only for genuinely high-risk scenarios.
-  // - ≥500,000 JPY: require 0.8 (large enough to warrant caution)
-  // - ambiguous candidates (scoreGap < 0.06): require 0.65
-  // - default: require 0.55 (prioritize automation; freee allows easy correction)
-  const minAutoConfidence =
-    receipt.amount >= 500_000 ? 0.8 : selection.scoreGap < 0.06 ? 0.65 : 0.55;
+  // Two-threshold system (3-party consensus 2026-02-09):
+  // - MIN_CREATE (0.25): create deal as needs_review
+  // - MIN_AUTO (0.50): auto-confirm deal as created
+  // - MIN_AUTO_HIGH_AMOUNT (0.70): high-value safety gate
+  const dealDecision = decideDealStatus(overallConfidence, receipt.amount, selection.scoreGap);
 
-  if (overallConfidence < minAutoConfidence) {
+  if (dealDecision === 'skip') {
     return {
       dealId: null,
       partnerId: null,
@@ -370,7 +372,7 @@ export async function createDealFromReceipt(
     idempotencyKey
   );
 
-  const status = decideStatus(overallConfidence);
+  const status = decideStatus(overallConfidence, receipt.amount, selection.scoreGap);
 
   await recordDealLink(env, {
     receiptId: receipt.id,
