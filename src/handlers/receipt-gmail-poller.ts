@@ -492,7 +492,7 @@ async function processAttachment(
 
     await workflow.transition('uploading_r2', { r2Key });
 
-    await bucket.put(r2Key, attachment.data, {
+    const r2Result = await bucket.put(r2Key, attachment.data, {
       httpMetadata: {
         contentType: attachment.mimeType || 'application/pdf',
       },
@@ -507,6 +507,26 @@ async function processAttachment(
       },
       onlyIf: { etagDoesNotMatch: '*' },
     });
+
+    // Verify R2 write succeeded. onlyIf returns null when condition fails
+    // (object already exists with WORM). null is OK for WORM idempotency.
+    // But we should log it for diagnostics.
+    if (!r2Result) {
+      safeLog.warn('[Gmail Poller] R2 put returned null (WORM dedup or write issue)', {
+        r2Key,
+        receiptId,
+        messageId: email.messageId,
+      });
+      // Verify the object actually exists
+      const verifyObj = await bucket.head(r2Key);
+      if (!verifyObj) {
+        safeLog.error('[Gmail Poller] R2 object NOT stored (critical: WORM gap)', {
+          r2Key,
+          receiptId,
+        });
+        // Continue processing — receipt is in freee File Box even without R2 copy
+      }
+    }
 
     await workflow.transition('uploaded_r2', {
       r2Key,
@@ -871,7 +891,7 @@ async function processHtmlReceipt(
     await workflow.transition('uploading_r2', { r2Key });
 
     // Store HTML in R2 with Content-Disposition: attachment (security)
-    await bucket.put(r2Key, htmlBytes, {
+    const htmlR2Result = await bucket.put(r2Key, htmlBytes, {
       httpMetadata: {
         contentType: 'text/html',
         contentDisposition: 'attachment; filename="receipt.html"',
@@ -886,6 +906,20 @@ async function processHtmlReceipt(
       },
       onlyIf: { etagDoesNotMatch: '*' },
     });
+
+    if (!htmlR2Result) {
+      safeLog.warn('[Gmail Poller] HTML R2 put returned null (WORM dedup or write issue)', {
+        r2Key,
+        receiptId,
+      });
+      const verifyObj = await bucket.head(r2Key);
+      if (!verifyObj) {
+        safeLog.error('[Gmail Poller] HTML R2 object NOT stored (critical: WORM gap)', {
+          r2Key,
+          receiptId,
+        });
+      }
+    }
 
     await workflow.transition('uploaded_r2', { r2Key, size: htmlBytes.byteLength });
 

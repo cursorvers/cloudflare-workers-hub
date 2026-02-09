@@ -20,6 +20,7 @@ import {
 import { handlePhiVerificationCron } from './phi-verification-cron';
 import { handleLimitlessPollerCron } from './limitless-poller';
 import { handleGmailReceiptPolling } from './receipt-gmail-poller';
+import { recordCronRun } from './receipt-backfill';
 import { HEALTH } from '../config/confidence-thresholds';
 
 // ============================================================================
@@ -112,37 +113,64 @@ export async function handleScheduled(
   ctx: ExecutionContext
 ): Promise<void> {
   const scheduledTime = new Date(controller.scheduledTime);
+  const startTime = Date.now();
 
   safeLog.info('[Scheduled] Cron trigger fired', {
     scheduledTime: scheduledTime.toISOString(),
     cron: controller.cron,
   });
 
+  // Record cron start to D1 (best-effort diagnostics)
+  await recordCronRun(env, `cron:${controller.cron}`, 'success', {
+    event: 'started',
+    scheduledTime: scheduledTime.toISOString(),
+  }).catch(() => { /* best-effort */ });
+
   const cache = env.CACHE;
   if (!cache) {
     safeLog.warn('[Scheduled] CACHE KV not configured (locks/throttles disabled)');
   }
 
+  // Track sub-job results for diagnostics
+  const jobResults: Record<string, { status: string; durationMs?: number; error?: string }> = {};
+
+  /**
+   * Run a sub-job with error isolation and diagnostics.
+   * Each sub-job runs independently — one failure doesn't block others.
+   */
+  async function runJob(name: string, fn: () => Promise<void>): Promise<void> {
+    const jobStart = Date.now();
+    try {
+      await fn();
+      jobResults[name] = { status: 'success', durationMs: Date.now() - jobStart };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      jobResults[name] = { status: 'error', durationMs: Date.now() - jobStart, error: message };
+      safeLog.error(`[Scheduled] Job "${name}" failed`, { error: message });
+      // Record individual job failure
+      await recordCronRun(env, name, 'error', undefined, message).catch(() => {});
+    }
+  }
+
   switch (controller.cron) {
-    case CRON_HOURLY:
-      // Hourly: Gmail polling + Limitless sync + optional jobs.
-      // Gmail poller already does its own locking; no double-lock needed.
+    case CRON_HOURLY: {
+      // Gmail-only mode: skip all other jobs
       if (env.SCHEDULED_GMAIL_ONLY === 'true') {
-        await handleGmailReceiptPolling(env);
-        return;
+        await runJob('gmail_polling', () => handleGmailReceiptPolling(env));
+        break;
       }
 
-      // Run Gmail polling first (primary purpose of this cron).
-      await handleGmailReceiptPolling(env);
+      // Primary: Gmail receipt polling
+      await runJob('gmail_polling', () => handleGmailReceiptPolling(env));
 
       // Health check: alert if last successful poll is stale (>6h)
       if (cache && env.DISCORD_WEBHOOK_URL) {
-        try {
+        await runJob('health_check', async () => {
           const lastPoll = await cache.get(HEALTH.LAST_POLL_KEY);
           if (lastPoll) {
             const hoursSinceLastPoll = (Date.now() - new Date(lastPoll).getTime()) / (1000 * 60 * 60);
             if (hoursSinceLastPoll > HEALTH.ALERT_NO_POLL_HOURS) {
-              await fetch(env.DISCORD_WEBHOOK_URL, {
+              await fetch(env.DISCORD_WEBHOOK_URL!, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -154,60 +182,89 @@ export async function handleScheduled(
               });
             }
           }
-        } catch {
-          // health check is best-effort
-        }
-      }
-
-      // Limitless backup sync (secondary).
-      await handleLimitlessSync(env);
-
-      // Optional: daemon health check
-      if (env.DAEMON_HEALTH_CRON_ENABLED === 'true' && cache) {
-        await handleDaemonHealthCheck(env, withLock);
-      }
-
-      // Optional: Limitless poller (disabled by default)
-      if (env.LIMITLESS_POLLER_ENABLED === 'true') {
-        await handleLimitlessPollerCron(env).catch((error) => {
-          safeLog.error('[Scheduled] Limitless poller failed', { error: String(error) });
         });
       }
 
-      // Sub-jobs: time-gated within hourly cron (saves cron slots)
-      {
-        const hour = scheduledTime.getUTCHours();
+      // Secondary: Limitless backup sync
+      await runJob('limitless_sync', () => handleLimitlessSync(env));
 
-        // PHI verification: every 6 hours (0, 6, 12, 18 UTC)
-        if (hour % 6 === 0) {
-          await handlePhiVerificationCron(env);
-        }
-
-        // Subscription cleanup: daily at 02:00 UTC (11:00 JST)
-        if (hour === 2 && cache) {
-          await handleSubscriptionCleanup(env, withLock);
-        }
+      // Optional: daemon health check
+      if (env.DAEMON_HEALTH_CRON_ENABLED === 'true' && cache) {
+        await runJob('daemon_health', () => handleDaemonHealthCheck(env, withLock));
       }
 
-      // One-time backfill: re-classify existing receipts and create deals (env flag gated)
+      // Optional: Limitless poller
+      if (env.LIMITLESS_POLLER_ENABLED === 'true') {
+        await runJob('limitless_poller', () => handleLimitlessPollerCron(env));
+      }
+
+      // Sub-jobs: time-gated within hourly cron
+      const hour = scheduledTime.getUTCHours();
+
+      // PHI verification: every 6 hours (0, 6, 12, 18 UTC)
+      if (hour % 6 === 0) {
+        await runJob('phi_verification', () => handlePhiVerificationCron(env));
+      }
+
+      // Subscription cleanup: daily at 02:00 UTC (11:00 JST)
+      if (hour === 2 && cache) {
+        await runJob('subscription_cleanup', () => handleSubscriptionCleanup(env, withLock));
+      }
+
+      // One-time backfill: re-classify existing receipts and create deals
       if (env.RECEIPT_BACKFILL_ENABLED === 'true') {
-        try {
+        await runJob('receipt_backfill', async () => {
           const { handleReceiptBackfillCron } = await import('./receipt-backfill');
           await handleReceiptBackfillCron(env);
-        } catch (error) {
-          safeLog.error('[Scheduled] Receipt backfill failed', { error: String(error) });
-        }
+        });
       }
-      return;
+
+      break;
+    }
 
     case CRON_DAILY_ACTIONS:
-      return handleDailyActionCheck(env, withLock);
+      await runJob('daily_actions', () => handleDailyActionCheck(env, withLock));
+      break;
 
     case CRON_WEEKLY_DIGEST:
-      return handleWeeklyDigest(env, withLock);
+      await runJob('weekly_digest', () => handleWeeklyDigest(env, withLock));
+      break;
 
     default:
       safeLog.warn('[Scheduled] Unknown cron expression', { cron: controller.cron });
+  }
+
+  // Record overall cron completion with all job results
+  const totalDurationMs = Date.now() - startTime;
+  const hasErrors = Object.values(jobResults).some(r => r.status === 'error');
+
+  safeLog.info('[Scheduled] Cron run completed', {
+    cron: controller.cron,
+    durationMs: totalDurationMs,
+    jobResults,
+    hasErrors,
+  });
+
+  await recordCronRun(
+    env,
+    `cron:${controller.cron}`,
+    hasErrors ? 'error' : 'success',
+    { ...jobResults, durationMs: totalDurationMs },
+    hasErrors ? Object.entries(jobResults)
+      .filter(([, r]) => r.status === 'error')
+      .map(([name, r]) => `${name}: ${r.error}`)
+      .join('; ') : undefined
+  ).catch(() => { /* best-effort */ });
+
+  // Purge old cron_runs (keep 30 days, run daily at 03:00 UTC)
+  if (controller.cron === CRON_HOURLY && scheduledTime.getUTCHours() === 3 && env.DB) {
+    try {
+      await env.DB.prepare(
+        `DELETE FROM cron_runs WHERE executed_at < datetime('now', '-30 days')`
+      ).run();
+    } catch {
+      // best-effort
+    }
   }
 }
 
