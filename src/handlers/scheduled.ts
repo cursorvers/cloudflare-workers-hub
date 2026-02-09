@@ -188,6 +188,16 @@ export async function handleScheduled(
           await handleSubscriptionCleanup(env, withLock);
         }
       }
+
+      // One-time backfill: re-classify existing receipts and create deals (env flag gated)
+      if (env.RECEIPT_BACKFILL_ENABLED === 'true') {
+        try {
+          const { handleReceiptBackfillCron } = await import('./receipt-backfill');
+          await handleReceiptBackfillCron(env);
+        } catch (error) {
+          safeLog.error('[Scheduled] Receipt backfill failed', { error: String(error) });
+        }
+      }
       return;
 
     case CRON_DAILY_ACTIONS:

@@ -275,3 +275,122 @@ function jsonResponse(data: unknown, status = 200): Response {
     headers: { 'Content-Type': 'application/json' },
   });
 }
+
+// =============================================================================
+// Cron-triggered backfill (one-time, env-flag gated)
+// =============================================================================
+
+/**
+ * Cron-callable backfill: processes all receipts without deals.
+ * Gated by RECEIPT_BACKFILL_ENABLED env var.
+ * After running, set RECEIPT_BACKFILL_ENABLED to 'false' to disable.
+ */
+export async function handleReceiptBackfillCron(env: Env): Promise<void> {
+  const bucket = env.RECEIPTS ?? env.R2;
+  if (!bucket || !env.DB) {
+    safeLog.warn('[Backfill] R2 or D1 not configured, skipping');
+    return;
+  }
+
+  const { results: receipts } = await env.DB.prepare(
+    `SELECT id, r2_object_key, file_hash, vendor_name, amount, transaction_date,
+            account_category, classification_confidence, freee_receipt_id, source_type
+     FROM receipts
+     WHERE freee_deal_id IS NULL AND freee_receipt_id IS NOT NULL
+     ORDER BY created_at DESC LIMIT ?`
+  ).bind(MAX_BACKFILL).all<BackfillReceipt>();
+
+  if (!receipts || receipts.length === 0) {
+    safeLog.info('[Backfill] No receipts to backfill');
+    return;
+  }
+
+  safeLog.info('[Backfill] Starting cron backfill', { count: receipts.length });
+  let reclassified = 0;
+  let dealsCreated = 0;
+  let failed = 0;
+
+  for (const receipt of receipts) {
+    try {
+      const obj = await bucket.get(receipt.r2_object_key);
+      if (!obj) { continue; }
+
+      const metadata = obj.customMetadata || {};
+      const textParts = [
+        `Subject: ${metadata.subject || ''}`,
+        `From: ${metadata.from || receipt.vendor_name}`,
+        `Date: ${receipt.transaction_date}`,
+        `Attachment: ${receipt.r2_object_key.split('/').pop() || 'receipt.pdf'}`,
+      ];
+
+      const blob = await obj.arrayBuffer();
+      const blobText = new TextDecoder('utf-8', { fatal: false }).decode(blob);
+      const hasReadableText = blobText.includes('Invoice') || blobText.includes('Receipt') ||
+        blobText.includes('合計') || blobText.includes('請求') || blobText.includes('領収') ||
+        blobText.includes('Amount') || blobText.includes('Total');
+
+      if (hasReadableText) {
+        const truncated = blobText.slice(0, 8000);
+        textParts.push('', 'PDF Text (extracted):', '---BEGIN PDF TEXT---', truncated, '---END PDF TEXT---');
+      }
+
+      const classification = await classifyReceipt(env, textParts.join('\n'), {
+        vendor_name: receipt.vendor_name,
+        amount: receipt.amount,
+        transaction_date: receipt.transaction_date,
+      });
+
+      const newVendor = classification.vendor_name || receipt.vendor_name;
+      const newAmount = classification.amount > 0 ? Math.round(classification.amount) : receipt.amount;
+      const newCategory = classification.account_category || receipt.account_category;
+
+      await env.DB.prepare(
+        `UPDATE receipts SET vendor_name = ?, amount = ?, account_category = ?,
+           classification_confidence = ?, classification_method = ?, updated_at = datetime('now')
+         WHERE id = ?`
+      ).bind(newVendor, newAmount, newCategory, classification.confidence, classification.method, receipt.id).run();
+      reclassified += 1;
+
+      if (receipt.freee_receipt_id && dealsCreated < MAX_DEALS_PER_RUN) {
+        try {
+          const dealResult = await createDealFromReceipt(env, {
+            id: receipt.id,
+            freee_receipt_id: receipt.freee_receipt_id,
+            file_hash: receipt.file_hash,
+            vendor_name: newVendor,
+            amount: newAmount,
+            transaction_date: receipt.transaction_date,
+            account_category: newCategory,
+            classification_confidence: classification.confidence,
+            tenant_id: DEFAULT_TENANT_ID,
+          });
+
+          await env.DB.prepare(
+            `UPDATE receipts SET freee_deal_id = ?, freee_partner_id = ?,
+               account_item_id = ?, tax_code = ?, account_mapping_confidence = ?,
+               account_mapping_method = ?, updated_at = datetime('now') WHERE id = ?`
+          ).bind(
+            dealResult.dealId, dealResult.partnerId,
+            dealResult.accountItemId ?? null, dealResult.taxCode ?? null,
+            dealResult.mappingConfidence, dealResult.mappingMethod ?? null, receipt.id
+          ).run();
+
+          if (dealResult.dealId) { dealsCreated += 1; }
+        } catch (dealError) {
+          safeLog.warn('[Backfill] Deal creation failed', {
+            receiptId: receipt.id,
+            error: dealError instanceof Error ? dealError.message : String(dealError),
+          });
+        }
+      }
+    } catch (error) {
+      failed += 1;
+      safeLog.error('[Backfill] Receipt failed', {
+        receiptId: receipt.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  safeLog.info('[Backfill] Cron backfill completed', { reclassified, dealsCreated, failed });
+}

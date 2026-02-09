@@ -71,6 +71,7 @@ export interface Env {
   LIMITLESS_SYNC_WEBHOOK_KEY?: string; // Dedicated webhook auth key for Limitless-only worker
   LIMITLESS_POLLER_ENABLED?: string; // Enable/disable Limitless poller (default: false)
   DAEMON_HEALTH_CRON_ENABLED?: string; // Enable/disable daemon health check in scheduled cron (default: false)
+  RECEIPT_BACKFILL_ENABLED?: string; // One-time backfill: re-classify receipts and create deals (default: false)
   // Notifications (Heartbeat pattern)
   DISCORD_WEBHOOK_URL?: string;    // Discord webhook URL for digest/alert notifications
   // Supabase (Limitless pipeline storage)
