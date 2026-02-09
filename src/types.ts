@@ -90,7 +90,9 @@ export interface Env {
   GMAIL_CLIENT_ID?: string;        // Gmail OAuth client ID
   GMAIL_CLIENT_SECRET?: string;    // Gmail OAuth client secret
   GMAIL_REFRESH_TOKEN?: string;    // Gmail OAuth refresh token
-  SCHEDULED_GMAIL_ONLY?: string;   // "true" to run only Gmail polling in */15 cron (production-safe)
+  SCHEDULED_GMAIL_ONLY?: string;   // "true" to run only Gmail polling in hourly cron (production-safe)
+  GMAIL_HTML_RECEIPTS_ENABLED?: string;  // "true" to also fetch HTML email receipts (no PDF attachment)
+  GMAIL_HTML_RECEIPT_SENDERS?: string;   // Comma-separated sender allowlist for HTML receipts
   // JWT Authentication (Cockpit API)
   JWT_SECRET?: string;             // HS256 secret for development
   JWT_PRIVATE_KEY?: string;        // RS256 private key for production

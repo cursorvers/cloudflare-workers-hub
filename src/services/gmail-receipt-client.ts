@@ -92,6 +92,22 @@ export interface GmailReceiptEmail {
   attachments: GmailReceiptAttachment[];
 }
 
+export interface GmailHtmlBody {
+  html: string;
+  plainText: string | null;
+  hasExternalReferences: boolean;
+  externalRefTypes: string[]; // e.g., ['img', 'link', 'import']
+}
+
+export interface GmailHtmlReceiptEmail {
+  messageId: string;
+  threadId: string;
+  subject: string;
+  from: string;
+  date: Date;
+  htmlBody: GmailHtmlBody;
+}
+
 export type ShouldDownloadAttachment = (args: {
   messageId: string;
   attachmentId: string;
@@ -331,6 +347,132 @@ async function extractPDFAttachments(
   return attachments;
 }
 
+// ============================================================================
+// HTML Body Extraction
+// ============================================================================
+
+/**
+ * Detect external references in HTML that could compromise reproducibility.
+ * Returns list of detected reference types.
+ */
+function detectExternalReferences(html: string): string[] {
+  const types: string[] = [];
+
+  // <img src="http(s)://..."> (skip data: URIs and cid: references)
+  if (/<img[^>]+src\s*=\s*["']https?:\/\//i.test(html)) {
+    types.push('img');
+  }
+
+  // <link href="http(s)://..."> (external stylesheets)
+  if (/<link[^>]+href\s*=\s*["']https?:\/\//i.test(html)) {
+    types.push('link');
+  }
+
+  // @import url("http(s)://...")
+  if (/@import\s+(?:url\s*\()?["']?https?:\/\//i.test(html)) {
+    types.push('import');
+  }
+
+  // <script src="..."> (should never be trusted)
+  if (/<script[^>]+src\s*=\s*["']/i.test(html)) {
+    types.push('script');
+  }
+
+  return types;
+}
+
+/**
+ * Strip HTML tags to extract plain text for AI classification.
+ * Preserves structural whitespace from block elements.
+ */
+export function stripHtmlTags(html: string): string {
+  return html
+    // Remove script/style blocks entirely
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    // Block elements → newline
+    .replace(/<\/(p|div|tr|li|h[1-6]|br\s*\/?)>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    // Remove remaining tags
+    .replace(/<[^>]+>/g, '')
+    // Decode common HTML entities
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&yen;/g, '¥')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#\d+;/g, '')
+    // Collapse whitespace
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * Extract HTML and plain text bodies from a Gmail message.
+ * Walks MIME multipart tree to find text/html and text/plain parts.
+ */
+function extractHtmlBody(message: GmailMessage): GmailHtmlBody | null {
+  let htmlContent: string | null = null;
+  let plainContent: string | null = null;
+
+  const processPart = (part: MessagePart): void => {
+    const mimeType = (part.mimeType || '').toLowerCase();
+
+    if (mimeType === 'text/html' && part.body?.data && !htmlContent) {
+      const decoded = decodeBase64UrlToUint8Array(part.body.data);
+      htmlContent = new TextDecoder().decode(decoded);
+    }
+
+    if (mimeType === 'text/plain' && part.body?.data && !plainContent) {
+      const decoded = decodeBase64UrlToUint8Array(part.body.data);
+      plainContent = new TextDecoder().decode(decoded);
+    }
+
+    if (part.parts) {
+      for (const subPart of part.parts) {
+        processPart(subPart);
+      }
+    }
+  };
+
+  // Check top-level payload body
+  if (message.payload) {
+    const topMime = (message.payload.mimeType || '').toLowerCase();
+    if (topMime === 'text/html' && message.payload.body?.data) {
+      const decoded = decodeBase64UrlToUint8Array(message.payload.body.data);
+      htmlContent = new TextDecoder().decode(decoded);
+    }
+    if (topMime === 'text/plain' && message.payload.body?.data) {
+      const decoded = decodeBase64UrlToUint8Array(message.payload.body.data);
+      plainContent = new TextDecoder().decode(decoded);
+    }
+
+    // Walk multipart tree
+    if (message.payload.parts) {
+      for (const part of message.payload.parts) {
+        processPart(part);
+      }
+    }
+  }
+
+  if (!htmlContent && !plainContent) {
+    return null;
+  }
+
+  const html = htmlContent || '';
+  const externalRefTypes = html ? detectExternalReferences(html) : [];
+
+  return {
+    html,
+    plainText: plainContent,
+    hasExternalReferences: externalRefTypes.length > 0,
+    externalRefTypes,
+  };
+}
+
 /**
  * Extract email metadata.
  */
@@ -375,7 +517,7 @@ export async function fetchReceiptEmails(
   } = {}
 ): Promise<GmailReceiptEmail[]> {
   const { clientId, clientSecret, refreshToken } = config;
-  const { query: customQuery, maxResults = 10, newerThan = '1d', shouldDownloadAttachment } = options;
+  const { query: customQuery, maxResults = 10, newerThan = '2h', shouldDownloadAttachment } = options;
 
   // Refresh access token
   const accessToken = await refreshAccessToken(clientId, clientSecret, refreshToken);
@@ -413,6 +555,71 @@ export async function fetchReceiptEmails(
       }
     } catch (error) {
       console.error(`Failed to process message ${ref.id}:`, error);
+    }
+  }
+
+  return emails;
+}
+
+/**
+ * Fetch recent HTML receipt emails (no PDF attachment required).
+ * Only fetches from an explicit sender allowlist for safety.
+ *
+ * @param config - OAuth credentials
+ * @param options - Search options including sender allowlist
+ * @returns Array of emails with HTML bodies
+ */
+export async function fetchHtmlReceiptEmails(
+  config: {
+    clientId: string;
+    clientSecret: string;
+    refreshToken: string;
+  },
+  options: {
+    senderAllowlist: string[];   // Required: only fetch from these senders
+    maxResults?: number;
+    newerThan?: string;
+  }
+): Promise<GmailHtmlReceiptEmail[]> {
+  const { clientId, clientSecret, refreshToken } = config;
+  const { senderAllowlist, maxResults = 10, newerThan = '2h' } = options;
+
+  if (senderAllowlist.length === 0) {
+    return [];
+  }
+
+  const accessToken = await refreshAccessToken(clientId, clientSecret, refreshToken);
+
+  // Build query: sender allowlist + receipt keywords, explicitly exclude PDF-attached emails
+  // to avoid double-processing with fetchReceiptEmails().
+  const senderFilter = senderAllowlist.map(s => `from:${s}`).join(' OR ');
+  const subjectFilter = '(subject:receipt OR subject:invoice OR subject:billing OR subject:payment OR subject:領収 OR subject:請求)';
+  const query = `(${senderFilter}) ${subjectFilter} -has:attachment newer_than:${newerThan}`;
+
+  const messageRefs = await searchMessages(accessToken, query, maxResults);
+
+  if (messageRefs.length === 0) {
+    return [];
+  }
+
+  const emails: GmailHtmlReceiptEmail[] = [];
+
+  for (const ref of messageRefs) {
+    try {
+      const message = await getMessage(accessToken, ref.id);
+      const htmlBody = extractHtmlBody(message);
+
+      if (htmlBody && (htmlBody.html || htmlBody.plainText)) {
+        const metadata = extractMetadata(message);
+        emails.push({
+          messageId: message.id,
+          threadId: message.threadId,
+          ...metadata,
+          htmlBody,
+        });
+      }
+    } catch (error) {
+      console.error(`Failed to process HTML message ${ref.id}:`, error);
     }
   }
 

@@ -94,12 +94,10 @@ index_name = "obsidian-knowledge"
 [triggers]
 # Cloudflare cron triggers are limited to 5 per worker on Free plan.
 # All 5 slots allocated:
-#   1. */15 * * * *  - Gmail polling + Limitless sync + optional poller
+#   1. 0 * * * *     - Hourly: Gmail polling + Limitless sync + PHI verification (h%6==0) + subscription cleanup (h==2)
 #   2. 0 21 * * *    - Daily action check (6AM JST)
 #   3. 0 0 * * SUN   - Weekly digest (Sun 9AM JST)
-#   4. 0 */6 * * *   - PHI verification batch (Phase 6.2)
-#   5. 0 2 * * *     - Push subscription cleanup (11AM JST)
-crons = ["*/15 * * * *", "0 21 * * *", "0 0 * * SUN", "0 */6 * * *", "0 2 * * *"]
+crons = ["0 * * * *", "0 21 * * *", "0 0 * * SUN"]
 
 # Environment variables
 [vars]
@@ -112,13 +110,16 @@ LIMITLESS_SYNC_INTERVAL_HOURS = "1"
 FEATURE_HIGHLIGHTS_ENABLED = "true"
 # Cron mode: when true, scheduled handler will run Gmail polling only (skip Limitless backup sync).
 SCHEDULED_GMAIL_ONLY = "false"
-# Receipt PDF text extraction (unpdf) - default OFF
-PDF_TEXT_EXTRACTION_ENABLED = "false"
-PDF_TEXT_EXTRACTION_SAMPLE_RATE = "0"
+# HTML receipt processing (Phase 2)
+GMAIL_HTML_RECEIPTS_ENABLED = "false"
+GMAIL_HTML_RECEIPT_SENDERS = ""
+# Receipt PDF text extraction (unpdf)
+PDF_TEXT_EXTRACTION_ENABLED = "true"
+PDF_TEXT_EXTRACTION_SAMPLE_RATE = "1"
 PDF_TEXT_EXTRACTION_MAX_PAGES = "50"
 PDF_TEXT_EXTRACTION_MAX_BYTES = "10485760"
 PDF_TEXT_EXTRACTION_MAX_CHARS = "8000"
-PDF_TEXT_EXTRACTION_USE_FOR_CLASSIFICATION = "false"
+PDF_TEXT_EXTRACTION_USE_FOR_CLASSIFICATION = "true"
 # freee integration (enabled by default in code; explicitly set for clarity)
 FREEE_INTEGRATION_ENABLED = "true"
 # freee API Base URL
@@ -153,12 +154,14 @@ LIMITLESS_SYNC_INTERVAL_HOURS = "1"
 FREEE_BASE_URL = "https://api.freee.co.jp/api/1"
 FREEE_INTEGRATION_ENABLED = "false"
 SCHEDULED_GMAIL_ONLY = "false"
-PDF_TEXT_EXTRACTION_ENABLED = "false"
-PDF_TEXT_EXTRACTION_SAMPLE_RATE = "0"
+GMAIL_HTML_RECEIPTS_ENABLED = "false"
+GMAIL_HTML_RECEIPT_SENDERS = ""
+PDF_TEXT_EXTRACTION_ENABLED = "true"
+PDF_TEXT_EXTRACTION_SAMPLE_RATE = "1"
 PDF_TEXT_EXTRACTION_MAX_PAGES = "50"
 PDF_TEXT_EXTRACTION_MAX_BYTES = "10485760"
 PDF_TEXT_EXTRACTION_MAX_CHARS = "8000"
-PDF_TEXT_EXTRACTION_USE_FOR_CLASSIFICATION = "false"
+PDF_TEXT_EXTRACTION_USE_FOR_CLASSIFICATION = "true"
 
 [env.canary.ai]
 binding = "AI"
@@ -225,12 +228,14 @@ LIMITLESS_USER_ID = "masayuki"
 LIMITLESS_SYNC_INTERVAL_HOURS = "1"
 FEATURE_HIGHLIGHTS_ENABLED = "true"
 SCHEDULED_GMAIL_ONLY = "true"
-PDF_TEXT_EXTRACTION_ENABLED = "false"
-PDF_TEXT_EXTRACTION_SAMPLE_RATE = "0"
+GMAIL_HTML_RECEIPTS_ENABLED = "false"
+GMAIL_HTML_RECEIPT_SENDERS = ""
+PDF_TEXT_EXTRACTION_ENABLED = "true"
+PDF_TEXT_EXTRACTION_SAMPLE_RATE = "1"
 PDF_TEXT_EXTRACTION_MAX_PAGES = "50"
 PDF_TEXT_EXTRACTION_MAX_BYTES = "10485760"
 PDF_TEXT_EXTRACTION_MAX_CHARS = "8000"
-PDF_TEXT_EXTRACTION_USE_FOR_CLASSIFICATION = "false"
+PDF_TEXT_EXTRACTION_USE_FOR_CLASSIFICATION = "true"
 FREEE_BASE_URL = "https://api.freee.co.jp/api/1"
 FREEE_INTEGRATION_ENABLED = "false"
 CF_ACCESS_TEAM = "masa-stage1"

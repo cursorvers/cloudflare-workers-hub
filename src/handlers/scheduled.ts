@@ -2,11 +2,9 @@
  * Scheduled Handler for Cron Triggers
  *
  * Dispatches to the appropriate handler based on cron expression:
- * - "0 * * * *"    → Hourly Limitless.ai sync (backup)
+ * - "0 * * * *"    → Hourly: Gmail polling + Limitless sync + PHI verification (h%6) + subscription cleanup (h==2)
  * - "0 21 * * *"   → Daily action item check (6AM JST)
  * - "0 0 * * SUN"  → Weekly digest generation (Sunday 9AM JST)
- * - "0 0 1 * *"    → Monthly digest generation (1st of month, 9AM JST)
- * - "0 0 2 1 *"    → Annual digest generation (Jan 2nd, 9AM JST)
  */
 
 import { Env } from '../types';
@@ -27,12 +25,9 @@ import { handleGmailReceiptPolling } from './receipt-gmail-poller';
 // Cron Expression Constants
 // ============================================================================
 
-const CRON_15MIN_MULTI = '*/15 * * * *'; // Every 15min (Gmail polling + hourly Limitless sync)
-const CRON_HOURLY_BACKUP = '0 * * * *'; // Backward compatible: legacy hourly Limitless sync
+const CRON_HOURLY = '0 * * * *'; // Hourly: Gmail polling + Limitless sync + time-based sub-jobs
 const CRON_DAILY_ACTIONS = '0 21 * * *';   // 21:00 UTC = 06:00 JST
 const CRON_WEEKLY_DIGEST = '0 0 * * SUN';  // Sun 00:00 UTC = Sun 09:00 JST
-const CRON_PHI_VERIFICATION = '0 */6 * * *'; // Every 6 hours (Phase 6.2)
-const CRON_SUBSCRIPTION_CLEANUP = '0 2 * * *'; // 02:00 UTC = 11:00 JST (daily cleanup)
 
 // ============================================================================
 // Distributed Lock Helpers
@@ -128,54 +123,46 @@ export async function handleScheduled(
   }
 
   switch (controller.cron) {
-    case CRON_15MIN_MULTI:
-      // IMPORTANT: Cloudflare Workers have a limited subrequest budget per invocation.
-      // To avoid budget exhaustion, do NOT run all heavy jobs concurrently at minute 0.
-      //
-      // Schedule within the 15-min cron:
-      // - :00 (hourly): Limitless backup sync only (highest priority)
-      // - :15/:30/:45: Gmail polling
-      // - :45: daemon health check (optional)
-      // - Poller: opt-in via env.LIMITLESS_POLLER_ENABLED=true, runs at :30
-      const minute = scheduledTime.getUTCMinutes();
-
-      // Production-safe mode: run Gmail polling only, skip all other work.
-      // This avoids unexpected background jobs when only Gmail automation is desired.
+    case CRON_HOURLY:
+      // Hourly: Gmail polling + Limitless sync + optional jobs.
+      // Gmail poller already does its own locking; no double-lock needed.
       if (env.SCHEDULED_GMAIL_ONLY === 'true') {
-        // Gmail poller already does its own locking.
-        // Avoid double-locking here to reduce KV ops (important under KV quotas).
         await handleGmailReceiptPolling(env);
         return;
       }
 
-      // Hourly: backup sync only
-      if (minute === 0) {
-        await handleLimitlessSync(env);
-        return;
-      }
-
-      // Gmail polling (not on :00)
-      // Gmail poller already does its own locking.
+      // Run Gmail polling first (primary purpose of this cron).
       await handleGmailReceiptPolling(env);
 
+      // Limitless backup sync (secondary).
+      await handleLimitlessSync(env);
+
       // Optional: daemon health check
-      if (minute === 45 && env.DAEMON_HEALTH_CRON_ENABLED === 'true') {
-        if (cache) {
-          await handleDaemonHealthCheck(env, withLock);
-        }
+      if (env.DAEMON_HEALTH_CRON_ENABLED === 'true' && cache) {
+        await handleDaemonHealthCheck(env, withLock);
       }
 
       // Optional: Limitless poller (disabled by default)
-      if (minute === 30 && env.LIMITLESS_POLLER_ENABLED === 'true') {
+      if (env.LIMITLESS_POLLER_ENABLED === 'true') {
         await handleLimitlessPollerCron(env).catch((error) => {
           safeLog.error('[Scheduled] Limitless poller failed', { error: String(error) });
         });
       }
-      return;
 
-    case CRON_HOURLY_BACKUP:
-      // Legacy hourly backup: keep it lean.
-      await handleLimitlessSync(env);
+      // Sub-jobs: time-gated within hourly cron (saves cron slots)
+      {
+        const hour = scheduledTime.getUTCHours();
+
+        // PHI verification: every 6 hours (0, 6, 12, 18 UTC)
+        if (hour % 6 === 0) {
+          await handlePhiVerificationCron(env);
+        }
+
+        // Subscription cleanup: daily at 02:00 UTC (11:00 JST)
+        if (hour === 2 && cache) {
+          await handleSubscriptionCleanup(env, withLock);
+        }
+      }
       return;
 
     case CRON_DAILY_ACTIONS:
@@ -183,12 +170,6 @@ export async function handleScheduled(
 
     case CRON_WEEKLY_DIGEST:
       return handleWeeklyDigest(env, withLock);
-
-    case CRON_PHI_VERIFICATION:
-      return handlePhiVerificationCron(env);
-
-    case CRON_SUBSCRIPTION_CLEANUP:
-      return handleSubscriptionCleanup(env, withLock);
 
     default:
       safeLog.warn('[Scheduled] Unknown cron expression', { cron: controller.cron });

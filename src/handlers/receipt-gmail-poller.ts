@@ -14,8 +14,11 @@ import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import {
   fetchReceiptEmails,
+  fetchHtmlReceiptEmails,
+  stripHtmlTags,
   type GmailReceiptEmail,
   type GmailReceiptAttachment,
+  type GmailHtmlReceiptEmail,
   type ShouldDownloadAttachment,
 } from '../services/gmail-receipt-client';
 import { classifyReceipt } from '../services/ai-receipt-classifier';
@@ -107,6 +110,43 @@ async function calculateSha256(data: ArrayBuffer | ArrayBufferView): Promise<str
     .join('');
 }
 
+/**
+ * Parse RFC 2822 From header to extract display name.
+ * "Billing <billing@cloudflare.com>" → "Billing"
+ * "billing@cloudflare.com" → "cloudflare.com"
+ * "<billing@cloudflare.com>" → "cloudflare.com"
+ */
+function normalizeVendorFromEmail(rawFrom: string): string {
+  const trimmed = rawFrom.trim();
+
+  // "Display Name <email@domain>" format
+  const angleMatch = trimmed.match(/^(.+?)\s*<[^>]+>$/);
+  if (angleMatch) {
+    const displayName = angleMatch[1].replace(/^["']|["']$/g, '').trim();
+    if (displayName.length > 0) {
+      return displayName;
+    }
+  }
+
+  // "<email@domain>" or "email@domain" — extract domain
+  const emailMatch = trimmed.match(/@([a-zA-Z0-9.-]+)/);
+  if (emailMatch) {
+    const domain = emailMatch[1];
+    // Strip common TLDs to get company name: "cloudflare.com" → "cloudflare"
+    const parts = domain.split('.');
+    if (parts.length >= 2) {
+      return parts.slice(0, -1).join('.');
+    }
+    return domain;
+  }
+
+  return trimmed || 'Unknown';
+}
+
+function isEmailLikeVendor(vendor: string): boolean {
+  return /@/.test(vendor) || /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(vendor);
+}
+
 function isRateLimitError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /429|rate limit|too many requests|quota/i.test(message);
@@ -196,7 +236,7 @@ async function processAttachment(
   freeeClient: ReturnType<typeof createFreeeClient>,
   email: GmailReceiptEmail,
   attachment: GmailReceiptAttachment,
-  metrics: { processed: number; skipped: number; failed: number },
+  metrics: { processed: number; skipped: number; failed: number; dealsCreated: number },
   pdfTextMetrics: {
     attempted: number;
     extracted: number;
@@ -228,7 +268,7 @@ async function processAttachment(
   }
 
   const fallbackDate = toIsoDate(email.date);
-  const fallbackVendor = email.from || 'Unknown';
+  const fallbackVendor = normalizeVendorFromEmail(email.from || 'Unknown');
 
   let workflow: ReturnType<typeof createStateMachine> | null = null;
 
@@ -370,13 +410,42 @@ async function processAttachment(
       };
     }
 
+    // Normalize vendor name: if AI returned an email-like string, extract display name
+    const rawVendor = classificationResult.vendor_name || fallbackVendor;
+    const normalizedVendor = isEmailLikeVendor(rawVendor)
+      ? normalizeVendorFromEmail(rawVendor)
+      : rawVendor;
+
+    const roundedAmount = Number.isFinite(classificationResult.amount)
+      ? Math.round(classificationResult.amount)
+      : 0;
+
+    // Output validation: low-quality results get reduced confidence
+    const vendorWasEmail = isEmailLikeVendor(rawVendor);
+    const amountIsZero = roundedAmount === 0;
+    const hasQualityIssue = vendorWasEmail || amountIsZero;
+    const adjustedConfidence = hasQualityIssue
+      ? Math.min(classificationResult.confidence, 0.3)
+      : classificationResult.confidence;
+
+    if (hasQualityIssue) {
+      safeLog.warn('[Gmail Poller] Classification quality issue detected', {
+        receiptId,
+        vendorWasEmail,
+        amountIsZero,
+        rawVendor,
+        normalizedVendor,
+        originalConfidence: classificationResult.confidence,
+        adjustedConfidence,
+      });
+    }
+
     classificationResult = {
       ...classificationResult,
       transaction_date: classificationResult.transaction_date || fallbackDate,
-      vendor_name: classificationResult.vendor_name || fallbackVendor,
-      amount: Number.isFinite(classificationResult.amount)
-        ? Math.round(classificationResult.amount)
-        : 0,
+      vendor_name: normalizedVendor,
+      amount: roundedAmount,
+      confidence: adjustedConfidence,
     };
 
     await env.DB!.prepare(
@@ -629,6 +698,239 @@ async function processAttachment(
   }
 }
 
+// ============================================================================
+// HTML Receipt Processing
+// ============================================================================
+
+function htmlProcessedKey(messageId: string): string {
+  return `gmail:html_processed:${messageId}`;
+}
+
+async function processHtmlReceipt(
+  env: Env,
+  bucket: R2Bucket,
+  freeeClient: ReturnType<typeof createFreeeClient>,
+  email: GmailHtmlReceiptEmail,
+  metrics: { processed: number; skipped: number; failed: number; dealsCreated: number }
+): Promise<void> {
+  const receiptId = crypto.randomUUID().replace(/-/g, '');
+  const textContent = email.htmlBody.plainText || stripHtmlTags(email.htmlBody.html);
+  const htmlBytes = new TextEncoder().encode(email.htmlBody.html);
+  const fileHash = await calculateSha256(htmlBytes);
+  const r2Key = `receipts/${DEFAULT_TENANT_ID}/${receiptId}/receipt.html`;
+  const retentionUntil = addYears(new Date(), RETENTION_YEARS);
+  const idempotencyKey = `gmail:html:${email.messageId}`;
+
+  // Dedup by content hash
+  const duplicateId = await hasDuplicateHash(env, fileHash);
+  if (duplicateId) {
+    safeLog.warn('[Gmail Poller] Duplicate HTML receipt detected, skipping', {
+      receiptId: duplicateId,
+      fileHash,
+      messageId: email.messageId,
+    });
+    metrics.skipped += 1;
+    return;
+  }
+
+  const fallbackDate = toIsoDate(email.date);
+  const fallbackVendor = normalizeVendorFromEmail(email.from || 'Unknown');
+
+  let workflow: ReturnType<typeof createStateMachine> | null = null;
+
+  try {
+    await env.DB!.prepare(
+      `INSERT INTO receipts (
+        id, file_hash, r2_object_key, transaction_date, vendor_name,
+        amount, currency, document_type, classification_method,
+        classification_confidence, status, retention_until, tenant_id, source_type
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        receiptId, fileHash, r2Key, fallbackDate, fallbackVendor,
+        0, 'JPY', 'other', 'ai_assisted',
+        0, 'pending_validation', retentionUntil, DEFAULT_TENANT_ID, 'html_body'
+      )
+      .run();
+
+    workflow = createStateMachine(env, receiptId);
+    await workflow.transition('validated', {
+      source: 'gmail_html_poll',
+      messageId: email.messageId,
+    });
+
+    // Classify using stripped text
+    const classificationText = [
+      `Subject: ${email.subject}`,
+      `From: ${email.from}`,
+      `Date: ${email.date.toISOString()}`,
+      `Source: HTML email body`,
+      '',
+      'Email Body (text):',
+      '---BEGIN EMAIL TEXT---',
+      textContent.slice(0, 8000),
+      '---END EMAIL TEXT---',
+    ].join('\n');
+
+    let classificationResult: ClassificationResult;
+    try {
+      classificationResult = await classifyReceipt(env, classificationText, {
+        tenantId: DEFAULT_TENANT_ID,
+        source: 'gmail_html',
+        subject: email.subject,
+        from: email.from,
+      });
+    } catch (classificationError) {
+      safeLog.warn('[Gmail Poller] HTML classification failed, using fallback', {
+        receiptId,
+        messageId: email.messageId,
+        error: classificationError instanceof Error ? classificationError.message : String(classificationError),
+      });
+      classificationResult = {
+        document_type: 'other',
+        vendor_name: fallbackVendor,
+        amount: 0,
+        currency: 'JPY',
+        transaction_date: fallbackDate,
+        account_category: undefined,
+        tax_type: undefined,
+        department: undefined,
+        confidence: 0,
+        method: 'ai_assisted',
+        cache_hit: false,
+      };
+    }
+
+    // Normalize & validate (same as PDF path)
+    const rawVendor = classificationResult.vendor_name || fallbackVendor;
+    const normalizedVendor = isEmailLikeVendor(rawVendor)
+      ? normalizeVendorFromEmail(rawVendor)
+      : rawVendor;
+    const roundedAmount = Number.isFinite(classificationResult.amount)
+      ? Math.round(classificationResult.amount)
+      : 0;
+    const hasQualityIssue = isEmailLikeVendor(rawVendor) || roundedAmount === 0;
+    const adjustedConfidence = hasQualityIssue
+      ? Math.min(classificationResult.confidence, 0.3)
+      : classificationResult.confidence;
+
+    classificationResult = {
+      ...classificationResult,
+      transaction_date: classificationResult.transaction_date || fallbackDate,
+      vendor_name: normalizedVendor,
+      amount: roundedAmount,
+      confidence: adjustedConfidence,
+    };
+
+    await env.DB!.prepare(
+      `UPDATE receipts SET
+        transaction_date = ?, vendor_name = ?, amount = ?,
+        currency = ?, document_type = ?, account_category = ?,
+        tax_type = ?, department = ?, classification_method = ?,
+        classification_confidence = ?
+      WHERE id = ?`
+    )
+      .bind(
+        classificationResult.transaction_date,
+        classificationResult.vendor_name,
+        classificationResult.amount,
+        classificationResult.currency || 'JPY',
+        classificationResult.document_type || 'other',
+        classificationResult.account_category || null,
+        classificationResult.tax_type || null,
+        classificationResult.department || null,
+        classificationResult.method,
+        classificationResult.confidence,
+        receiptId
+      )
+      .run();
+
+    await workflow.transition('classified', {
+      method: classificationResult.method,
+      confidence: classificationResult.confidence,
+    });
+    await workflow.transition('extracting', { note: 'HTML body - no OCR needed' });
+    await workflow.transition('extracted', { note: 'HTML body - no OCR needed' });
+    await workflow.transition('uploading_r2', { r2Key });
+
+    // Store HTML in R2 with Content-Disposition: attachment (security)
+    await bucket.put(r2Key, htmlBytes, {
+      httpMetadata: {
+        contentType: 'text/html',
+        contentDisposition: 'attachment; filename="receipt.html"',
+      },
+      customMetadata: {
+        fileHash,
+        messageId: email.messageId,
+        retentionUntil,
+        tenantId: DEFAULT_TENANT_ID,
+        worm: 'true',
+        hasExternalReferences: String(email.htmlBody.hasExternalReferences),
+      },
+      onlyIf: { etagDoesNotMatch: '*' },
+    });
+
+    await workflow.transition('uploaded_r2', { r2Key, size: htmlBytes.byteLength });
+
+    // External references → needs_review (skip freee upload for MVP)
+    if (email.htmlBody.hasExternalReferences) {
+      safeLog.info('[Gmail Poller] HTML receipt has external references, marking needs_review', {
+        receiptId,
+        externalRefTypes: email.htmlBody.externalRefTypes,
+      });
+      await workflow.transition('failed', {
+        reason: 'HTML has external references - needs manual review',
+        externalRefTypes: email.htmlBody.externalRefTypes,
+      });
+      metrics.processed += 1;
+      return;
+    }
+
+    // Submit to freee as HTML blob
+    await workflow.transition('submitting_freee', { fileName: 'receipt.html', idempotencyKey });
+
+    const fileBlob = new Blob([htmlBytes], { type: 'text/html' });
+    const freeeResult = await freeeClient.uploadReceipt(fileBlob, 'receipt.html', idempotencyKey);
+
+    await workflow.complete(String(freeeResult.receipt.id));
+
+    // Mark as processed
+    if (env.CACHE) {
+      try {
+        await env.CACHE.put(htmlProcessedKey(email.messageId), '1', {
+          expirationTtl: 60 * 60 * 24 * 30,
+        });
+      } catch {
+        // best-effort
+      }
+    }
+
+    safeLog.info('[Gmail Poller] HTML receipt processed', {
+      receiptId,
+      freeeReceiptId: freeeResult.receipt.id,
+      messageId: email.messageId,
+    });
+    metrics.processed += 1;
+  } catch (error) {
+    metrics.failed += 1;
+    const message = error instanceof Error ? error.message : String(error);
+    safeLog.error('[Gmail Poller] Failed to process HTML receipt', {
+      receiptId,
+      messageId: email.messageId,
+      error: message,
+    });
+
+    if (workflow) {
+      try {
+        await workflow.recordError(message, 'HTML_POLL_FAILED', { messageId: email.messageId });
+        await workflow.transition('failed', { reason: message });
+      } catch {
+        // best-effort
+      }
+    }
+  }
+}
+
 export async function handleGmailReceiptPolling(env: Env): Promise<void> {
   if (!env.DB) {
     safeLog.warn('[Gmail Poller] DB not configured, skipping');
@@ -670,19 +972,15 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
     safeLog.info('[Gmail Poller] Starting Gmail receipt polling');
 
     let emails: GmailReceiptEmail[] = [];
-    try {
+    const buildShouldDownload = (): { shouldDownloadAttachment: ShouldDownloadAttachment; } => {
       let cacheReadFailed = false;
-      emails = await fetchReceiptEmailsWithRetry(env, {
-        maxResults: MAX_RESULTS,
-        newerThan: '1d',
-        // Avoid re-downloading already-processed attachments.
+      return {
         shouldDownloadAttachment: async ({ messageId, attachmentId }) => {
           if (!env.CACHE) return true;
           try {
             const existing = await env.CACHE.get(processedAttachmentKey(messageId, attachmentId));
             return !existing;
           } catch (error) {
-            // Fail-open: if KV is rate-limited or quota exceeded, download and rely on D1 idempotency.
             if (!cacheReadFailed) {
               cacheReadFailed = true;
               safeLog.warn('[Gmail Poller] CACHE read failed (will download anyway)', {
@@ -692,12 +990,32 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
             return true;
           }
         },
+      };
+    };
+
+    try {
+      emails = await fetchReceiptEmailsWithRetry(env, {
+        maxResults: MAX_RESULTS,
+        newerThan: '2h',
+        ...buildShouldDownload(),
       });
     } catch (error) {
-      safeLog.error('[Gmail Poller] Failed to fetch Gmail receipts', {
+      safeLog.warn('[Gmail Poller] Initial fetch failed, retrying with 24h window', {
         error: error instanceof Error ? error.message : String(error),
       });
-      return;
+      // Catch-up: widen the search window to recover missed emails after outage.
+      try {
+        emails = await fetchReceiptEmailsWithRetry(env, {
+          maxResults: MAX_RESULTS,
+          newerThan: '24h',
+          ...buildShouldDownload(),
+        });
+      } catch (retryError) {
+        safeLog.error('[Gmail Poller] Failed to fetch Gmail receipts (catch-up also failed)', {
+          error: retryError instanceof Error ? retryError.message : String(retryError),
+        });
+        return;
+      }
     }
 
     if (emails.length === 0) {
@@ -723,6 +1041,60 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
       }
     }
 
+    // Phase 2: HTML receipt polling (feature-flagged)
+    let htmlMetrics = { processed: 0, skipped: 0, failed: 0 };
+    if (env.GMAIL_HTML_RECEIPTS_ENABLED === 'true') {
+      const senderAllowlist = (env.GMAIL_HTML_RECEIPT_SENDERS || '')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+
+      if (senderAllowlist.length > 0) {
+        let htmlEmails: GmailHtmlReceiptEmail[] = [];
+        try {
+          htmlEmails = await fetchHtmlReceiptEmails(
+            {
+              clientId: env.GMAIL_CLIENT_ID!,
+              clientSecret: env.GMAIL_CLIENT_SECRET!,
+              refreshToken: env.GMAIL_REFRESH_TOKEN!,
+            },
+            { senderAllowlist, maxResults: 10, newerThan: '2h' }
+          );
+        } catch (error) {
+          safeLog.error('[Gmail Poller] HTML receipt fetch failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+
+        // Filter already-processed HTML emails
+        const unprocessed: GmailHtmlReceiptEmail[] = [];
+        for (const htmlEmail of htmlEmails) {
+          if (env.CACHE) {
+            try {
+              const existing = await env.CACHE.get(htmlProcessedKey(htmlEmail.messageId));
+              if (existing) {
+                htmlMetrics.skipped += 1;
+                continue;
+              }
+            } catch {
+              // fail-open
+            }
+          }
+          unprocessed.push(htmlEmail);
+        }
+
+        const htmlDealMetrics = { ...metrics }; // Share deal counter with PDF path
+        for (const htmlEmail of unprocessed) {
+          await processHtmlReceipt(env, bucket, freeeClient, htmlEmail, htmlDealMetrics);
+        }
+        htmlMetrics = {
+          processed: htmlDealMetrics.processed - metrics.processed,
+          skipped: htmlMetrics.skipped + (htmlDealMetrics.skipped - metrics.skipped),
+          failed: htmlDealMetrics.failed - metrics.failed,
+        };
+      }
+    }
+
     const pdfExtractionEnabled = env.PDF_TEXT_EXTRACTION_ENABLED === 'true';
 
     safeLog.info('[Gmail Poller] Polling completed', {
@@ -739,6 +1111,13 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
             pdfTextNotAttempted: pdfTextMetrics.notAttempted,
             pdfTextTotalElapsedMs: pdfTextMetrics.totalElapsedMs,
             pdfTextReasons: pdfTextMetrics.reasons,
+          }
+        : {}),
+      ...(env.GMAIL_HTML_RECEIPTS_ENABLED === 'true'
+        ? {
+            htmlProcessed: htmlMetrics.processed,
+            htmlSkipped: htmlMetrics.skipped,
+            htmlFailed: htmlMetrics.failed,
           }
         : {}),
       durationMs: Date.now() - startTime,

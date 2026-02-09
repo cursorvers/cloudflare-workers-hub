@@ -3,6 +3,73 @@
 ## 概要
 **MVP 完成: 82% (2026-01-29)** - 保守モード移行
 **Limitless Phase 5 デプロイ完了 (2026-02-03)** - 協調的振り返りシステム稼働中
+**freee領収書システム改善 (2026-02-09)** - PSCSR 3周完了、実装待ち
+
+---
+
+# freee 領収書 Gmail ポーラー改善計画
+
+> **PSCSR 3周完了 (2026-02-09)**: Codex architect + GLM code-reviewer + Codex security-analyst による合議
+
+## 診断結果
+- Cron (`*/15 * * * *`) は**正常稼働**（wrangler tailで確認済み）
+- Gmail APIクエリ成功、`No receipt emails found` で正常終了
+- **根本原因**: `has:attachment filename:pdf` フィルタがHTML領収書（Obsidian等）を除外
+- **既存データ品質問題**: 全22件 amount=0、vendor_name にメールアドレス混入、freee_deal_id 全件null
+
+## Phase 0: Cron変更 ✅ (2026-02-09)
+- [x] `wrangler.toml`: `*/15 * * * *` → `0 * * * *` (毎時)
+- [x] `src/handlers/scheduled.ts`: hourly dispatcher に再設計（`CRON_HOURLY`統合、分岐廃止）
+- [x] `gmail-receipt-client.ts`: `newerThan` デフォルト `1d` → `2h` に変更
+- [x] `receipt-gmail-poller.ts`: `newerThan: '2h'` + エラー時 `24h` フォールバックキャッチアップ
+- [x] **CRITICAL FIX**: dispatcher修正（旧コードでは`0 * * * *`がLimitless syncのみ→Gmail polling停止していた）
+
+## Phase 1: AI分類器修復 ✅ (2026-02-09)
+- [x] `unpdf` 調査: 意図的にdisabled-by-default設計。無効化コミットなし
+- [x] `PDF_TEXT_EXTRACTION_ENABLED=true` + `SAMPLE_RATE=1` + `USE_FOR_CLASSIFICATION=true` (全3環境)
+- [x] vendor_name 正規化: RFC 2822 From header解析 (`"Billing <a@b.com>"` → `"Billing"`, `a@b.com` → `b`)
+- [x] 出力バリデーション: amount=0 or email-like vendor → confidence上限0.3に制限 + ログ警告
+- [x] 既存 `dealsCreated` 型エラー修正（metricsシグネチャ）
+- [ ] 回帰テスト: fixture data でamount/vendor抽出を検証 (DEFERRED)
+- [ ] (DEFERRED) 既存22件のバックフィル（再分類のみ、deal作成は別バッチ）
+
+## Phase 2: HTML領収書対応 ✅ (2026-02-09)
+- [x] D1 migration `0024_add_receipt_source_type.sql`: `source_type` カラム追加
+- [x] types.ts: `GMAIL_HTML_RECEIPTS_ENABLED`, `GMAIL_HTML_RECEIPT_SENDERS` env追加
+- [x] wrangler.toml: feature flag追加 (全3環境、デフォルト disabled)
+- [x] gmail-receipt-client.ts:
+  - `GmailHtmlBody`, `GmailHtmlReceiptEmail` 型定義
+  - `extractHtmlBody()`: MIME multipart走査でtext/html + text/plain抽出
+  - `detectExternalReferences()`: img/link/@import/script検出
+  - `stripHtmlTags()`: HTML→プレーンテキスト変換（AI分類用）
+  - `fetchHtmlReceiptEmails()`: sender allowlist必須、`-has:attachment`で重複排除
+- [x] receipt-gmail-poller.ts:
+  - `processHtmlReceipt()`: HTML→AI分類→R2 WORM保存→freeeアップロード
+  - 外部参照あり → `needs_review`（freeeスキップ）
+  - dedup: `file_hash = sha256(html_body)` + KV `html_processed:{messageId}`
+  - R2: `Content-Disposition: attachment`（アクティブコンテンツ防止）
+  - handleGmailReceiptPolling に統合（PDF処理後にHTML処理）
+- [x] TypeScript型チェック: エラーゼロ
+
+## Phase 3: (DEFERRED) 視覚的PDF生成
+- [ ] Browser Rendering API（JS無効 + ネットワーク遮断 + サイズ制限）
+- [ ] 外部参照ありHTMLのインライン化 or スクリーンショット
+- [ ] freeeがHTMLを拒否した場合のフォールバック
+
+## セキュリティ要件 (全Phase共通)
+- JS実行禁止、外部リソース取得禁止
+- ログに生HTML本文を出さない（safeLog方針徹底）
+- R2保存時: `Content-Disposition: attachment`（アクティブコンテンツ防止）
+- PII/PHI: 既存範囲（Gmail/freee/Workers AI）から拡散させない
+
+## リスクマトリクス
+| リスク | 確率 | 影響 | 緩和策 |
+|--------|------|------|--------|
+| 誤検知（不要メール取込） | 中 | 高 | sender allowlist + subject条件厳格化 |
+| unpdf再有効化で性能劣化 | 中 | 高 | sample rate段階導入 + CPU時間監視 |
+| HTML MIME解析失敗 | 高 | 中 | multipart走査 + 失敗→needs_review |
+| freee HTML拒否 | 中 | 中 | needs_review + Phase 3でPDF化 |
+| 外部参照HTMLの再現性 | 高 | 高 | MVP: needs_review, 後: インライン化 |
 オーケストレーションレビュー結果: **8.35/10 READY** (2026-01-25)
 
 ## デプロイ情報
