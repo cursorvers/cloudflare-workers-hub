@@ -525,7 +525,7 @@ export async function fetchReceiptEmails(
   // Build search query
   // Filter for receipt/invoice emails only
   // Strategy: subject keywords + known billing senders (not broad from:noreply)
-  const subjectFilter = '(subject:receipt OR subject:invoice OR subject:billing OR subject:payment OR subject:領収 OR subject:請求 OR subject:statement)';
+  const subjectFilter = `(${RECEIPT_SUBJECT_KEYWORDS.map(kw => `subject:${kw}`).join(' OR ')})`;
   const senderFilter = '(from:billing@cloudflare.com OR from:noreply@github.com OR from:receipts@stripe.com OR from:invoices@stripe.com OR from:noreply@google.com OR from:noreply@anthropic.com OR from:noreply@x.ai OR from:noreply@vercel.com OR from:billing@heroku.com OR from:aws-billing@amazon.com OR from:cloud-noreply@google.com)';
   const query = customQuery || `has:attachment filename:pdf (${subjectFilter} OR ${senderFilter}) newer_than:${newerThan}`;
 
@@ -564,13 +564,43 @@ export async function fetchReceiptEmails(
 /**
  * Subject keywords for detecting receipt/invoice emails (broad matching).
  * Prefers false positives over false negatives.
+ * Used by both PDF attachment search and HTML body search.
  */
 const RECEIPT_SUBJECT_KEYWORDS = [
-  // Japanese
-  '領収', '請求', 'ご利用明細', 'お支払い', '注文確認', '購入', '決済',
-  // English
-  'receipt', 'invoice', 'billing', 'payment', 'statement',
-  'order confirmation', 'your order', 'purchase', 'subscription',
+  // --- Japanese ---
+  // 領収書・レシート
+  '領収', '領収書', '領収証',
+  // 請求書
+  '請求', '請求書', 'ご請求',
+  // 支払い・決済
+  'お支払い', 'お支払', '支払い完了', '決済完了', '決済',
+  'ご入金', '引き落とし', '振込', '振替',
+  // 利用明細・ご利用
+  'ご利用明細', 'ご利用', '利用明細', 'ご利用額',
+  // 注文・購入
+  '注文確認', 'ご注文', '購入', '購入完了', 'お買い上げ',
+  // サブスクリプション・定期課金
+  '月額', '年額', '定期', 'サブスクリプション', '更新', '自動更新',
+  'プラン', '契約',
+  // 見積・納品
+  '見積', '見積書', '納品書',
+
+  // --- English ---
+  // Receipt / Invoice
+  'receipt', 'invoice', 'tax invoice',
+  // Billing / Payment
+  'billing', 'payment', 'payment confirmation', 'payment received',
+  'charge', 'transaction',
+  // Statement / Summary
+  'statement', 'account statement', 'billing statement',
+  // Order / Purchase
+  'order confirmation', 'your order', 'purchase', 'purchase confirmation',
+  // Subscription
+  'subscription', 'renewal', 'plan', 'membership',
+  'your plan', 'auto-renewal',
+  // Thank you (common receipt subject pattern)
+  'thank you for your payment', 'thanks for your order',
+  'thank you for your purchase',
 ] as const;
 
 /**
