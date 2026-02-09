@@ -33,7 +33,8 @@ bindings = [
   { name = "RATE_LIMITER", class_name = "RateLimiter" },
   { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
   { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
-  { name = "SYSTEM_EVENTS", class_name = "SystemEvents" }
+  { name = "SYSTEM_EVENTS", class_name = "SystemEvents" },
+  { name = "RUN_COORDINATOR", class_name = "RunCoordinator" }
 ]
 
 # DO migration (required for first deployment, free plan requires new_sqlite_classes)
@@ -52,6 +53,10 @@ new_sqlite_classes = ["SystemEvents"]
 [[migrations]]
 tag = "v4"
 new_sqlite_classes = ["RateLimiter"]
+
+[[migrations]]
+tag = "v5"
+new_sqlite_classes = ["RunCoordinator"]
 
 # R2 bucket for audio staging and Obsidian vault (requires R2 enabled on account)
 # [[r2_buckets]]
@@ -188,7 +193,8 @@ bindings = [
   { name = "RATE_LIMITER", class_name = "RateLimiter" },
   { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
   { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
-  { name = "SYSTEM_EVENTS", class_name = "SystemEvents" }
+  { name = "SYSTEM_EVENTS", class_name = "SystemEvents" },
+  { name = "RUN_COORDINATOR", class_name = "RunCoordinator" }
 ]
 
 [env.canary.triggers]
@@ -268,7 +274,8 @@ bindings = [
   { name = "RATE_LIMITER", class_name = "RateLimiter" },
   { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
   { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
-  { name = "SYSTEM_EVENTS", class_name = "SystemEvents" }
+  { name = "SYSTEM_EVENTS", class_name = "SystemEvents" },
+  { name = "RUN_COORDINATOR", class_name = "RunCoordinator" }
 ]
 
 [[env.dev.r2_buckets]]

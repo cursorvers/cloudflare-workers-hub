@@ -20,6 +20,7 @@ export { TaskCoordinator } from './durable-objects/task-coordinator';
 export { CockpitWebSocket } from './durable-objects/cockpit-websocket';
 export { SystemEvents } from './durable-objects/system-events';
 export { RateLimiter } from './durable-objects/rate-limiter';
+export { RunCoordinator } from './durable-objects/run-coordinator';
 
 // Handlers
 import { ensureServiceRoleMappings } from './handlers/initialization';
@@ -36,6 +37,7 @@ import { handleLimitlessAPI } from './handlers/limitless-api';
 import { handleLimitlessWebhook } from './handlers/limitless-webhook';
 import { handleScheduled } from './handlers/scheduled';
 import { handleCockpitAPI } from './handlers/cockpit-api';
+import { handleOrchestrateAPI } from './handlers/orchestrate-api';
 import { handleAdvisorAPI } from './handlers/strategic-advisor-api';
 import { handleUsageAPI } from './handlers/usage-api';
 import { handleGoalPlannerAPI } from './handlers/goal-planner';
@@ -879,6 +881,19 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
       return new Response(JSON.stringify({ success: true, retried: results.length, results }), { headers: { 'Content-Type': 'application/json' } });
     }
 
+    // Backfill receipts - re-classify and create deals (admin only)
+    if (path === '/api/receipts/backfill' && request.method === 'POST') {
+      const { verifyAPIKey } = await import('./utils/api-auth');
+      if (!verifyAPIKey(request, env, 'admin')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const { handleReceiptBackfill } = await import('./handlers/receipt-backfill');
+      return handleReceiptBackfill(request, env);
+    }
+
     // Receipt Upload API endpoint (freee integration)
     if (path === '/api/receipts/upload' && request.method === 'POST') {
       return handleReceiptUpload(request, env);
@@ -989,6 +1004,11 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
         newResponse.headers.set(key, value);
       });
       return newResponse;
+    }
+
+    // Orchestration API endpoints (FUGUE persistent runs)
+    if (path.startsWith('/api/orchestrate') || path.startsWith('/api/runs') || path.startsWith('/api/approvals')) {
+      return handleOrchestrateAPI(request, env, path, ctx);
     }
 
     // Cockpit API endpoints (for FUGUE monitoring) - with CORS

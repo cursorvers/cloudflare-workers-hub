@@ -4,6 +4,105 @@
 **MVP 完成: 82% (2026-01-29)** - 保守モード移行
 **Limitless Phase 5 デプロイ完了 (2026-02-03)** - 協調的振り返りシステム稼働中
 **freee領収書システム改善 (2026-02-09)** - PSCSR 3周完了、実装待ち
+**freee感度向上・堅牢化 (2026-02-09)** - 3者合議APPROVED、Phase A-D実装開始
+
+---
+
+# freee 感度向上・堅牢化計画 (2026-02-09)
+
+> **3者合議結果**: Claude APPROVE / Codex architect APPROVE(案B) / GLM 5/7 PASSED
+> **設計方針**: 二段階しきい値（Create=広く, Auto=絞る）、感度優先
+
+## Phase A: 感度向上 (CRITICAL)
+
+### A-1: 閾値集中管理 + 二段階化
+- [ ] `src/config/confidence-thresholds.ts` 新設: 全閾値を一元定義
+  ```typescript
+  export const CONFIDENCE = {
+    MIN_CREATE: 0.25,        // Deal作成の最低閾値（needs_review）
+    MIN_AUTO: 0.50,          // 自動確定の最低閾値
+    MIN_AUTO_HIGH_AMOUNT: 0.70,  // ≥500,000 JPY
+    QUALITY_ISSUE_CAP: 0.6,  // 品質問題時のcap（旧0.3）
+    WORKERS_ESCALATE: 0.65,  // Workers AI→OpenAIエスカレーション（旧0.85）
+    SCORE_GAP_AMBIGUOUS: 0.06,
+    DECIDE_REVIEW: 0.50,     // needs_review判定（旧0.7）
+  } as const;
+  ```
+
+### A-2: amount=0 でもDeal作成
+- [ ] `receipt-gmail-poller.ts:537`: `amount > 0` ゲート撤廃
+  - amount=0 かつ amountExtracted=false → Deal作成（needs_review）
+  - amount=0 かつ amountExtracted=true → Deal作成（needs_review、0円は正当な可能性）
+- [ ] `ClassificationResult` に `amountExtracted: boolean` フラグ追加
+- [ ] AI分類器とrule-based分類器に `amountExtracted` フラグ追加
+
+### A-3: confidence cap 緩和
+- [ ] `receipt-gmail-poller.ts:427`: quality issue時のcap 0.3→0.6
+- [ ] `freee-deal-service.ts:316-317`: minAutoConfidence を二段階に分離
+
+### A-4: Rule-based分類器で金額抽出
+- [ ] `ai-receipt-classifier.ts`: Subject/Body から金額パターン抽出
+  - `¥(\d{1,3}(,\d{3})*)` / `(\d+)円` / `JPY (\d+)` パターン
+  - 日付パターン: `2026-\d{2}-\d{2}` / `\d{4}年\d{1,2}月\d{1,2}日`
+
+### A-5: HTML receipts でDeal作成
+- [ ] `processHtmlReceipt` に PDF と同じDeal作成ロジック追加
+
+## Phase B: 勘定科目ルール拡充
+
+### B-1: VENDOR_PRIORS 拡充（30+パターン）
+- [ ] `freee-account-selector.ts`: 以下カテゴリのパターン追加
+  - 通信費: AWS, DigitalOcean, Heroku, Vercel, GitHub, Microsoft, さくら, 通信各社
+  - 消耗品費: Apple, Microsoft(Office), JetBrains, Adobe, 書籍/Kindle
+  - 旅費交通費: JR, Suica, PASMO, タクシー, ANA, JAL, 航空
+  - 水道光熱費: 電気, ガス, 水道, 東京電力, 東京ガス
+  - 広告宣伝費: Meta/Facebook, X/Twitter, LinkedIn
+  - 支払手数料: PayPal, Square, 銀行
+  - 地代家賃: 不動産, 賃貸, 管理費
+  - 会議費: Zoom, Teams
+  - 外注費: ランサーズ, クラウドワークス, Upwork, Fiverr
+  - 租税公課: 税務署, 税金, 印紙
+  - 雑費: フォールバック
+
+### B-2: Rule-based classifier ルール拡充
+- [ ] `ai-receipt-classifier.ts`: 30+ベンダールール追加（B-1と同期）
+
+## Phase C: 堅牢化
+
+### C-1: 失敗通知（Discord webhook）
+- [ ] Pipeline停止アラート: 最終成功pollから6h以上で通知
+- [ ] 処理失敗アラート: failed > 0 のとき通知（メタデータのみ、PII禁止）
+- [ ] KV `receipt:last_successful_poll` に最終成功時刻を記録
+
+### C-2: Dead Letter Queue
+- [ ] D1 migration `0025_receipt_dead_letter_queue.sql`
+  ```sql
+  CREATE TABLE receipt_dlq (
+    id TEXT PRIMARY KEY,
+    receipt_id TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    source_type TEXT,
+    message_id TEXT,
+    retry_count INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    resolved_at TEXT
+  );
+  ```
+- [ ] 失敗時にDLQへINSERT（既存のworkflow.recordErrorと併用）
+
+### C-3: ヘルスチェックエンドポイント
+- [ ] `GET /api/receipt-health` → 最終poll時刻、処理件数、DLQ件数を返す
+
+## Phase D: バックフィル (手動実行)
+
+- [ ] 既存22件の再分類（新ルール適用）
+- [ ] 再分類結果でDeal作成（needs_review）
+
+## セキュリティ要件
+- Discord通知にPII/機密を含めない（メタデータのみ）
+- 閾値引き下げによる過登録リスクは needs_review ステータスで担保
+- DLQ にはerror_messageのみ（添付内容・本文は含めない）
 
 ---
 
