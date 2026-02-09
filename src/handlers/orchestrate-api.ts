@@ -39,9 +39,7 @@ import {
   createDefaultDelegationMatrix,
 } from '../services/task-pack-generator';
 import {
-  StepExecutor,
   type RunEvent,
-  type StepResult,
   type DriveAction,
   type DOResponse,
 } from '../services/step-executor';
@@ -300,42 +298,10 @@ async function decomposeAndStart(
     // Emit run:created event
     emitRunEvent(env, { event: 'run:created', run_id: runId, ts: new Date().toISOString(), data: { step_count: taskPack.steps.length, budget_usd: budgetUsd } });
 
-    // Day 4: Drive the step execution loop
-    if (firstAction) {
-      const executor = new StepExecutor({
-        llm,
-        onEvent: (evt) => emitRunEvent(env, evt),
-      });
+    // Step execution is now alarm-driven inside RunCoordinator DO.
+    // No waitUntil driveLoop needed — DO alarm picks up pending steps automatically.
 
-      const reportFn = async (seq: number, result: StepResult): Promise<DriveAction> => {
-        const res = await stub.fetch(new Request('https://do/step-complete', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
-          },
-          body: JSON.stringify({
-            seq,
-            status: result.status,
-            result: result.result,
-            error: result.error,
-            cost_usd: result.cost_usd,
-          }),
-        }));
-
-        if (!res.ok) {
-          const errText = await res.text().catch(() => 'unknown');
-          throw new Error(`DO /step-complete failed: ${res.status} ${errText.slice(0, 500)}`);
-        }
-
-        const body = (await res.json()) as DOResponse;
-        return (body.data?.action as DriveAction) ?? { action: 'run_blocked', reason: 'Invalid DO response' };
-      };
-
-      await executor.driveLoop(runId, firstAction, reportFn);
-    }
-
-    // Sync final status from DO to D1
+    // Sync initial status from DO to D1
     await syncRunStatusToD1(stub, bearerToken, db, runId);
   } catch (err) {
     safeLog.error('[Orchestrate] Decomposition failed', {
