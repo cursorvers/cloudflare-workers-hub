@@ -888,6 +888,15 @@ async function processHtmlReceipt(
     });
     await workflow.transition('extracting', { note: 'HTML body - no OCR needed' });
     await workflow.transition('extracted', { note: 'HTML body - no OCR needed' });
+
+    // Empty HTML body → skip before R2 upload (nothing to store)
+    if (htmlBytes.byteLength === 0) {
+      safeLog.warn('[Gmail Poller] HTML receipt body is empty, skipping', { receiptId });
+      await workflow.transition('failed', { reason: 'HTML body is empty' });
+      metrics.skipped += 1;
+      return;
+    }
+
     await workflow.transition('uploading_r2', { r2Key });
 
     // Store HTML in R2 with Content-Disposition: attachment (security)
@@ -922,14 +931,6 @@ async function processHtmlReceipt(
     }
 
     await workflow.transition('uploaded_r2', { r2Key, size: htmlBytes.byteLength });
-
-    // Empty HTML body → skip (nothing to store or upload)
-    if (htmlBytes.byteLength === 0) {
-      safeLog.warn('[Gmail Poller] HTML receipt body is empty, skipping', { receiptId });
-      await workflow.transition('failed', { reason: 'HTML body is empty' });
-      metrics.skipped += 1;
-      return;
-    }
 
     // External references → needs_review (skip freee upload for MVP)
     if (email.htmlBody.hasExternalReferences) {
