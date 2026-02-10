@@ -1139,11 +1139,6 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
       }
     }
 
-    if (emails.length === 0) {
-      safeLog.info('[Gmail Poller] No receipt emails found');
-      return;
-    }
-
     const freeeClient = createFreeeClient(env);
     const metrics = { processed: 0, skipped: 0, failed: 0, dealsCreated: 0 };
     const pdfTextMetrics = {
@@ -1156,9 +1151,13 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
       totalElapsedMs: 0,
     };
 
-    for (const email of emails) {
-      for (const attachment of email.attachments) {
-        await processAttachment(env, bucket, freeeClient, email, attachment, metrics, pdfTextMetrics);
+    if (emails.length === 0) {
+      safeLog.info('[Gmail Poller] No PDF receipt emails found');
+    } else {
+      for (const email of emails) {
+        for (const attachment of email.attachments) {
+          await processAttachment(env, bucket, freeeClient, email, attachment, metrics, pdfTextMetrics);
+        }
       }
     }
 
@@ -1185,6 +1184,10 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
             newerThan: '24h',
           }
         );
+        safeLog.info('[Gmail Poller] HTML emails found', {
+          count: htmlEmails.length,
+          subjects: htmlEmails.map(e => e.subject).slice(0, 5),
+        });
       } catch (error) {
         safeLog.error('[Gmail Poller] HTML receipt fetch failed', {
           error: error instanceof Error ? error.message : String(error),

@@ -203,7 +203,7 @@ async function backfillReceipt(
     r2Available,
     newVendor,
     newAmount,
-    newCategory,
+    newCategory: newCategory ?? undefined,
     newConfidence,
   };
 

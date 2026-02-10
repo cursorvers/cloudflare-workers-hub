@@ -45,6 +45,7 @@ import { handlePushQueueBatch } from './handlers/push-queue-consumer';
 import { handleReceiptUpload } from './handlers/receipt-upload';
 import { handleReceiptSearch } from './handlers/receipt-search';
 import { handleReceiptSourcesAPI } from './handlers/receipt-sources-api';
+import { handleReceiptList, handleReceiptSummary } from './handlers/receipt-status-api';
 import { handleDLQAPI } from './handlers/dlq-api';
 
 export type { Env };
@@ -897,6 +898,30 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
     // Receipt Upload API endpoint (freee integration)
     if (path === '/api/receipts/upload' && request.method === 'POST') {
       return handleReceiptUpload(request, env);
+    }
+
+    // Receipt Status API: summary (admin only)
+    if (path === '/api/receipts/summary' && request.method === 'GET') {
+      const { verifyAPIKey } = await import('./utils/api-auth');
+      if (!verifyAPIKey(request, env, 'admin')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return handleReceiptSummary(request, env);
+    }
+
+    // Receipt Status API: filtered list (admin only)
+    if (path === '/api/receipts' && request.method === 'GET') {
+      const { verifyAPIKey } = await import('./utils/api-auth');
+      if (!verifyAPIKey(request, env, 'admin')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return handleReceiptList(request, env);
     }
 
     // Receipt Search API endpoint (Electronic Bookkeeping Law compliant)

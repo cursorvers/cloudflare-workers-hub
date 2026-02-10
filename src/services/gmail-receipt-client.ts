@@ -525,7 +525,11 @@ export async function fetchReceiptEmails(
   // Build search query
   // Filter for receipt/invoice emails only
   // Strategy: subject keywords + known billing senders (not broad from:noreply)
-  const subjectFilter = `(${RECEIPT_SUBJECT_KEYWORDS.map(kw => `subject:${kw}`).join(' OR ')})`;
+  // Use subject:() grouping and quote multi-word keywords for reliable Gmail API parsing.
+  const quotedKw = RECEIPT_SUBJECT_KEYWORDS.map(kw =>
+    kw.includes(' ') ? `"${kw}"` : kw
+  );
+  const subjectFilter = `subject:(${quotedKw.join(' OR ')})`;
   const senderFilter = '(from:billing@cloudflare.com OR from:noreply@github.com OR from:receipts@stripe.com OR from:invoices@stripe.com OR from:noreply@google.com OR from:noreply@anthropic.com OR from:noreply@x.ai OR from:noreply@vercel.com OR from:billing@heroku.com OR from:aws-billing@amazon.com OR from:cloud-noreply@google.com)';
   const query = customQuery || `has:attachment filename:pdf (${subjectFilter} OR ${senderFilter}) newer_than:${newerThan}`;
 
@@ -629,22 +633,62 @@ export async function fetchHtmlReceiptEmails(
 
   const accessToken = await refreshAccessToken(clientId, clientSecret, refreshToken);
 
-  // Build query: broad subject keywords, exclude PDF-attached emails to avoid
-  // double-processing with fetchReceiptEmails().
-  const subjectClauses = RECEIPT_SUBJECT_KEYWORDS.map(kw => `subject:${kw}`);
+  // Split keywords into batches to keep Gmail query URL under ~2000 chars.
+  // A single query with 60+ OR clauses produces URLs >2400 chars which can
+  // cause silent failures in some HTTP stacks.
+  const BATCH_SIZE = 20;
+  const subjectClauses = RECEIPT_SUBJECT_KEYWORDS.map(kw =>
+    kw.includes(' ') ? `subject:"${kw}"` : `subject:${kw}`
+  );
   const senderClauses = senderAllowlist.filter(Boolean).map(s => `from:${s}`);
-  const matchFilter = [...subjectClauses, ...senderClauses].join(' OR ');
-  const query = `(${matchFilter}) -has:attachment newer_than:${newerThan}`;
 
-  const messageRefs = await searchMessages(accessToken, query, maxResults);
+  // Build batched queries: each batch has ≤BATCH_SIZE subject clauses.
+  // Sender clauses go into the first batch (they're few).
+  const batches: string[][] = [];
+  for (let i = 0; i < subjectClauses.length; i += BATCH_SIZE) {
+    batches.push(subjectClauses.slice(i, i + BATCH_SIZE));
+  }
+  // Attach sender clauses to the first batch
+  if (senderClauses.length > 0 && batches.length > 0) {
+    batches[0] = [...batches[0], ...senderClauses];
+  }
 
-  if (messageRefs.length === 0) {
+  // Use -filename:pdf instead of -has:attachment because Stripe/SaaS receipt
+  // emails embed inline images (logos) that Gmail counts as "attachments".
+  const suffix = `-filename:pdf newer_than:${newerThan}`;
+
+  // Search all batches in parallel, collect unique message IDs
+  const seen = new Set<string>();
+  const allRefs: Array<{ id: string; threadId: string }> = [];
+
+  const batchResults = await Promise.allSettled(
+    batches.map(clauses => {
+      const query = `(${clauses.join(' OR ')}) ${suffix}`;
+      return searchMessages(accessToken, query, maxResults);
+    })
+  );
+
+  for (const result of batchResults) {
+    if (result.status === 'fulfilled') {
+      for (const ref of result.value) {
+        if (!seen.has(ref.id)) {
+          seen.add(ref.id);
+          allRefs.push(ref);
+        }
+      }
+    }
+    // Silently skip failed batches — partial results are acceptable
+  }
+
+  if (allRefs.length === 0) {
     return [];
   }
 
+  // Limit to maxResults after dedup
+  const refs = allRefs.slice(0, maxResults);
   const emails: GmailHtmlReceiptEmail[] = [];
 
-  for (const ref of messageRefs) {
+  for (const ref of refs) {
     try {
       const message = await getMessage(accessToken, ref.id);
       const htmlBody = extractHtmlBody(message);
@@ -665,3 +709,4 @@ export async function fetchHtmlReceiptEmails(
 
   return emails;
 }
+
