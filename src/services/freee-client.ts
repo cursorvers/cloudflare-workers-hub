@@ -583,8 +583,15 @@ export class FreeeClient {
       });
 
       if (!response.ok) {
+        let detail = response.statusText;
+        try {
+          const body = await response.text();
+          if (body) detail = `${response.statusText} - ${body}`;
+        } catch {
+          // best-effort body read
+        }
         throw new ApiError(
-          `freee API error: ${response.statusText}`,
+          `freee API error: ${detail}`,
           response.status,
           response.headers
         );
