@@ -265,14 +265,14 @@ function pickTaxCode(taxes: readonly FreeeTax[], receipt: ReceiptForAccountSelec
   if (hinted) {
     const normalized = normalize(hinted);
     const exact = taxes.find((t) => normalize(String(t.name ?? '')) === normalized);
-    if (exact) return exact.id;
+    if (exact) return exact.code ?? exact.id;
   }
 
   const normalizedCategory = normalize(receipt.account_category ?? chosenAccountName ?? '');
   const isNonTaxable = NON_TAXABLE_KEYWORDS.some((k) => normalizedCategory.includes(normalize(k)));
   const desired = isNonTaxable ? NON_TAX_NAME : DEFAULT_TAX_NAME;
   const match = taxes.find((t) => normalize(String(t.name ?? '')) === normalize(desired));
-  return (match ?? taxes[0])?.id ?? 0;
+  return (match ?? taxes[0])?.code ?? (match ?? taxes[0])?.id ?? 0;
 }
 
 type Candidate = {

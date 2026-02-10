@@ -20,7 +20,11 @@ export interface FreeeAccountItem {
 
 export interface FreeeTax {
   id: number;
+  code?: number;
   name: string;
+  name_ja?: string;
+  display_category?: string | null;
+  available?: boolean;
   rate?: number;
   [key: string]: unknown;
 }
@@ -268,11 +272,11 @@ async function fetchTaxesFromApi(
   accessToken: string
 ): Promise<FreeeTax[]> {
   const companyId = getCompanyId(env);
-  const params = new URLSearchParams({ company_id: companyId });
+  // /taxes endpoint is deprecated (returns 404). Use /taxes/companies/{company_id} instead.
   const response = await fetchFreee<FreeeTaxesResponse>(
     env,
     accessToken,
-    `/taxes?${params.toString()}`
+    `/taxes/companies/${companyId}`
   );
   return cloneList(response.taxes);
 }
