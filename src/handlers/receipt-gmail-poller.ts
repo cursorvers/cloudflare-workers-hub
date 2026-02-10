@@ -923,6 +923,14 @@ async function processHtmlReceipt(
 
     await workflow.transition('uploaded_r2', { r2Key, size: htmlBytes.byteLength });
 
+    // Empty HTML body → skip (nothing to store or upload)
+    if (htmlBytes.byteLength === 0) {
+      safeLog.warn('[Gmail Poller] HTML receipt body is empty, skipping', { receiptId });
+      await workflow.transition('failed', { reason: 'HTML body is empty' });
+      metrics.skipped += 1;
+      return;
+    }
+
     // External references → needs_review (skip freee upload for MVP)
     if (email.htmlBody.hasExternalReferences) {
       safeLog.info('[Gmail Poller] HTML receipt has external references, marking needs_review', {
@@ -937,15 +945,21 @@ async function processHtmlReceipt(
       return;
     }
 
-    // Submit to freee as HTML blob
-    await workflow.transition('submitting_freee', { fileName: 'receipt.html', idempotencyKey });
-
-    const fileBlob = new Blob([htmlBytes], { type: 'text/html' });
-    const freeeResult = await freeeClient.uploadReceipt(fileBlob, 'receipt.html', idempotencyKey);
+    // freee File Box only accepts PDF/image/Excel/Word/CSV — not HTML.
+    // For MVP, skip freee upload and store only in R2 + D1.
+    // TODO: Add HTML→PDF conversion to enable freee upload.
+    safeLog.info('[Gmail Poller] HTML receipt stored in R2 (freee upload skipped - HTML not supported)', {
+      receiptId,
+      size: htmlBytes.byteLength,
+    });
+    await workflow.transition('submitting_freee', { fileName: 'receipt.html', note: 'skipped - HTML not supported by freee' });
+    // Skip freee upload entirely — mark as completed without freee receipt ID
+    const freeeResult = { receipt: { id: 0 } };
 
     // Deal creation for HTML receipts (same as PDF path, added 2026-02-09)
+    // Skip deal creation when freee upload was skipped (receipt.id === 0)
     try {
-      if (metrics.dealsCreated < MAX_DEALS_PER_RUN) {
+      if (freeeResult.receipt.id > 0 && metrics.dealsCreated < MAX_DEALS_PER_RUN) {
         const receiptInput: ReceiptInput = {
           id: receiptId,
           freee_receipt_id: freeeResult.receipt.id,
