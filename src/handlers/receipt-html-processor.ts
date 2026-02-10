@@ -1,0 +1,444 @@
+/**
+ * Receipt HTML Processor
+ *
+ * Processes HTML-body receipt emails through:
+ * - Dedup (SHA-256 hash)
+ * - AI classification (stripped text)
+ * - R2 WORM storage (with Content-Disposition: attachment)
+ * - freee deal creation (when freee upload supported)
+ * - Workflow state machine transitions
+ */
+
+import type { Env } from '../types';
+import { safeLog } from '../utils/log-sanitizer';
+import {
+  stripHtmlTags,
+  type GmailHtmlReceiptEmail,
+} from '../services/gmail-receipt-client';
+import { classifyReceipt } from '../services/ai-receipt-classifier';
+import type { ClassificationResult } from '../services/ai-receipt-classifier';
+import { createFreeeClient } from '../services/freee-client';
+import { createDealFromReceipt } from '../services/freee-deal-service';
+import type { ReceiptInput } from '../services/freee-deal-service';
+import { createStateMachine } from '../services/workflow-state-machine';
+import { CONFIDENCE } from '../config/confidence-thresholds';
+import { convertHtmlReceiptToPdf } from '../services/html-to-pdf-converter';
+import { backupToGoogleDrive, type FreeeReceiptBackup } from '../services/google-drive-backup';
+
+import {
+  RETENTION_YEARS,
+  DEFAULT_TENANT_ID,
+  MAX_DEALS_PER_RUN,
+  addYears,
+  toIsoDate,
+  calculateSha256,
+  normalizeVendorFromEmail,
+  isEmailLikeVendor,
+  hasDuplicateHash,
+} from './receipt-poller-utils';
+
+// ── Internal helpers ─────────────────────────────────────────────────
+
+export function htmlProcessedKey(messageId: string): string {
+  return `gmail:html_processed:${messageId}`;
+}
+
+// ── Main HTML receipt processor ──────────────────────────────────────
+
+export async function processHtmlReceipt(
+  env: Env,
+  bucket: R2Bucket,
+  freeeClient: ReturnType<typeof createFreeeClient>,
+  email: GmailHtmlReceiptEmail,
+  metrics: { processed: number; skipped: number; failed: number; dealsCreated: number }
+): Promise<void> {
+  const receiptId = crypto.randomUUID().replace(/-/g, '');
+  const textContent = email.htmlBody.plainText || stripHtmlTags(email.htmlBody.html);
+  const htmlBytes = new TextEncoder().encode(email.htmlBody.html);
+  const fileHash = await calculateSha256(htmlBytes);
+  const r2Key = `receipts/${DEFAULT_TENANT_ID}/${receiptId}/receipt.html`;
+  const retentionUntil = addYears(new Date(), RETENTION_YEARS);
+
+  // Dedup by content hash
+  const duplicateId = await hasDuplicateHash(env, fileHash);
+  if (duplicateId) {
+    safeLog.warn('[Gmail Poller] Duplicate HTML receipt detected, skipping', {
+      receiptId: duplicateId,
+      fileHash,
+      messageId: email.messageId,
+    });
+    metrics.skipped += 1;
+    return;
+  }
+
+  const fallbackDate = toIsoDate(email.date);
+  const fallbackVendor = normalizeVendorFromEmail(email.from || 'Unknown');
+
+  let workflow: ReturnType<typeof createStateMachine> | null = null;
+
+  try {
+    await env.DB!.prepare(
+      `INSERT INTO receipts (
+        id, file_hash, r2_object_key, transaction_date, vendor_name,
+        amount, currency, document_type, classification_method,
+        classification_confidence, status, retention_until, tenant_id, source_type
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        receiptId, fileHash, r2Key, fallbackDate, fallbackVendor,
+        0, 'JPY', 'other', 'ai_assisted',
+        0, 'pending_validation', retentionUntil, DEFAULT_TENANT_ID, 'html_body'
+      )
+      .run();
+
+    workflow = createStateMachine(env, receiptId);
+    await workflow.transition('validated', {
+      source: 'gmail_html_poll',
+      messageId: email.messageId,
+    });
+
+    // Classify using stripped text
+    const classificationText = [
+      `Subject: ${email.subject}`,
+      `From: ${email.from}`,
+      `Date: ${email.date.toISOString()}`,
+      `Source: HTML email body`,
+      '',
+      'Email Body (text):',
+      '---BEGIN EMAIL TEXT---',
+      textContent.slice(0, 8000),
+      '---END EMAIL TEXT---',
+    ].join('\n');
+
+    let classificationResult: ClassificationResult;
+    try {
+      classificationResult = await classifyReceipt(env, classificationText, {
+        tenantId: DEFAULT_TENANT_ID,
+        source: 'gmail_html',
+        subject: email.subject,
+        from: email.from,
+      });
+    } catch (classificationError) {
+      safeLog.warn('[Gmail Poller] HTML classification failed, using fallback', {
+        receiptId,
+        messageId: email.messageId,
+        error: classificationError instanceof Error ? classificationError.message : String(classificationError),
+      });
+      classificationResult = {
+        document_type: 'other',
+        vendor_name: fallbackVendor,
+        amount: 0,
+        currency: 'JPY',
+        transaction_date: fallbackDate,
+        account_category: undefined,
+        tax_type: undefined,
+        department: undefined,
+        confidence: 0,
+        method: 'ai_assisted',
+        cache_hit: false,
+        amount_extracted: false,
+      };
+    }
+
+    // Normalize & validate (same as PDF path, confidence cap 0.3→0.6 per 2026-02-09 consensus)
+    const rawVendor = classificationResult.vendor_name || fallbackVendor;
+    const normalizedVendor = isEmailLikeVendor(rawVendor)
+      ? normalizeVendorFromEmail(rawVendor)
+      : rawVendor;
+    const roundedAmount = Number.isFinite(classificationResult.amount)
+      ? Math.round(classificationResult.amount)
+      : 0;
+    const amountExtracted = classificationResult.amount_extracted ?? (roundedAmount > 0);
+    const hasQualityIssue = isEmailLikeVendor(rawVendor) || (roundedAmount === 0 && !amountExtracted);
+    const adjustedConfidence = hasQualityIssue
+      ? Math.min(classificationResult.confidence, CONFIDENCE.QUALITY_ISSUE_CAP)
+      : classificationResult.confidence;
+
+    classificationResult = {
+      ...classificationResult,
+      transaction_date: classificationResult.transaction_date || fallbackDate,
+      vendor_name: normalizedVendor,
+      amount: roundedAmount,
+      confidence: adjustedConfidence,
+      amount_extracted: amountExtracted,
+    };
+
+    await env.DB!.prepare(
+      `UPDATE receipts SET
+        transaction_date = ?, vendor_name = ?, amount = ?,
+        currency = ?, document_type = ?, account_category = ?,
+        tax_type = ?, department = ?, classification_method = ?,
+        classification_confidence = ?
+      WHERE id = ?`
+    )
+      .bind(
+        classificationResult.transaction_date,
+        classificationResult.vendor_name,
+        classificationResult.amount,
+        classificationResult.currency || 'JPY',
+        classificationResult.document_type || 'other',
+        classificationResult.account_category || null,
+        classificationResult.tax_type || null,
+        classificationResult.department || null,
+        classificationResult.method,
+        classificationResult.confidence,
+        receiptId
+      )
+      .run();
+
+    await workflow.transition('classified', {
+      method: classificationResult.method,
+      confidence: classificationResult.confidence,
+    });
+    await workflow.transition('extracting', { note: 'HTML body - no OCR needed' });
+    await workflow.transition('extracted', { note: 'HTML body - no OCR needed' });
+
+    // Empty HTML body → skip before R2 upload (nothing to store)
+    if (htmlBytes.byteLength === 0) {
+      safeLog.warn('[Gmail Poller] HTML receipt body is empty, skipping', { receiptId });
+      await workflow.transition('failed', { reason: 'HTML body is empty' });
+      metrics.skipped += 1;
+      return;
+    }
+
+    await workflow.transition('uploading_r2', { r2Key });
+
+    // Store HTML in R2 with Content-Disposition: attachment (security)
+    const htmlR2Result = await bucket.put(r2Key, htmlBytes, {
+      httpMetadata: {
+        contentType: 'text/html',
+        contentDisposition: 'attachment; filename="receipt.html"',
+      },
+      customMetadata: {
+        fileHash,
+        messageId: email.messageId,
+        retentionUntil,
+        tenantId: DEFAULT_TENANT_ID,
+        worm: 'true',
+        hasExternalReferences: String(email.htmlBody.hasExternalReferences),
+      },
+      onlyIf: { etagDoesNotMatch: '*' },
+    });
+
+    if (!htmlR2Result) {
+      safeLog.warn('[Gmail Poller] HTML R2 put returned null (WORM dedup or write issue)', {
+        r2Key,
+        receiptId,
+      });
+      const verifyObj = await bucket.head(r2Key);
+      if (!verifyObj) {
+        safeLog.error('[Gmail Poller] HTML R2 object NOT stored (critical: WORM gap)', {
+          r2Key,
+          receiptId,
+        });
+      }
+    }
+
+    await workflow.transition('uploaded_r2', { r2Key, size: htmlBytes.byteLength });
+
+    // External references → needs_review (skip freee upload for MVP)
+    if (email.htmlBody.hasExternalReferences) {
+      safeLog.info('[Gmail Poller] HTML receipt has external references, marking needs_review', {
+        receiptId,
+        externalRefTypes: email.htmlBody.externalRefTypes,
+      });
+      await workflow.transition('failed', {
+        reason: 'HTML has external references - needs manual review',
+        externalRefTypes: email.htmlBody.externalRefTypes,
+      });
+      metrics.processed += 1;
+      return;
+    }
+
+    // Convert HTML → PDF for freee File Box upload (freee only accepts PDF/image/Excel/Word/CSV)
+    const pdfFileName = `receipt-${receiptId}.pdf`;
+    const idempotencyKey = `gmail:html:${email.messageId}`;
+
+    await workflow.transition('submitting_freee', { fileName: pdfFileName, idempotencyKey });
+
+    let pdfBytes: Uint8Array;
+    try {
+      pdfBytes = await convertHtmlReceiptToPdf(textContent, {
+        subject: email.subject,
+        from: email.from,
+        date: email.date.toISOString(),
+        receiptId,
+      });
+    } catch (conversionError) {
+      safeLog.error('[Gmail Poller] HTML→PDF conversion failed', {
+        receiptId,
+        messageId: email.messageId,
+        error: conversionError instanceof Error ? conversionError.message : String(conversionError),
+      });
+      await workflow.recordError(
+        conversionError instanceof Error ? conversionError.message : String(conversionError),
+        'HTML_PDF_CONVERSION_FAILED',
+        { messageId: email.messageId }
+      );
+      // Still mark as processed (R2 + D1 have the receipt) but record failure
+      metrics.processed += 1;
+      return;
+    }
+
+    // CJK limitation: pdf-lib standard fonts cannot render Japanese/Chinese/Korean.
+    // Non-WinAnsi characters are replaced with '?'. Amount/date/English vendor names are preserved.
+    // TODO: Embed NotoSansJP subset font for full CJK support.
+    const hasCjk = /[\u3000-\u9FFF\uF900-\uFAFF]/.test(textContent);
+    if (hasCjk) {
+      safeLog.warn('[Gmail Poller] HTML receipt contains CJK characters (rendered as ? in PDF)', {
+        receiptId,
+        messageId: email.messageId,
+        note: 'PDF uses standard fonts only. CJK text is replaced with ?. Metadata in D1 retains original text.',
+      });
+    }
+
+    const pdfBlob = new Blob([pdfBytes], { type: 'application/pdf' });
+    const freeeResult = await freeeClient.uploadReceipt(pdfBlob, pdfFileName, idempotencyKey);
+
+    safeLog.info('[Gmail Poller] HTML receipt uploaded to freee as PDF', {
+      receiptId,
+      freeeReceiptId: freeeResult.receipt.id,
+      pdfSizeBytes: pdfBytes.byteLength,
+      hasCjk,
+    });
+
+    // Deal creation (same as PDF path)
+    try {
+      if (metrics.dealsCreated < MAX_DEALS_PER_RUN) {
+        const receiptInput: ReceiptInput = {
+          id: receiptId,
+          freee_receipt_id: freeeResult.receipt.id,
+          file_hash: fileHash,
+          vendor_name: classificationResult.vendor_name,
+          amount: classificationResult.amount,
+          transaction_date: classificationResult.transaction_date,
+          account_category: classificationResult.account_category ?? null,
+          classification_confidence: classificationResult.confidence ?? null,
+          tenant_id: DEFAULT_TENANT_ID,
+        };
+
+        const dealResult = await createDealFromReceipt(env, receiptInput);
+
+        try {
+          await env.DB!.prepare(
+            `UPDATE receipts
+             SET freee_deal_id = ?, freee_partner_id = ?,
+                 account_item_id = ?, tax_code = ?,
+                 account_mapping_confidence = ?,
+                 account_mapping_method = ?,
+                 updated_at = datetime('now')
+             WHERE id = ?`
+          ).bind(
+            dealResult.dealId,
+            dealResult.partnerId,
+            dealResult.accountItemId ?? null,
+            dealResult.taxCode ?? null,
+            dealResult.mappingConfidence,
+            dealResult.mappingMethod ?? null,
+            receiptId
+          ).run();
+        } catch {
+          // best-effort D1 update
+        }
+
+        if (dealResult.status === 'created') {
+          metrics.dealsCreated += 1;
+        }
+
+        safeLog.info('[Gmail Poller] HTML deal processed', {
+          receiptId,
+          dealId: dealResult.dealId,
+          status: dealResult.status,
+          mappingConfidence: dealResult.mappingConfidence,
+        });
+      } else {
+        safeLog.info('[Gmail Poller] HTML deal skipped (rate limit cap reached)', {
+          receiptId,
+          dealsCreated: metrics.dealsCreated,
+          maxDealsPerRun: MAX_DEALS_PER_RUN,
+        });
+      }
+    } catch (dealError) {
+      safeLog.warn('[Gmail Poller] HTML deal creation failed (receipt saved)', {
+        receiptId,
+        freeeReceiptId: freeeResult.receipt.id,
+        error: dealError instanceof Error ? dealError.message : String(dealError),
+      });
+      try {
+        await env.DB!.prepare(
+          `INSERT INTO receipt_dlq (receipt_id, error_code, error_message, source_type, message_id)
+           VALUES (?, ?, ?, 'html_body', ?)`
+        ).bind(
+          receiptId,
+          'HTML_DEAL_CREATION_FAILED',
+          dealError instanceof Error ? dealError.message : String(dealError),
+          email.messageId
+        ).run();
+      } catch {
+        // DLQ insert is best-effort
+      }
+    }
+
+    await workflow.complete(String(freeeResult.receipt.id));
+
+    // Backup to Google Drive (non-blocking, same as PDF path)
+    try {
+      const backupData: FreeeReceiptBackup = {
+        receiptId,
+        freeeReceiptId: String(freeeResult.receipt.id),
+        transactionDate: classificationResult.transaction_date,
+        vendorName: classificationResult.vendor_name,
+        amount: classificationResult.amount,
+        currency: classificationResult.currency || 'JPY',
+        status: 'completed',
+        createdAt: new Date().toISOString(),
+        freeeApiResponse: freeeResult,
+      };
+      const driveResult = await backupToGoogleDrive(env, backupData);
+      safeLog.info('[Gmail Poller] HTML receipt backed up to Google Drive', {
+        receiptId,
+        driveFileId: driveResult.fileId,
+      });
+    } catch (driveError) {
+      safeLog.warn('[Gmail Poller] HTML Google Drive backup failed', {
+        receiptId,
+        error: driveError instanceof Error ? driveError.message : String(driveError),
+      });
+    }
+
+    // Mark as processed
+    if (env.CACHE) {
+      try {
+        await env.CACHE.put(htmlProcessedKey(email.messageId), '1', {
+          expirationTtl: 60 * 60 * 24 * 30,
+        });
+      } catch {
+        // best-effort
+      }
+    }
+
+    safeLog.info('[Gmail Poller] HTML receipt processed', {
+      receiptId,
+      freeeReceiptId: freeeResult.receipt.id,
+      messageId: email.messageId,
+    });
+    metrics.processed += 1;
+  } catch (error) {
+    metrics.failed += 1;
+    const message = error instanceof Error ? error.message : String(error);
+    safeLog.error('[Gmail Poller] Failed to process HTML receipt', {
+      receiptId,
+      messageId: email.messageId,
+      error: message,
+    });
+
+    if (workflow) {
+      try {
+        await workflow.recordError(message, 'HTML_POLL_FAILED', { messageId: email.messageId });
+        await workflow.transition('failed', { reason: message });
+      } catch {
+        // best-effort
+      }
+    }
+  }
+}

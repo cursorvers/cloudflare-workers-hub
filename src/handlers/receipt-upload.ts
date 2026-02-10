@@ -19,6 +19,11 @@ import { createStateMachine } from '../services/workflow-state-machine';
 import { createDealFromReceipt } from '../services/freee-deal-service';
 import type { ReceiptInput } from '../services/freee-deal-service';
 import { isFreeeIntegrationEnabled } from '../utils/freee-integration';
+import { classifyReceipt } from '../services/ai-receipt-classifier';
+import type { ClassificationResult } from '../services/ai-receipt-classifier';
+import { maybeExtractPdfTextForClassification } from '../services/pdf-text-extraction';
+import { CONFIDENCE } from '../config/confidence-thresholds';
+import { normalizeVendorFromEmail, isEmailLikeVendor } from './receipt-poller-utils';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
@@ -392,8 +397,101 @@ export async function handleReceiptUpload(
         .run();
 
       // === Deal Automation (Phase 5) ===
-      // Skip deal creation for 0-amount receipts (evidence-only)
+      // When amount=0 (e.g. Chrome extension sends no amount), try AI classification
+      let classifiedVendor = metadata.vendor_name;
+      let classifiedAmount = metadata.amount;
+      let classifiedDate = metadata.transaction_date;
+      let classifiedAccountCategory = extractString(formData.get('account_category')) ?? null;
+      let classifiedConfidence = 1; // Manual upload = full confidence
+      let classifiedMethod = 'manual';
+
       if (metadata.amount === 0) {
+        try {
+          let classificationText = '';
+
+          // Extract text from PDF (if applicable and enabled)
+          if (fileEntry.type === 'application/pdf') {
+            const pdfResult = await maybeExtractPdfTextForClassification(
+              env, fileBuffer, { receiptId, source: 'chrome_extension' }
+            );
+            if (pdfResult.extracted && pdfResult.text) {
+              classificationText = pdfResult.text;
+            }
+          }
+
+          const classInput = [
+            `Vendor: ${metadata.vendor_name}`,
+            `Date: ${metadata.transaction_date}`,
+            `Document type: ${metadata.document_type}`,
+            `Source: Chrome extension upload`,
+            '',
+            classificationText
+              ? `Document Text:\n---BEGIN---\n${classificationText.slice(0, 8000)}\n---END---`
+              : 'No text extracted from document',
+          ].join('\n');
+
+          const classification = await classifyReceipt(env, classInput, {
+            tenantId,
+            source: 'chrome_extension',
+            vendor: metadata.vendor_name,
+          });
+
+          // Normalize vendor & amount (same logic as Gmail poller)
+          const rawVendor = classification.vendor_name || metadata.vendor_name;
+          classifiedVendor = isEmailLikeVendor(rawVendor)
+            ? normalizeVendorFromEmail(rawVendor)
+            : rawVendor;
+          classifiedAmount = Number.isFinite(classification.amount)
+            ? Math.round(classification.amount)
+            : 0;
+          classifiedDate = classification.transaction_date || metadata.transaction_date;
+          classifiedAccountCategory = classification.account_category ?? classifiedAccountCategory;
+          classifiedMethod = classification.method;
+
+          const amountExtracted = classification.amount_extracted ?? (classifiedAmount > 0);
+          const hasQualityIssue = isEmailLikeVendor(rawVendor)
+            || (classifiedAmount === 0 && !amountExtracted);
+          classifiedConfidence = hasQualityIssue
+            ? Math.min(classification.confidence, CONFIDENCE.QUALITY_ISSUE_CAP)
+            : classification.confidence;
+
+          // Persist classified data to D1
+          await env.DB.prepare(
+            `UPDATE receipts SET
+              vendor_name = ?, amount = ?, transaction_date = ?,
+              document_type = ?, account_category = ?,
+              classification_method = ?, classification_confidence = ?,
+              updated_at = datetime('now')
+            WHERE id = ?`
+          ).bind(
+            classifiedVendor,
+            classifiedAmount,
+            classifiedDate,
+            classification.document_type || metadata.document_type,
+            classifiedAccountCategory,
+            classifiedMethod,
+            classifiedConfidence,
+            receiptId
+          ).run();
+
+          safeLog.info('[Receipts] AI classification for zero-amount upload', {
+            receiptId,
+            classifiedAmount,
+            classifiedVendor,
+            confidence: classifiedConfidence,
+            method: classifiedMethod,
+          });
+        } catch (classError) {
+          safeLog.warn('[Receipts] AI classification failed for zero-amount upload', {
+            receiptId,
+            error: classError instanceof Error ? classError.message : String(classError),
+          });
+          // Fall through with original metadata (amount=0 → evidence-only)
+        }
+      }
+
+      // Still amount=0 after classification → evidence-only (skip deal creation)
+      if (classifiedAmount === 0) {
         await workflow.complete(String(freeeResult.receipt.id));
 
         safeLog.info('[Receipts] Upload completed (evidence-only, amount=0)', {
@@ -414,16 +512,16 @@ export async function handleReceiptUpload(
         });
       }
 
-      // Attempt automatic deal creation
+      // Attempt automatic deal creation with classified metadata
       const receiptInput: ReceiptInput = {
         id: receiptId,
         freee_receipt_id: freeeResult.receipt.id,
         file_hash: fileHash,
-        vendor_name: metadata.vendor_name,
-        amount: metadata.amount,
-        transaction_date: metadata.transaction_date,
-        account_category: extractString(formData.get('account_category')) ?? null,
-        classification_confidence: 1, // Manual upload = full confidence
+        vendor_name: classifiedVendor,
+        amount: classifiedAmount,
+        transaction_date: classifiedDate,
+        account_category: classifiedAccountCategory,
+        classification_confidence: classifiedConfidence,
         tenant_id: tenantId,
       };
 
