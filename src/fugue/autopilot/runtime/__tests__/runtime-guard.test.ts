@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createCircuitBreakerState } from "../circuit-breaker";
 import { createHeartbeatState, recordHeartbeat } from "../heartbeat";
 import { evaluateRecovery, runGuardCheck } from "../runtime-guard";
+import type { BudgetSample } from "../budget-predictor";
 
 describe("runtime/runtime-guard", () => {
   it("全ガードOKでCONTINUE", () => {
@@ -114,6 +115,60 @@ describe("runtime/runtime-guard", () => {
 
     expect(result.allowed).toBe(false);
     expect(result.reason).toContain("fail-closed");
+  });
+
+  // =========================================================================
+  // Budget prediction + throttle integration
+  // =========================================================================
+
+  it("prediction/throttle absent when no budgetSamples", () => {
+    const result = runGuardCheck(
+      { budget: { spent: 50, limit: 100 } },
+      3000,
+    );
+    expect(result.prediction).toBeUndefined();
+    expect(result.throttle).toBeUndefined();
+  });
+
+  it("prediction/throttle computed when budgetSamples provided", () => {
+    const samples: BudgetSample[] = [
+      { timestamp: 0, spent: 0 },
+      { timestamp: 1000, spent: 10 },
+      { timestamp: 2000, spent: 20 },
+      { timestamp: 3000, spent: 30 },
+    ];
+    const result = runGuardCheck(
+      {
+        budget: { spent: 30, limit: 100 },
+        budgetSamples: samples,
+      },
+      4000,
+    );
+    expect(result.prediction).toBeDefined();
+    expect(result.prediction!.method).not.toBe('insufficient_data');
+    // 4 original samples + 1 injected current budget point = 5
+    expect(result.prediction!.sampleCount).toBe(5);
+    expect(result.throttle).toBeDefined();
+    expect(result.throttle!.level).toBeDefined();
+    expect(result.throttle!.rate).toBeDefined();
+  });
+
+  it("throttle reflects high spend ratio", () => {
+    const samples: BudgetSample[] = [
+      { timestamp: 0, spent: 80 },
+      { timestamp: 1000, spent: 90 },
+      { timestamp: 2000, spent: 96 },
+    ];
+    const result = runGuardCheck(
+      {
+        budget: { spent: 96, limit: 100 },
+        budgetSamples: samples,
+      },
+      3000,
+    );
+    expect(result.throttle).toBeDefined();
+    // ratio 0.96 → at least HEAVY
+    expect(result.throttle!.rate).toBeLessThanOrEqual(0.4);
   });
 
   it("全結果がObject.freeze", () => {

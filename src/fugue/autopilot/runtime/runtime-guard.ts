@@ -1,4 +1,4 @@
-import { checkBudget, type BudgetCheckResult } from "./budget-guard";
+import { checkBudget, type BudgetCheckResult, type BudgetSeverity } from "./budget-guard";
 import {
   checkErrorRate,
   type ErrorRateResult,
@@ -10,6 +10,17 @@ import {
   type HeartbeatState,
 } from "./heartbeat";
 import { checkQuery, type QueryGuardResult } from "./query-guard";
+import {
+  predictBudgetExhaustion,
+  type BudgetSample,
+  type BudgetPrediction,
+  type PredictionConfig,
+} from "./budget-predictor";
+import {
+  computeThrottle,
+  type ThrottleState,
+  type ThrottleConfig,
+} from "./throttle-policy";
 
 export type GuardVerdict = "CONTINUE" | "DEGRADE" | "STOP" | "RECOVERY_PENDING";
 
@@ -19,6 +30,10 @@ export interface GuardInput {
   readonly circuitBreaker?: { readonly state: CircuitBreakerState };
   readonly heartbeat?: { readonly state: HeartbeatState };
   readonly query?: { readonly query: string; readonly params: readonly unknown[] };
+  /** Optional: budget samples for prediction-based throttling */
+  readonly budgetSamples?: readonly BudgetSample[];
+  readonly predictionConfig?: PredictionConfig;
+  readonly throttleConfig?: ThrottleConfig;
 }
 
 export interface GuardCheckResult {
@@ -35,6 +50,10 @@ export interface GuardCheckResult {
     readonly heartbeat?: HeartbeatCheckResult;
     readonly query?: QueryGuardResult;
   };
+  /** Budget prediction result (only when budgetSamples provided) */
+  readonly prediction?: BudgetPrediction;
+  /** Throttle state (only when budget + budgetSamples provided) */
+  readonly throttle?: ThrottleState;
 }
 
 export interface RecoveryRequest {
@@ -131,6 +150,29 @@ export function runGuardCheck(
     }
   }
 
+  // Budget prediction + throttle (optional, when samples provided)
+  let prediction: BudgetPrediction | undefined;
+  let throttle: ThrottleState | undefined;
+
+  if (input.budget != null && input.budgetSamples != null && input.budgetSamples.length > 0) {
+    // Inject current budget point to ensure prediction uses latest data
+    const currentPoint: BudgetSample = { timestamp, spent: input.budget.spent };
+    const samplesWithCurrent = [...input.budgetSamples, currentPoint];
+
+    prediction = predictBudgetExhaustion(
+      samplesWithCurrent,
+      input.budget.limit,
+      timestamp,
+      input.predictionConfig,
+    );
+
+    const budgetSeverity: BudgetSeverity = guardResults.budget
+      ? guardResults.budget.severity
+      : "OK";
+
+    throttle = computeThrottle(prediction, budgetSeverity, input.throttleConfig);
+  }
+
   const shouldStop = reasons.length > 0;
   const shouldDegrade = !shouldStop && warnings.length > 0;
   const verdict: GuardVerdict = shouldStop
@@ -147,6 +189,8 @@ export function runGuardCheck(
     warnings: freezeStrings(warnings),
     timestamp,
     guardResults: freezeGuardResults(guardResults),
+    prediction,
+    throttle,
   });
 }
 
