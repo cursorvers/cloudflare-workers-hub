@@ -8,6 +8,8 @@
 
 import type { Env } from '../../../types';
 import { safeLog } from '../../../utils/log-sanitizer';
+import { buildChainEntry, type HashChainInput } from './hash-chain';
+import { getLatestHash } from './tamper-verifier';
 
 // =============================================================================
 // Types
@@ -46,6 +48,9 @@ export interface AutopilotAuditRow {
   readonly reason: string | null;
   readonly actor: string | null;
   readonly metadata: string | null;
+  readonly prev_hash: string | null;
+  readonly entry_hash: string | null;
+  readonly chain_version: number | null;
   readonly created_at: string;
 }
 
@@ -162,7 +167,7 @@ export async function queryAuditLogs(
   const offset = options.offset ?? 0;
 
   try {
-    let sql = 'SELECT id, event_type, previous_mode, new_mode, reason, actor, metadata, created_at FROM autopilot_audit_logs';
+    let sql = 'SELECT id, event_type, previous_mode, new_mode, reason, actor, metadata, prev_hash, entry_hash, chain_version, created_at FROM autopilot_audit_logs';
     const params: (string | number)[] = [];
     const conditions: string[] = [];
 
@@ -307,4 +312,68 @@ export function auditTaskDLQ(
     reason: error,
     metadata: { taskId, taskType },
   });
+}
+
+// =============================================================================
+// Hash-Chain Aware Write
+// =============================================================================
+
+/**
+ * Write a single audit entry with hash chain linkage.
+ * Fetches the latest hash from D1, computes the chain entry,
+ * and inserts with prev_hash + entry_hash + chain_version.
+ *
+ * Falls back to writeAuditEntry (without hash) on any hash error.
+ */
+export async function writeAuditEntryWithHash(
+  env: Env,
+  entry: AutopilotAuditEntry,
+): Promise<boolean> {
+  if (!env.DB) {
+    safeLog.warn('[AutopilotAudit] DB not available, audit entry dropped', {
+      eventType: entry.eventType,
+    });
+    return false;
+  }
+
+  try {
+    const prevHash = await getLatestHash(env);
+    const metadataStr = entry.metadata ? JSON.stringify(entry.metadata) : null;
+
+    const hashInput: HashChainInput = {
+      eventType: entry.eventType,
+      previousMode: entry.previousMode ?? null,
+      newMode: entry.newMode ?? null,
+      reason: entry.reason ?? null,
+      actor: entry.actor ?? null,
+      metadata: metadataStr,
+    };
+
+    const chainEntry = await buildChainEntry(prevHash, hashInput);
+
+    await env.DB.prepare(
+      `INSERT INTO autopilot_audit_logs
+       (event_type, previous_mode, new_mode, reason, actor, metadata, prev_hash, entry_hash, chain_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      entry.eventType,
+      entry.previousMode ?? null,
+      entry.newMode ?? null,
+      entry.reason ?? null,
+      entry.actor ?? null,
+      metadataStr,
+      chainEntry.prevHash,
+      chainEntry.entryHash,
+      chainEntry.chainVersion,
+    ).run();
+
+    return true;
+  } catch (err) {
+    safeLog.error('[AutopilotAudit] Hash-chain write failed, falling back', {
+      eventType: entry.eventType,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    // Fallback: write without hash chain
+    return writeAuditEntry(env, entry);
+  }
 }
