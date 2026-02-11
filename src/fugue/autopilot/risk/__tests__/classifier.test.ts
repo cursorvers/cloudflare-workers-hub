@@ -180,12 +180,16 @@ describe('risk/classifier.classifyToolRequest', () => {
       riskTier: 1,
     });
 
-    const assessment = classifyToolRequest(req);
+    const assessment = classifyToolRequest(
+      req,
+      ORIGINS.CLI,
+      { id: 'user-1', type: SUBJECT_TYPES.USER },
+    );
 
     expect(assessment.tier).toBe(3);
     expect(assessment.effects).toEqual(['WRITE']);
-    expect(assessment.origin).toBe(ORIGINS.INTERNAL);
-    expect(assessment.subject).toEqual({ id: 'req-risk-1', type: SUBJECT_TYPES.SYSTEM });
+    expect(assessment.origin).toBe(ORIGINS.CLI);
+    expect(assessment.subject).toEqual({ id: 'user-1', type: SUBJECT_TYPES.USER });
     expect(Object.isFrozen(assessment)).toBe(true);
     expect(Object.isFrozen(assessment.effects)).toBe(true);
     expect(Object.isFrozen(assessment.subject)).toBe(true);

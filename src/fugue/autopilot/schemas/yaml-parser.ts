@@ -4,16 +4,10 @@ import type { ParseResult } from './autopilot-yml';
 
 const CORE_TAG_PREFIX = 'tag:yaml.org,2002:';
 
-function detectForbiddenYamlFeatures(input: string): string | null {
-  const doc = parseDocument(input, {
-    strict: true,
-    prettyErrors: true,
-    uniqueKeys: true,
-    schema: 'core',
-    customTags: [],
-    merge: false,
-  });
+/** Maximum YAML input size in bytes (1 MB). */
+const MAX_YAML_INPUT_BYTES = 1_048_576;
 
+function detectForbiddenYamlFeatures(doc: ReturnType<typeof parseDocument>): string | null {
   let violation: string | null = null;
   visit(doc, {
     Node: (_key, node) => {
@@ -38,6 +32,11 @@ function detectForbiddenYamlFeatures(input: string): string | null {
 
 export function parseYamlSafe(input: string): ParseResult<unknown> {
   try {
+    const byteLength = new TextEncoder().encode(input).byteLength;
+    if (byteLength > MAX_YAML_INPUT_BYTES) {
+      return { success: false, error: `YAML input exceeds maximum size (${MAX_YAML_INPUT_BYTES} bytes)` };
+    }
+
     const doc = parseDocument(input, {
       strict: true,
       prettyErrors: true,
@@ -52,7 +51,7 @@ export function parseYamlSafe(input: string): ParseResult<unknown> {
       return { success: false, error: issues.join('; ') };
     }
 
-    const violation = detectForbiddenYamlFeatures(input);
+    const violation = detectForbiddenYamlFeatures(doc);
     if (violation) {
       return { success: false, error: violation };
     }

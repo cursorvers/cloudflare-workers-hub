@@ -32,6 +32,14 @@ export const DEFAULT_BUDGET_CONFIG: BudgetConfig = Object.freeze({
   autoHaltTimeoutMs: 300_000,
 });
 
+export interface BudgetSnapshot {
+  readonly state: BudgetState;
+  readonly usedTokens: number;
+  readonly weeklyLimit: number;
+  readonly usageRatio: number;
+  readonly updatedAt: string;
+}
+
 export interface BudgetStatus {
   readonly state: BudgetState;
   readonly used: number;

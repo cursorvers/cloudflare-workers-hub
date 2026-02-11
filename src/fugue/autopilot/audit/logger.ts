@@ -23,8 +23,13 @@ export function createAuditLog(): AuditLog {
   return freezeLog([], []);
 }
 
+function deepFreezeEvent(event: AuditEvent): AuditEvent {
+  const frozenPayload = Object.freeze({ ...event.payload });
+  return Object.freeze({ ...event, payload: frozenPayload });
+}
+
 export function appendEvent(log: AuditLog, event: AuditEvent): AuditLog {
-  const nextEvents = trimToMax([...log.events, event]);
+  const nextEvents = trimToMax([...log.events, deepFreezeEvent(event)]);
   return freezeLog(nextEvents, log.anomalies);
 }
 

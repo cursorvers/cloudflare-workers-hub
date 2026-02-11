@@ -60,20 +60,25 @@ export function classifyRisk(input: RiskClassificationInput): RiskTier {
   return clampTier(Math.max(effectTier, categoryMin));
 }
 
-export function classifyToolRequest(request: ToolRequest): RiskAssessment {
+/**
+ * Classify a ToolRequest into a RiskAssessment.
+ * origin and subject MUST be provided by the caller to prevent origin laundering.
+ */
+export function classifyToolRequest(
+  request: ToolRequest,
+  origin: Origin,
+  subject: { readonly id: string; readonly type: (typeof SUBJECT_TYPES)[keyof typeof SUBJECT_TYPES] },
+): RiskAssessment {
   const tier = classifyRisk({
     effects: request.effects,
     category: request.category,
-    origin: ORIGINS.INTERNAL,
+    origin,
   });
 
   return Object.freeze({
     tier,
     effects: Object.freeze([...request.effects]),
-    origin: ORIGINS.INTERNAL,
-    subject: Object.freeze({
-      id: request.id,
-      type: SUBJECT_TYPES.SYSTEM,
-    }),
+    origin,
+    subject: Object.freeze({ ...subject }),
   });
 }

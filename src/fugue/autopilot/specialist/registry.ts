@@ -1,3 +1,5 @@
+import type { FeatureFlags } from '../config/feature-flags';
+import { DEFAULT_FEATURE_FLAGS } from '../config/feature-flags';
 import type { DelegationRequest, DelegationResult, SpecialistConfig, SpecialistRegistry } from './types';
 import { SPECIALIST_TRUST_LEVELS } from './types';
 const TRUST_RANK = Object.freeze({
@@ -23,8 +25,15 @@ export const DEFAULT_SPECIALISTS = freezeSpecialists([
 export function createRegistry(specialists: readonly SpecialistConfig[] = DEFAULT_SPECIALISTS): SpecialistRegistry {
   return Object.freeze({ specialists: freezeSpecialists(specialists) });
 }
-export function findSpecialist(registry: SpecialistRegistry, request: DelegationRequest): DelegationResult {
-  const candidates = registry.specialists.filter((s) => matches(s, request));
+export function findSpecialist(
+  registry: SpecialistRegistry,
+  request: DelegationRequest,
+  flags: FeatureFlags = DEFAULT_FEATURE_FLAGS,
+): DelegationResult {
+  const filtered = flags.untrustedSpecialists
+    ? registry.specialists
+    : registry.specialists.filter((s) => s.trustLevel !== SPECIALIST_TRUST_LEVELS.UNTRUSTED);
+  const candidates = filtered.filter((s) => matches(s, request));
   const active = candidates.find((s) => s.enabled);
   if (active) {
     return Object.freeze({ specialistId: active.id, status: 'delegated', reason: `delegated to ${active.name}` });

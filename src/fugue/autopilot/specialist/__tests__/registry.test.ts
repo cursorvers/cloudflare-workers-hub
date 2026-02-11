@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { createFeatureFlags } from '../../config/feature-flags';
 import type { DelegationRequest } from '../types';
 import { SPECIALIST_TRUST_LEVELS } from '../types';
 import { DEFAULT_SPECIALISTS, createRegistry, findSpecialist } from '../registry';
@@ -40,21 +41,34 @@ describe('specialist/registry', () => {
     expect(['glm', 'gemini']).toContain(result.specialistId);
   });
 
-  it('returns disabled for UNTRUSTED when grok is disabled', () => {
+  it('returns disabled for UNTRUSTED when grok is disabled and flag is on', () => {
     const registry = createRegistry(DEFAULT_SPECIALISTS);
+    const flags = createFeatureFlags({ untrustedSpecialists: true });
     const result = findSpecialist(
       registry,
       makeRequest({ requiredTrustLevel: SPECIALIST_TRUST_LEVELS.UNTRUSTED, riskTier: 1 }),
+      flags,
     );
     expect(result.status).toBe('disabled');
     expect(result.specialistId).toBe('grok');
   });
 
-  it('returns no-match for UNTRUSTED tier 3', () => {
+  it('returns no-match for UNTRUSTED when flag is off (default)', () => {
     const registry = createRegistry();
     const result = findSpecialist(
       registry,
+      makeRequest({ requiredTrustLevel: SPECIALIST_TRUST_LEVELS.UNTRUSTED, riskTier: 1 }),
+    );
+    expect(result.status).toBe('no-match');
+  });
+
+  it('returns no-match for UNTRUSTED tier 3 even with flag on', () => {
+    const registry = createRegistry();
+    const flags = createFeatureFlags({ untrustedSpecialists: true });
+    const result = findSpecialist(
+      registry,
       makeRequest({ requiredTrustLevel: SPECIALIST_TRUST_LEVELS.UNTRUSTED, riskTier: 3 }),
+      flags,
     );
     expect(result.status).toBe('no-match');
   });

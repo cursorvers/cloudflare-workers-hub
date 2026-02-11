@@ -51,7 +51,7 @@ export function consumeTokens(
   config?: BudgetConfig,
 ): BudgetSnapshot {
   const resolved = resolveConfig(config);
-  const safeTokens = Number.isFinite(tokens) ? tokens : 0;
+  const safeTokens = Number.isFinite(tokens) ? Math.max(0, tokens) : 0;
   return buildSnapshot(snapshot.usedTokens + safeTokens, snapshot.state, resolved);
 }
 

@@ -54,5 +54,5 @@ export function checkSloCompliance(
   if (metrics.p99LatencyMs > thresholds.maxP99LatencyMs) {
     violations.push(`p99LatencyMs>${thresholds.maxP99LatencyMs}`);
   }
-  return Object.freeze({ compliant: violations.length === 0, violations });
+  return Object.freeze({ compliant: violations.length === 0, violations: Object.freeze([...violations]) });
 }

@@ -91,6 +91,11 @@ export function checkIdleTimeout(
   });
 }
 
+/**
+ * Detect thrashing by checking for consecutive identical errors.
+ * v1.1: uses exact string match. config.similarityThreshold is reserved for
+ * v1.2 embedding-based similarity (currently unused by design).
+ */
 export function detectThrashing(
   recentErrors: readonly string[],
   config: ThrashingConfig,
