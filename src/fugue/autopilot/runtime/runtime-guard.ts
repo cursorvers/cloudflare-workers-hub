@@ -11,7 +11,7 @@ import {
 } from "./heartbeat";
 import { checkQuery, type QueryGuardResult } from "./query-guard";
 
-export type GuardVerdict = "CONTINUE" | "STOP" | "RECOVERY_PENDING";
+export type GuardVerdict = "CONTINUE" | "DEGRADE" | "STOP" | "RECOVERY_PENDING";
 
 export interface GuardInput {
   readonly budget?: { readonly spent: number; readonly limit: number };
@@ -24,6 +24,7 @@ export interface GuardInput {
 export interface GuardCheckResult {
   readonly verdict: GuardVerdict;
   readonly shouldTransitionToStopped: boolean;
+  readonly shouldTransitionToDegraded: boolean;
   readonly reasons: readonly string[];
   readonly warnings: readonly string[];
   readonly timestamp: number;
@@ -131,11 +132,17 @@ export function runGuardCheck(
   }
 
   const shouldStop = reasons.length > 0;
-  const verdict: GuardVerdict = shouldStop ? "STOP" : "CONTINUE";
+  const shouldDegrade = !shouldStop && warnings.length > 0;
+  const verdict: GuardVerdict = shouldStop
+    ? "STOP"
+    : shouldDegrade
+      ? "DEGRADE"
+      : "CONTINUE";
 
   return Object.freeze({
     verdict,
     shouldTransitionToStopped: shouldStop,
+    shouldTransitionToDegraded: shouldDegrade,
     reasons: freezeStrings(reasons),
     warnings: freezeStrings(warnings),
     timestamp,

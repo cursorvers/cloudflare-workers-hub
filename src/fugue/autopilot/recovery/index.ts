@@ -5,6 +5,7 @@ export {
   type HealthGateResult,
   DEFAULT_HEALTH_GATE_CONFIG,
   checkCurrentMode,
+  checkCurrentModeExtended,
   checkHeartbeatFreshness,
   checkCircuitBreaker,
   checkBudgetStatus,

@@ -1,3 +1,32 @@
+import type { ExtendedMode, ModeState, TransitionPolicy } from './mode-machine';
+import {
+  createInitialModeState,
+  attemptTransition as extAttemptTransition,
+  applyModeTransition as extApplyTransition,
+  isModeOperational,
+  isModeHealthy,
+  checkModeTimeout,
+  isValidTransition,
+  EXTENDED_MODES,
+  DEFAULT_TRANSITION_POLICY,
+} from './mode-machine';
+
+// Re-export extended mode types and functions for downstream consumers
+export type { ExtendedMode, ModeState, TransitionPolicy };
+export {
+  EXTENDED_MODES,
+  DEFAULT_TRANSITION_POLICY,
+  createInitialModeState,
+  isValidTransition,
+  isModeOperational,
+  isModeHealthy,
+  checkModeTimeout,
+};
+
+// =============================================================================
+// Legacy Types (backward compatible — NORMAL | STOPPED)
+// =============================================================================
+
 export type RuntimeMode = 'NORMAL' | 'STOPPED';
 
 export interface ModeTransitionResult {
@@ -14,6 +43,22 @@ export interface RuntimeState {
   readonly transitionCount: number;
 }
 
+// =============================================================================
+// Extended State (Phase 3: 4-mode support)
+// =============================================================================
+
+export interface ExtendedRuntimeState {
+  readonly mode: ExtendedMode;
+  readonly previousMode: ExtendedMode | null;
+  readonly lastTransition: ModeTransitionResult | null;
+  readonly transitionCount: number;
+  readonly enteredCurrentModeAt: number;
+}
+
+// =============================================================================
+// Mode Checks & Conversions
+// =============================================================================
+
 const RUNTIME_MODES = Object.freeze({
   NORMAL: 'NORMAL',
   STOPPED: 'STOPPED',
@@ -21,6 +66,113 @@ const RUNTIME_MODES = Object.freeze({
 
 function isRuntimeMode(value: unknown): value is RuntimeMode {
   return value === RUNTIME_MODES.NORMAL || value === RUNTIME_MODES.STOPPED;
+}
+
+function isExtendedMode(value: unknown): value is ExtendedMode {
+  return value === 'NORMAL' || value === 'DEGRADED' || value === 'RECOVERY' || value === 'STOPPED';
+}
+
+/**
+ * Convert ExtendedMode to legacy RuntimeMode.
+ * DEGRADED and RECOVERY map to NORMAL (operational) and STOPPED respectively
+ * for legacy consumers that only understand NORMAL/STOPPED.
+ */
+export function toLegacyMode(mode: ExtendedMode): RuntimeMode {
+  switch (mode) {
+    case 'NORMAL':
+    case 'DEGRADED':
+      return 'NORMAL';
+    case 'RECOVERY':
+    case 'STOPPED':
+      return 'STOPPED';
+  }
+}
+
+/**
+ * Check if an extended mode is operational (NORMAL or DEGRADED).
+ */
+export function isExtendedOperational(mode: ExtendedMode): boolean {
+  return isModeOperational(mode);
+}
+
+/**
+ * Create an initial ExtendedRuntimeState (STOPPED, fail-closed).
+ */
+export function createInitialExtendedState(nowMs?: number): ExtendedRuntimeState {
+  const modeState = createInitialModeState(nowMs);
+  return Object.freeze({
+    mode: modeState.mode,
+    previousMode: modeState.previousMode,
+    lastTransition: null,
+    transitionCount: 0,
+    enteredCurrentModeAt: modeState.enteredCurrentModeAt,
+  });
+}
+
+/**
+ * Transition ExtendedRuntimeState to a new mode with FSM validation.
+ */
+export function transitionExtendedMode(
+  state: ExtendedRuntimeState,
+  targetMode: ExtendedMode,
+  reason: string,
+  nowMs?: number,
+): ModeTransitionResult {
+  const modeState: ModeState = Object.freeze({
+    mode: state.mode,
+    previousMode: state.previousMode,
+    lastTransition: null,
+    transitionCount: state.transitionCount,
+    enteredCurrentModeAt: state.enteredCurrentModeAt,
+  });
+
+  const transition = extAttemptTransition(modeState, targetMode, reason, nowMs);
+
+  // Map to legacy ModeTransitionResult format
+  return Object.freeze({
+    success: transition.success,
+    previousMode: toLegacyMode(transition.from),
+    currentMode: toLegacyMode(transition.to),
+    reason: transition.reason,
+    timestamp: transition.timestamp,
+  });
+}
+
+/**
+ * Apply transition to ExtendedRuntimeState, producing new immutable state.
+ */
+export function applyExtendedTransition(
+  state: ExtendedRuntimeState,
+  targetMode: ExtendedMode,
+  reason: string,
+  nowMs?: number,
+): ExtendedRuntimeState {
+  const modeState: ModeState = Object.freeze({
+    mode: state.mode,
+    previousMode: state.previousMode,
+    lastTransition: null,
+    transitionCount: state.transitionCount,
+    enteredCurrentModeAt: state.enteredCurrentModeAt,
+  });
+
+  const transition = extAttemptTransition(modeState, targetMode, reason, nowMs);
+  const newModeState = extApplyTransition(modeState, transition);
+
+  const legacyTransition: ModeTransitionResult = Object.freeze({
+    success: transition.success,
+    previousMode: toLegacyMode(transition.from),
+    currentMode: toLegacyMode(transition.to),
+    reason: transition.reason,
+    timestamp: transition.timestamp,
+  });
+
+  return Object.freeze({
+    mode: newModeState.mode,
+    previousMode: newModeState.previousMode,
+    lastTransition: legacyTransition,
+    transitionCount: newModeState.transitionCount,
+    enteredCurrentModeAt: newModeState.enteredCurrentModeAt,
+  });
 }
 
 function normalizeReason(reason: string): string {
@@ -170,7 +322,12 @@ export function applyTransition(
   });
 }
 
-// Check whether the runtime is operational.
+// Check whether the runtime is operational (legacy: NORMAL only).
 export function isOperational(state: RuntimeState): boolean {
   return state.mode === RUNTIME_MODES.NORMAL;
+}
+
+// Check whether the extended runtime is operational (NORMAL or DEGRADED).
+export function isExtendedStateOperational(state: ExtendedRuntimeState): boolean {
+  return isModeOperational(state.mode);
 }

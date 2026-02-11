@@ -77,7 +77,7 @@ describe("runtime/runtime-guard", () => {
     expect(result.reasons.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("WARNING のみ -> CONTINUE（warnings含む）", () => {
+  it("WARNING のみ -> DEGRADE（warnings含む）", () => {
     const heartbeatState = recordHeartbeat(createHeartbeatState(1000), 2000);
     const result = runGuardCheck(
       {
@@ -87,8 +87,9 @@ describe("runtime/runtime-guard", () => {
       12001,
     );
 
-    expect(result.verdict).toBe("CONTINUE");
+    expect(result.verdict).toBe("DEGRADE");
     expect(result.shouldTransitionToStopped).toBe(false);
+    expect(result.shouldTransitionToDegraded).toBe(true);
     expect(result.reasons).toEqual([]);
     expect(result.warnings.length).toBeGreaterThan(0);
   });

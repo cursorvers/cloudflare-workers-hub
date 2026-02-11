@@ -144,13 +144,14 @@ describe('durable-objects/autopilot-coordinator (logic)', () => {
     expect(fresh.consecutiveFailures).toBe(0);
   });
 
-  it('budget warning does not trigger STOP', () => {
+  it('budget warning triggers DEGRADE (not STOP)', () => {
     const guardResult = runGuardCheck({
       budget: { spent: 191, limit: 200 },
     }, 3000);
 
     // 191/200 = 0.955 >= 0.95 warning but < 0.98 critical
-    expect(guardResult.verdict).toBe('CONTINUE');
+    expect(guardResult.verdict).toBe('DEGRADE');
+    expect(guardResult.shouldTransitionToDegraded).toBe(true);
     expect(guardResult.warnings.length).toBeGreaterThan(0);
     expect(guardResult.shouldTransitionToStopped).toBe(false);
   });

@@ -13,7 +13,7 @@
 
 import type { HeartbeatState } from '../runtime/heartbeat';
 import type { CircuitBreakerState } from '../runtime/circuit-breaker';
-import type { RuntimeState } from '../runtime/coordinator';
+import type { RuntimeState, ExtendedRuntimeState, ExtendedMode } from '../runtime/coordinator';
 
 // =============================================================================
 // Configuration
@@ -67,6 +67,20 @@ export function checkCurrentMode(runtimeState: RuntimeState): HealthGateCheck {
     name: 'current_mode',
     passed,
     reason: passed ? 'System is in STOPPED mode (recovery eligible)' : `System is in ${runtimeState.mode} mode (must be STOPPED)`,
+  });
+}
+
+/**
+ * Extended mode check: allows recovery from STOPPED or RECOVERY modes.
+ */
+export function checkCurrentModeExtended(mode: ExtendedMode): HealthGateCheck {
+  const recoveryEligible = mode === 'STOPPED' || mode === 'RECOVERY';
+  return Object.freeze({
+    name: 'current_mode',
+    passed: recoveryEligible,
+    reason: recoveryEligible
+      ? `System is in ${mode} mode (recovery eligible)`
+      : `System is in ${mode} mode (must be STOPPED or RECOVERY)`,
   });
 }
 

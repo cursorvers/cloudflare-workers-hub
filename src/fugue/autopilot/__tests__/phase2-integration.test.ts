@@ -436,7 +436,8 @@ describe('Autopilot Phase 2 Integration', () => {
         budget: { spent: 191, limit: 200 },
         heartbeat: { state: heartbeat },
       }, 5000);
-      expect(warningGuard.verdict).toBe('CONTINUE');
+      expect(warningGuard.verdict).toBe('DEGRADE');
+      expect(warningGuard.shouldTransitionToDegraded).toBe(true);
       expect(warningGuard.warnings.length).toBeGreaterThan(0);
       await auditBudgetUpdate(env, 191, 200);
 
