@@ -34,7 +34,8 @@ bindings = [
   { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
   { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
   { name = "SYSTEM_EVENTS", class_name = "SystemEvents" },
-  { name = "RUN_COORDINATOR", class_name = "RunCoordinator" }
+  { name = "RUN_COORDINATOR", class_name = "RunCoordinator" },
+  { name = "AUTOPILOT_COORDINATOR", class_name = "AutopilotCoordinator" }
 ]
 
 # DO migration (required for first deployment, free plan requires new_sqlite_classes)
@@ -57,6 +58,10 @@ new_sqlite_classes = ["RateLimiter"]
 [[migrations]]
 tag = "v5"
 new_sqlite_classes = ["RunCoordinator"]
+
+[[migrations]]
+tag = "v6"
+new_sqlite_classes = ["AutopilotCoordinator"]
 
 # R2 bucket for audio staging and Obsidian vault (requires R2 enabled on account)
 # [[r2_buckets]]
@@ -196,7 +201,8 @@ bindings = [
   { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
   { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
   { name = "SYSTEM_EVENTS", class_name = "SystemEvents" },
-  { name = "RUN_COORDINATOR", class_name = "RunCoordinator" }
+  { name = "RUN_COORDINATOR", class_name = "RunCoordinator" },
+  { name = "AUTOPILOT_COORDINATOR", class_name = "AutopilotCoordinator" }
 ]
 
 [env.canary.triggers]
@@ -277,7 +283,8 @@ bindings = [
   { name = "TASK_COORDINATOR", class_name = "TaskCoordinator" },
   { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
   { name = "SYSTEM_EVENTS", class_name = "SystemEvents" },
-  { name = "RUN_COORDINATOR", class_name = "RunCoordinator" }
+  { name = "RUN_COORDINATOR", class_name = "RunCoordinator" },
+  { name = "AUTOPILOT_COORDINATOR", class_name = "AutopilotCoordinator" }
 ]
 
 [[env.dev.r2_buckets]]

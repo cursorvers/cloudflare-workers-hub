@@ -21,6 +21,7 @@ export { CockpitWebSocket } from './durable-objects/cockpit-websocket';
 export { SystemEvents } from './durable-objects/system-events';
 export { RateLimiter } from './durable-objects/rate-limiter';
 export { RunCoordinator } from './durable-objects/run-coordinator';
+export { AutopilotCoordinator } from './fugue/autopilot/durable-objects/autopilot-coordinator';
 
 // Handlers
 import { ensureServiceRoleMappings } from './handlers/initialization';

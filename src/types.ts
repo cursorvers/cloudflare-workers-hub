@@ -29,6 +29,7 @@ export interface Env {
   COCKPIT_WS?: DurableObjectNamespace;
   SYSTEM_EVENTS?: DurableObjectNamespace;
   RUN_COORDINATOR?: DurableObjectNamespace; // FUGUE Orchestration run state machine
+  AUTOPILOT_COORDINATOR?: DurableObjectNamespace; // FUGUE Autopilot 24h runtime safety
   AUDIO_STAGING?: R2Bucket;
   OBSIDIAN_VAULT?: R2Bucket;
   R2?: R2Bucket; // Receipt WORM storage
