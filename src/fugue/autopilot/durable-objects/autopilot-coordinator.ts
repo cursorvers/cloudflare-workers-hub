@@ -333,8 +333,7 @@ export class AutopilotCoordinator extends DurableObject<Env> {
 
   /** POST /circuit/success */
   private async handleCircuitSuccess(): Promise<Response> {
-    const now = Date.now();
-    this.circuitBreakerState = cbRecordSuccess(this.circuitBreakerState, now);
+    this.circuitBreakerState = cbRecordSuccess(this.circuitBreakerState);
     await this.persistState();
     return jsonResponse({ success: true, data: { circuitBreakerState: this.circuitBreakerState } });
   }
