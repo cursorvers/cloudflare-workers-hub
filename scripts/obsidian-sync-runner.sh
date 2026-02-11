@@ -14,9 +14,23 @@ LOCK_DIR="$LOG_DIR/obsidian-sync.lock"
 # Ensure log directory exists
 mkdir -p "$LOG_DIR"
 
-# Simple non-overlapping guard (launchd can re-trigger while a run is in progress).
+# Non-overlapping guard with stale lock detection (10 min timeout).
+LOCK_MAX_AGE_SEC=600
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  exit 0
+  # Check if lock is stale (older than LOCK_MAX_AGE_SEC)
+  lock_age=0
+  if [ -d "$LOCK_DIR" ]; then
+    lock_created=$(stat -f%B "$LOCK_DIR" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    lock_age=$(( now - lock_created ))
+  fi
+  if [ "$lock_age" -gt "$LOCK_MAX_AGE_SEC" ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') WARN: Stale lock detected (${lock_age}s old). Removing." >> "$LOG_FILE"
+    rmdir "$LOCK_DIR" 2>/dev/null || rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+  else
+    exit 0
+  fi
 fi
 cleanup() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
 trap cleanup EXIT
