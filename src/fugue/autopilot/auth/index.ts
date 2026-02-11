@@ -3,3 +3,4 @@ export * from './authenticator';
 export * from './webhook-verifier';
 export * from './csrf-guard';
 export * from './rbac';
+export * from './secrets-validator';

@@ -81,6 +81,9 @@ export interface Env {
   OPENAI_API_KEY?: string;         // GPT-4o-mini for classification/summarization
   // Anthropic (optional, alternate provider)
   ANTHROPIC_API_KEY?: string;
+  // FUGUE Autopilot
+  AUTOPILOT_API_KEY?: string;         // Autopilot API authentication key
+  AUTOPILOT_WEBHOOK_SECRET?: string;  // Webhook signature verification secret
   // Google Slides (optional, for auto-generating slides from digests)
   GOOGLE_CLIENT_ID?: string;       // Google OAuth client ID
   GOOGLE_CLIENT_SECRET?: string;   // Google OAuth client secret
