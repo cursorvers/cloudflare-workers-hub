@@ -15,6 +15,9 @@ import {
   DEFAULT_RETRY_POLICY,
 } from '../types';
 
+/** Flush microtask queue (runDetached uses Promise.resolve().then()) */
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
 function makeTraceContext(): TraceContext {
   return Object.freeze({
     traceId: 'trace-1' as TraceId,
@@ -78,53 +81,58 @@ describe('executor/side-effects', () => {
     expect(Object.isFrozen(NOOP_SIDE_EFFECT_HANDLER)).toBe(true);
   });
 
-  it('LoggingSideEffectHandler logs success', () => {
+  it('LoggingSideEffectHandler logs success', async () => {
     const info = vi.fn();
     const handler = new LoggingSideEffectHandler({ info, warn: vi.fn(), error: vi.fn() });
 
     handler.onSuccess(makeSuccessResult(), makePlan());
+    await flush();
 
     expect(info).toHaveBeenCalledOnce();
     expect(info.mock.calls[0][0]).toContain('success');
   });
 
-  it('LoggingSideEffectHandler logs failure', () => {
+  it('LoggingSideEffectHandler logs failure', async () => {
     const error = vi.fn();
     const handler = new LoggingSideEffectHandler({ info: vi.fn(), warn: vi.fn(), error });
 
     handler.onFailure(makeFailureResult(), makePlan());
+    await flush();
 
     expect(error).toHaveBeenCalledOnce();
     expect(error.mock.calls[0][0]).toContain('failure');
   });
 
-  it('LoggingSideEffectHandler logs timeout', () => {
+  it('LoggingSideEffectHandler logs timeout', async () => {
     const warn = vi.fn();
     const handler = new LoggingSideEffectHandler({ info: vi.fn(), warn, error: vi.fn() });
 
     handler.onTimeout(makeFailureResult(), makePlan());
+    await flush();
 
     expect(warn).toHaveBeenCalledOnce();
     expect(warn.mock.calls[0][0]).toContain('timeout');
   });
 
-  it('LoggingSideEffectHandler logs retry', () => {
+  it('LoggingSideEffectHandler logs retry', async () => {
     const warn = vi.fn();
     const handler = new LoggingSideEffectHandler({ info: vi.fn(), warn, error: vi.fn() });
 
     handler.onRetry(makeFailureResult(), makePlan(), 2);
+    await flush();
 
     expect(warn).toHaveBeenCalledOnce();
     expect(warn.mock.calls[0][0]).toContain('retry');
   });
 
-  it('CompositeSideEffectHandler calls all handlers', () => {
+  it('CompositeSideEffectHandler calls all handlers', async () => {
     const h1: SideEffectHandler = { onSuccess: vi.fn(), onFailure: vi.fn(), onTimeout: vi.fn(), onRetry: vi.fn() };
     const h2: SideEffectHandler = { onSuccess: vi.fn(), onFailure: vi.fn(), onTimeout: vi.fn(), onRetry: vi.fn() };
     const composite = new CompositeSideEffectHandler([h1, h2]);
 
     composite.onSuccess(makeSuccessResult(), makePlan());
     composite.onFailure(makeFailureResult(), makePlan());
+    await flush();
 
     expect(h1.onSuccess).toHaveBeenCalledOnce();
     expect(h2.onSuccess).toHaveBeenCalledOnce();
@@ -132,7 +140,7 @@ describe('executor/side-effects', () => {
     expect(h2.onFailure).toHaveBeenCalledOnce();
   });
 
-  it('CompositeSideEffectHandler swallows errors from handlers', () => {
+  it('CompositeSideEffectHandler swallows errors from handlers', async () => {
     const throwing: SideEffectHandler = {
       onSuccess: () => { throw new Error('boom'); },
       onFailure: vi.fn(),
@@ -143,6 +151,8 @@ describe('executor/side-effects', () => {
     const composite = new CompositeSideEffectHandler([throwing, safe]);
 
     expect(() => composite.onSuccess(makeSuccessResult(), makePlan())).not.toThrow();
+    await flush();
+
     expect(safe.onSuccess).toHaveBeenCalledOnce();
   });
 });

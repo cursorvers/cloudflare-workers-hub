@@ -7,7 +7,13 @@
  * All results are frozen. Side effects are fire-and-forget.
  */
 
-import type { CircuitBreakerState } from '../runtime/circuit-breaker';
+import {
+  type CircuitBreakerState,
+  type CircuitBreakerConfig,
+  DEFAULT_CIRCUIT_CONFIG,
+  recordSuccess as cbRecordSuccess,
+  recordFailure as cbRecordFailure,
+} from '../runtime/circuit-breaker';
 import type { ExtendedMode } from '../runtime/coordinator';
 import type { PolicyDecision } from '../policy/types';
 import type { SpecialistRegistry } from '../specialist/types';
@@ -31,6 +37,9 @@ import {
 // Config
 // =============================================================================
 
+/** Callback to persist updated circuit breaker state for a specialist. */
+export type CircuitUpdateCallback = (specialistId: string, newState: CircuitBreakerState) => void;
+
 export interface ExecutorWorkerConfig {
   readonly adapter: ProviderAdapter;
   readonly registry: SpecialistRegistry;
@@ -38,6 +47,8 @@ export interface ExecutorWorkerConfig {
   readonly circuitStates: ReadonlyMap<string, CircuitBreakerState>;
   readonly weeklyCount: ReadonlyMap<string, number>;
   readonly sideEffects?: SideEffectHandler;
+  readonly onCircuitUpdate?: CircuitUpdateCallback;
+  readonly circuitConfig?: CircuitBreakerConfig;
 }
 
 // =============================================================================
@@ -77,6 +88,8 @@ export class ExecutorWorker implements ToolExecutor {
   private readonly circuitStates: ReadonlyMap<string, CircuitBreakerState>;
   private readonly weeklyCount: ReadonlyMap<string, number>;
   private readonly sideEffects: SideEffectHandler;
+  private readonly onCircuitUpdate: CircuitUpdateCallback;
+  private readonly circuitConfig: CircuitBreakerConfig;
 
   constructor(config: ExecutorWorkerConfig) {
     this.adapter = config.adapter;
@@ -85,6 +98,8 @@ export class ExecutorWorker implements ToolExecutor {
     this.circuitStates = config.circuitStates;
     this.weeklyCount = config.weeklyCount;
     this.sideEffects = config.sideEffects ?? NOOP_SIDE_EFFECT_HANDLER;
+    this.onCircuitUpdate = config.onCircuitUpdate ?? (() => {});
+    this.circuitConfig = config.circuitConfig ?? DEFAULT_CIRCUIT_CONFIG;
   }
 
   async execute(request: ToolRequest, decision: PolicyDecision, signal?: AbortSignal): Promise<ToolResult> {
@@ -155,6 +170,7 @@ export class ExecutorWorker implements ToolExecutor {
       // Success or denied — no retry
       if (result.kind === ToolResultKind.SUCCESS || result.kind === ToolResultKind.DENIED) {
         try { this.sideEffects.onSuccess(result, plan); } catch { /* fire-and-forget */ }
+        this.updateCircuit(plan.specialistId, true);
         return result;
       }
 
@@ -165,6 +181,7 @@ export class ExecutorWorker implements ToolExecutor {
         } else {
           try { this.sideEffects.onFailure(result, plan); } catch { /* fire-and-forget */ }
         }
+        this.updateCircuit(plan.specialistId, false);
         return result;
       }
 
@@ -186,5 +203,17 @@ export class ExecutorWorker implements ToolExecutor {
       error: 'retry loop exhausted unexpectedly',
       retryable: false,
     });
+  }
+
+  /** Update circuit breaker state for a specialist after execution. */
+  private updateCircuit(specialistId: string, success: boolean): void {
+    try {
+      const current = this.circuitStates.get(specialistId);
+      if (!current) return; // No CB tracking for this specialist
+      const next = success
+        ? cbRecordSuccess(current)
+        : cbRecordFailure(current, this.circuitConfig);
+      this.onCircuitUpdate(specialistId, next);
+    } catch { /* fire-and-forget — CB update must never break execution */ }
   }
 }

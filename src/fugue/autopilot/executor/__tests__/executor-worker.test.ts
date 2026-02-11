@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { CircuitBreakerState } from '../../runtime/circuit-breaker';
 import type { SpecialistConfig, SpecialistRegistry } from '../../specialist/types';
 import { EFFECT_TYPES, type SpanId, type TraceContext, type TraceId } from '../../types';
+import { createCircuitBreakerState, type CircuitBreakerState } from '../../runtime/circuit-breaker';
 import { ExecutorWorker, type ExecutorWorkerConfig } from '../executor-worker';
 import type { ProviderAdapter } from '../provider-adapter';
 import type { SideEffectHandler } from '../side-effects';
@@ -282,5 +283,96 @@ describe('executor/ExecutorWorker', () => {
 
     expect(result.kind).toBe(ToolResultKind.FAILURE);
     expect((result as { error: string }).error).toContain('aborted');
+  });
+
+  // -------------------------------------------------------------------------
+  // Circuit Breaker Integration
+  // -------------------------------------------------------------------------
+
+  it('calls onCircuitUpdate with recordSuccess on success', async () => {
+    const onCircuitUpdate = vi.fn();
+    const cbState = createCircuitBreakerState();
+    // FILE_READ routes to glm (category bonus), so track glm
+    const circuitStates = new Map([['codex', cbState], ['glm', cbState]]);
+    const worker = new ExecutorWorker(makeConfig({ onCircuitUpdate, circuitStates }));
+
+    await worker.execute(makeRequest(), allowedDecision);
+
+    expect(onCircuitUpdate).toHaveBeenCalledOnce();
+    const [specialistId, newState] = onCircuitUpdate.mock.calls[0];
+    expect(specialistId).toBe('glm'); // glm preferred for FILE_READ
+    expect(newState.state).toBe('CLOSED');
+    expect(newState.totalSuccesses).toBe(1);
+  });
+
+  it('calls onCircuitUpdate with recordFailure on failure', async () => {
+    const onCircuitUpdate = vi.fn();
+    const cbState = createCircuitBreakerState();
+    const circuitStates = new Map([['codex', cbState], ['glm', cbState]]);
+    const sendRequest = vi.fn().mockResolvedValue(makeFailureResult(false));
+    const worker = new ExecutorWorker(makeConfig({
+      adapter: makeAdapter(sendRequest),
+      onCircuitUpdate,
+      circuitStates,
+    }));
+
+    await worker.execute(makeRequest(), allowedDecision);
+
+    expect(onCircuitUpdate).toHaveBeenCalledOnce();
+    const [specialistId, newState] = onCircuitUpdate.mock.calls[0];
+    expect(specialistId).toBe('glm');
+    expect(newState.totalFailures).toBe(1);
+    expect(newState.consecutiveFailures).toBe(1);
+  });
+
+  it('CB opens after threshold consecutive failures', async () => {
+    const updates: Array<{ id: string; state: CircuitBreakerState }> = [];
+    const cbState = createCircuitBreakerState();
+    const circuitStates = new Map([['codex', cbState], ['glm', cbState]]);
+    const onCircuitUpdate = vi.fn((id: string, state: CircuitBreakerState) => { updates.push({ id, state }); });
+    const sendRequest = vi.fn().mockResolvedValue(makeFailureResult(false));
+
+    // 5 executions, each non-retryable so 1 attempt each
+    for (let i = 0; i < 5; i++) {
+      // Update circuitStates with latest state for routing
+      const latestState = updates.length > 0 ? updates[updates.length - 1].state : cbState;
+      circuitStates.set('glm', latestState);
+      const worker = new ExecutorWorker(makeConfig({
+        adapter: makeAdapter(sendRequest),
+        onCircuitUpdate,
+        circuitStates,
+        circuitConfig: { failureThreshold: 5, cooldownMs: 30_000 },
+      }));
+      await worker.execute(makeRequest({ id: `req-${i}` }), allowedDecision);
+    }
+
+    // After 5 failures, CB should be OPEN
+    expect(updates).toHaveLength(5);
+    expect(updates[4].state.state).toBe('OPEN');
+    expect(updates[4].state.consecutiveFailures).toBe(5);
+  });
+
+  it('does not call onCircuitUpdate when no CB state exists for specialist', async () => {
+    const onCircuitUpdate = vi.fn();
+    const worker = new ExecutorWorker(makeConfig({
+      onCircuitUpdate,
+      circuitStates: new Map(), // empty — no tracking
+    }));
+
+    await worker.execute(makeRequest(), allowedDecision);
+
+    expect(onCircuitUpdate).not.toHaveBeenCalled();
+  });
+
+  it('swallows onCircuitUpdate errors', async () => {
+    const cbState = createCircuitBreakerState();
+    const circuitStates = new Map([['codex', cbState]]);
+    const onCircuitUpdate = vi.fn(() => { throw new Error('persist failed'); });
+    const worker = new ExecutorWorker(makeConfig({ onCircuitUpdate, circuitStates }));
+
+    const result = await worker.execute(makeRequest(), allowedDecision);
+
+    // Should not throw, result still returned
+    expect(result.kind).toBe(ToolResultKind.SUCCESS);
   });
 });
