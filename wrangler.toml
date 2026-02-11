@@ -35,7 +35,8 @@ bindings = [
   { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
   { name = "SYSTEM_EVENTS", class_name = "SystemEvents" },
   { name = "RUN_COORDINATOR", class_name = "RunCoordinator" },
-  { name = "AUTOPILOT_COORDINATOR", class_name = "AutopilotCoordinator" }
+  { name = "AUTOPILOT_COORDINATOR", class_name = "AutopilotCoordinator" },
+  { name = "SAFETY_SENTINEL", class_name = "SafetySentinel" }
 ]
 
 # DO migration (required for first deployment, free plan requires new_sqlite_classes)
@@ -62,6 +63,10 @@ new_sqlite_classes = ["RunCoordinator"]
 [[migrations]]
 tag = "v6"
 new_sqlite_classes = ["AutopilotCoordinator"]
+
+[[migrations]]
+tag = "v7"
+new_sqlite_classes = ["SafetySentinel"]
 
 # R2 bucket for audio staging and Obsidian vault (requires R2 enabled on account)
 # [[r2_buckets]]
@@ -202,7 +207,8 @@ bindings = [
   { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
   { name = "SYSTEM_EVENTS", class_name = "SystemEvents" },
   { name = "RUN_COORDINATOR", class_name = "RunCoordinator" },
-  { name = "AUTOPILOT_COORDINATOR", class_name = "AutopilotCoordinator" }
+  { name = "AUTOPILOT_COORDINATOR", class_name = "AutopilotCoordinator" },
+  { name = "SAFETY_SENTINEL", class_name = "SafetySentinel" }
 ]
 
 [env.canary.triggers]
@@ -284,7 +290,8 @@ bindings = [
   { name = "COCKPIT_WS", class_name = "CockpitWebSocket" },
   { name = "SYSTEM_EVENTS", class_name = "SystemEvents" },
   { name = "RUN_COORDINATOR", class_name = "RunCoordinator" },
-  { name = "AUTOPILOT_COORDINATOR", class_name = "AutopilotCoordinator" }
+  { name = "AUTOPILOT_COORDINATOR", class_name = "AutopilotCoordinator" },
+  { name = "SAFETY_SENTINEL", class_name = "SafetySentinel" }
 ]
 
 [[env.dev.r2_buckets]]

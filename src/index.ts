@@ -22,6 +22,7 @@ export { SystemEvents } from './durable-objects/system-events';
 export { RateLimiter } from './durable-objects/rate-limiter';
 export { RunCoordinator } from './durable-objects/run-coordinator';
 export { AutopilotCoordinator } from './fugue/autopilot/durable-objects/autopilot-coordinator';
+export { SafetySentinel } from './fugue/autopilot/durable-objects/safety-sentinel';
 
 // Handlers
 import { ensureServiceRoleMappings } from './handlers/initialization';
@@ -48,6 +49,7 @@ import { handleReceiptSearch } from './handlers/receipt-search';
 import { handleReceiptSourcesAPI } from './handlers/receipt-sources-api';
 import { handleReceiptList, handleReceiptSummary } from './handlers/receipt-status-api';
 import { handleDLQAPI } from './handlers/dlq-api';
+import { handleAutopilotAPI } from './fugue/autopilot/handlers/autopilot-api';
 
 export type { Env };
 
@@ -1035,6 +1037,11 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
     // Orchestration API endpoints (FUGUE persistent runs)
     if (path.startsWith('/api/orchestrate') || path.startsWith('/api/runs') || path.startsWith('/api/approvals')) {
       return handleOrchestrateAPI(request, env, path, ctx);
+    }
+
+    // Autopilot API endpoints (FUGUE runtime safety management plane)
+    if (path.startsWith('/api/autopilot')) {
+      return handleAutopilotAPI(request, env, path);
     }
 
     // Cockpit API endpoints (for FUGUE monitoring) - with CORS
