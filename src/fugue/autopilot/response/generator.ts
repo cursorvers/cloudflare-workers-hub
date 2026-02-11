@@ -22,7 +22,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function extractToolName(toolResult: ToolResult | null): string {
   if (toolResult === null) return 'operation';
-  if (isRecord(toolResult.data) && typeof toolResult.data.tool === 'string') return toolResult.data.tool;
+  if (toolResult.kind === 'success' && isRecord(toolResult.data) && typeof toolResult.data.tool === 'string') {
+    return toolResult.data.tool;
+  }
   return toolResult.requestId;
 }
 
@@ -85,10 +87,10 @@ export function generateResponse(
 ): ActionableResponse {
   if (uxResponse.action === UX_ACTIONS.AUTO_EXECUTE) {
     const toolName = extractToolName(toolResult);
-    if (toolResult?.status === 'success') {
+    if (toolResult?.kind === 'success') {
       return createResponse('executed', `${toolName} executed`, `Successfully executed ${toolName}.`, [], uxResponse, traceId, toolResult);
     }
-    const errorMessage = toolResult?.error ?? 'execution result unavailable';
+    const errorMessage = (toolResult?.kind === 'failure' || toolResult?.kind === 'timeout') ? toolResult.error : 'execution result unavailable';
     return createResponse('error', `${toolName} failed`, `Execution failed: ${errorMessage}`, [], uxResponse, traceId, toolResult);
   }
   if (uxResponse.action === UX_ACTIONS.CONFIRM_CARD) {

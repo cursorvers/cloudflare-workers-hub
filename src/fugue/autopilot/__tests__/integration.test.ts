@@ -181,6 +181,10 @@ async function runPipeline(options: PipelineOptions): Promise<PipelineResult> {
     effects: Object.freeze([...options.effects]),
     riskTier,
     traceContext,
+    attempt: 1,
+    maxAttempts: 3,
+    requestedAt: new Date().toISOString(),
+    idempotencyKey: `idem-${task.id}`,
   });
 
   const toolResult = ux.action === 'auto-execute' ? await executor.execute(request, decision) : null;
@@ -191,7 +195,7 @@ async function runPipeline(options: PipelineOptions): Promise<PipelineResult> {
         'tool',
         'TOOL_EXECUTION',
         options.traceId,
-        Object.freeze({ status: toolResult.status, requestId: toolResult.requestId }),
+        Object.freeze({ kind: toolResult.kind, requestId: toolResult.requestId }),
       ),
     );
   }
@@ -242,7 +246,7 @@ describe('autopilot integration pipeline', () => {
     expect(result.ux.action).toBe('auto-execute');
     expect(result.response.status).toBe('executed');
     expect(result.response.summary).toContain('executed');
-    expect(result.toolResult?.status).toBe('success');
+    expect(result.toolResult?.kind).toBe('success');
 
     expect(Object.isFrozen(result.decision)).toBe(true);
     expect(Object.isFrozen(result.ux)).toBe(true);

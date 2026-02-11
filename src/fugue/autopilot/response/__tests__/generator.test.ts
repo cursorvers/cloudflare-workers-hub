@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import type { ToolResult } from '../../executor/types';
+import type { ToolResult, SuccessResult, FailureResult } from '../../executor/types';
+import { ToolResultKind, ErrorCode } from '../../executor/types';
 import type { RiskTier, SpanId, TraceContext, TraceId } from '../../types';
 import type { UxResponse } from '../../ux/types';
 import { generateResponse } from '../generator';
@@ -25,20 +26,42 @@ function makeUxResponse(overrides: Partial<UxResponse> = {}): UxResponse {
   return Object.freeze({ ...base, ...overrides });
 }
 
-function makeToolResult(overrides: Partial<ToolResult> = {}): ToolResult {
-  const base: ToolResult = {
+function makeSuccessResult(overrides: Partial<SuccessResult> = {}): SuccessResult {
+  const base: SuccessResult = {
     requestId: 'req-1',
-    status: 'success',
+    kind: ToolResultKind.SUCCESS,
     data: Object.freeze({ tool: 'readFile' }),
+    executionCost: Object.freeze({
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedCostUsd: 0,
+      specialistId: 'mock',
+      pricingTier: 'fixed' as const,
+    }),
     traceContext: makeTraceContext(),
     durationMs: 5,
+    completedAt: '2026-02-11T00:00:00.000Z',
+  };
+  return Object.freeze({ ...base, ...overrides });
+}
+
+function makeFailureResult(overrides: Partial<FailureResult> = {}): FailureResult {
+  const base: FailureResult = {
+    requestId: 'req-1',
+    kind: ToolResultKind.FAILURE,
+    errorCode: ErrorCode.INTERNAL_ERROR,
+    error: 'mock execution failed',
+    retryable: true,
+    traceContext: makeTraceContext(),
+    durationMs: 5,
+    completedAt: '2026-02-11T00:00:00.000Z',
   };
   return Object.freeze({ ...base, ...overrides });
 }
 
 describe('response/generateResponse', () => {
   it("a. auto-execute + success -> 'executed'", () => {
-    const response = generateResponse(makeUxResponse(), makeToolResult(), 'trace-1');
+    const response = generateResponse(makeUxResponse(), makeSuccessResult(), 'trace-1');
     expect(response.status).toBe('executed');
     expect(response.summary).toContain('readFile');
   });
@@ -46,7 +69,7 @@ describe('response/generateResponse', () => {
   it("b. auto-execute + failure -> 'error' with error message", () => {
     const response = generateResponse(
       makeUxResponse(),
-      makeToolResult({ status: 'failure', error: 'mock execution failed', data: undefined }),
+      makeFailureResult({ error: 'mock execution failed' }),
       'trace-1',
     );
     expect(response.status).toBe('error');
@@ -111,7 +134,7 @@ describe('response/generateResponse', () => {
   });
 
   it('j. traceId and timestamp are present', () => {
-    const response = generateResponse(makeUxResponse(), makeToolResult(), 'trace-present');
+    const response = generateResponse(makeUxResponse(), makeSuccessResult(), 'trace-present');
     expect(response.traceId).toBe('trace-present');
     expect(response.timestamp.length).toBeGreaterThan(0);
   });
