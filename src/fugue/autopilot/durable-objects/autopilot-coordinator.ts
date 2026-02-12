@@ -5,6 +5,7 @@
  * Wraps Phase 1 pure functions (coordinator, runtime-guard, heartbeat, etc.)
  * into an alarm-driven Durable Object with HTTP API.
  *
+ * Execution logic extracted to coordinator-execute.ts (Phase 5a refactor).
  * Separated from RunCoordinator (Data Plane: orchestration runs/steps).
  * Fail-closed: any unhandled alarm error transitions to STOPPED.
  */
@@ -15,17 +16,15 @@ import {
   createInitialState,
   transitionMode,
   applyTransition,
-  isOperational,
   createInitialExtendedState,
   applyExtendedTransition,
-  isExtendedStateOperational,
   toLegacyMode,
   type RuntimeState,
   type RuntimeMode,
   type ModeTransitionResult,
   type ExtendedRuntimeState,
 } from '../runtime/coordinator';
-import type { ExtendedMode, TransitionPolicy } from '../runtime/mode-machine';
+import type { ExtendedMode } from '../runtime/mode-machine';
 import {
   checkModeTimeout,
   DEFAULT_TRANSITION_POLICY,
@@ -50,35 +49,24 @@ import {
   recordFailure as cbRecordFailure,
   type CircuitBreakerState,
 } from '../runtime/circuit-breaker';
-import { evaluatePolicy } from '../policy/engine';
-import { DEFAULT_RULES } from '../policy/rules';
-import type { PolicyContext, PolicyDecision } from '../policy/types';
-import { classifyRisk } from '../risk/classifier';
-import { BUDGET_STATES, EFFECT_TYPES, ORIGINS, SUBJECT_TYPES, TRUST_ZONES } from '../types';
-import type { EffectType } from '../types';
-import type { ToolRequest, ToolResult } from '../executor/types';
-import { ToolResultKind, ErrorCode, freezeToolResult } from '../executor/types';
-import {
-  createExecutorWorker,
-  incrementWeeklyCount,
-  type ExecutorStorage,
-} from '../executor/factory';
-import { validateExecuteRequest, MAX_EXECUTE_BODY_SIZE } from '../executor/validation';
-import {
-  type ExecutionQueueState,
-  type ExecutionTask,
-  type ExecutionResult,
-  createExecutionQueueState,
-  createExecutionTask,
-  enqueueExecution,
-  createAsyncAcceptedResponse,
-  isResultExpired,
-  SYNC_EXECUTION_TIMEOUT_MS,
-  EXEC_RESULT_PREFIX,
-  EXEC_TASK_PREFIX,
-  ExecutionTaskPayloadSchema,
-} from '../queue/execution-queue';
+import { type ExecutionQueueState, createExecutionQueueState } from '../queue/execution-queue';
 import { processExecutionBatch } from '../queue/execution-consumer';
+import { handleExecuteRequest, handleTaskPollRequest } from './coordinator-execute';
+import {
+  type MetricsState,
+  createMetricsState,
+  recordModeTransition as metricsRecordTransition,
+  recordGuardVerdict as metricsRecordVerdict,
+  createSnapshot,
+  exportPrometheus,
+  createOpsSummary,
+} from '../metrics/collector';
+import {
+  type HealthProbeState,
+  createHealthProbeState,
+  isProbeOverdue,
+  getHealthSnapshot,
+} from '../health/provider-probe';
 import { safeLog } from '../../../utils/log-sanitizer';
 
 // =============================================================================
@@ -98,15 +86,6 @@ const RECOVER_HYSTERESIS_THRESHOLD = 3;
 
 /** Execution consumer alarm interval (5s, separate from 10s health alarm) */
 const EXEC_CONSUMER_INTERVAL_MS = 5_000;
-
-/** Idempotency key prefix and TTL (1 hour) */
-const IDEMPOTENCY_PREFIX = 'autopilot:idem:';
-const IDEMPOTENCY_TTL_MS = 60 * 60 * 1000;
-
-interface IdempotencyEntry {
-  readonly result: unknown;
-  readonly expiresAt: number;
-}
 
 // =============================================================================
 // Types
@@ -184,6 +163,8 @@ export class AutopilotCoordinator extends DurableObject<Env> {
   private hysteresis: HysteresisState;
   private executionQueue: ExecutionQueueState;
   private lastExecConsumerRunMs: number;
+  private metricsState: MetricsState;
+  private healthProbeState: HealthProbeState;
   private initialized: boolean;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -197,6 +178,8 @@ export class AutopilotCoordinator extends DurableObject<Env> {
     this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
     this.executionQueue = createExecutionQueueState();
     this.lastExecConsumerRunMs = 0;
+    this.metricsState = createMetricsState(Date.now());
+    this.healthProbeState = createHealthProbeState();
     this.initialized = false;
   }
 
@@ -323,13 +306,26 @@ export class AutopilotCoordinator extends DurableObject<Env> {
       }
 
       if (path === '/execute' && request.method === 'POST') {
-        return this.handleExecute(request);
+        return handleExecuteRequest(request, this.buildExecuteContext());
       }
 
       // GET /task/:id — poll for async execution result
       if (path.startsWith('/task/') && request.method === 'GET') {
         const taskId = path.slice(6); // strip '/task/'
-        return this.handleTaskPoll(taskId, request);
+        return handleTaskPollRequest(taskId, this.buildExecuteContext());
+      }
+
+      // Phase 6: Observability endpoints
+      if (path === '/metrics' && request.method === 'GET') {
+        return this.handleMetrics();
+      }
+
+      if (path === '/metrics/prometheus' && request.method === 'GET') {
+        return this.handleMetricsPrometheus();
+      }
+
+      if (path === '/ops/summary' && request.method === 'GET') {
+        return this.handleOpsSummary();
       }
 
       return errorResponse('Not found', 404, 'NOT_FOUND');
@@ -479,330 +475,52 @@ export class AutopilotCoordinator extends DurableObject<Env> {
     return jsonResponse({ success: true, data: { circuitBreakerState: this.circuitBreakerState } });
   }
 
-  /**
-   * POST /execute — Execute a tool request through the full pipeline.
-   *
-   * Flow: validate → compute policy (server-side) → route → execute → persist CB → return result
-   * Security: PolicyDecision is NEVER accepted from the client.
-   */
-  private async handleExecute(request: Request): Promise<Response> {
-    // 1. Body size check
-    const contentLength = parseInt(request.headers.get('content-length') ?? '0', 10);
-    if (contentLength > MAX_EXECUTE_BODY_SIZE) {
-      return errorResponse('Request body too large', 413, 'PAYLOAD_TOO_LARGE');
-    }
-
-    // 2. Parse and validate
-    let bodyText: string;
-    try {
-      bodyText = await request.text();
-      // Use byte length for accurate size check (multi-byte chars)
-      if (new TextEncoder().encode(bodyText).byteLength > MAX_EXECUTE_BODY_SIZE) {
-        return errorResponse('Request body too large', 413, 'PAYLOAD_TOO_LARGE');
-      }
-    } catch {
-      return errorResponse('Failed to read request body', 400, 'INVALID_BODY');
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(bodyText);
-    } catch {
-      return errorResponse('Request body must be valid JSON', 400, 'INVALID_BODY');
-    }
-
-    const validation = validateExecuteRequest(parsed);
-    if (!validation.success || !validation.data) {
-      return errorResponse(`Validation failed: ${validation.error}`, 400, 'VALIDATION_ERROR');
-    }
-
-    const toolRequest = validation.data.request as unknown as ToolRequest;
-
-    // 3. Check if system is operational (extended mode: NORMAL or DEGRADED)
-    // RECOVERY mode rejects with 503 (health check phase, not accepting work)
-    if (!this.isSystemOperational()) {
-      return jsonResponse({
-        success: false,
-        data: freezeToolResult({
-          requestId: toolRequest.id,
-          kind: ToolResultKind.FAILURE,
-          traceContext: toolRequest.traceContext,
-          durationMs: 0,
-          completedAt: new Date().toISOString(),
-          errorCode: ErrorCode.INTERNAL_ERROR,
-          error: `system not operational (mode: ${this.extendedState.mode})`,
-          retryable: this.extendedState.mode === 'RECOVERY',
-        }),
-      }, 503);
-    }
-
-    // 4. Idempotency check — return cached result for duplicate requests
-    const idemKey = `${IDEMPOTENCY_PREFIX}${toolRequest.idempotencyKey}`;
-    const cachedEntry = await this.ctx.storage.get<IdempotencyEntry>(idemKey);
-    if (cachedEntry && cachedEntry.expiresAt > Date.now()) {
-      return jsonResponse({ success: true, data: cachedEntry.result });
-    }
-
-    // 5. Server-side risk re-classification (CRITICAL: never trust client riskTier/effects)
-    const knownEffectSet = new Set<string>(Object.values(EFFECT_TYPES));
-    const validatedEffects: readonly EffectType[] = Object.freeze(
-      toolRequest.effects.filter((e): e is EffectType => knownEffectSet.has(e)),
-    );
-    const hasUnknownEffects = validatedEffects.length !== toolRequest.effects.length;
-
-    // Phase 2 strict mode: reject unknown effects with 400
-    const strictEffects = this.env.AUTOPILOT_STRICT_EFFECTS === 'true';
-    if (hasUnknownEffects && strictEffects) {
-      const unknownEffects = toolRequest.effects.filter((e) => !knownEffectSet.has(e));
-      return errorResponse(
-        `Unknown effects rejected: ${unknownEffects.join(', ')}`,
-        400,
-        'INVALID_EFFECTS',
-      );
-    }
-
-    // Unknown effects → max risk tier; otherwise compute from category + effects
-    const computedRiskTier = hasUnknownEffects
-      ? 4 as const
-      : classifyRisk({ effects: validatedEffects, category: toolRequest.category, origin: ORIGINS.INTERNAL });
-
-    if (toolRequest.riskTier !== computedRiskTier) {
-      safeLog.warn('[AutopilotCoordinator] Risk tier mismatch (client overridden)', {
-        requestId: toolRequest.id,
-        clientRiskTier: toolRequest.riskTier,
-        computedRiskTier,
-        category: toolRequest.category,
-        clientEffects: toolRequest.effects,
-        validatedEffects,
-      });
-    }
-
-    // 6. Compute policy decision server-side
-    const budgetState = this.budgetSnapshot.spent >= this.budgetSnapshot.limit
-      ? BUDGET_STATES.HALTED
-      : this.budgetSnapshot.spent >= this.budgetSnapshot.limit * 0.8
-        ? BUDGET_STATES.DEGRADED
-        : BUDGET_STATES.NORMAL;
-
-    const policyCtx: PolicyContext = {
-      subject: { id: 'autopilot-system', type: SUBJECT_TYPES.SYSTEM },
-      origin: ORIGINS.INTERNAL,
-      effects: validatedEffects,
-      riskTier: computedRiskTier,
-      trustZone: TRUST_ZONES.TRUSTED_CONFIG,
-      budgetState,
-      traceContext: toolRequest.traceContext,
-    };
-
-    const decision: PolicyDecision = evaluatePolicy(policyCtx, DEFAULT_RULES, []);
-
-    // 7. Determine sync vs async execution
-    const asyncEnabled = this.env.AUTOPILOT_ASYNC_EXECUTION === 'true';
-
-    // 7a. Try sync execution first (with soft timeout if async is enabled)
-    const storage: ExecutorStorage = {
-      get: async <T>(key: string) => this.ctx.storage.get<T>(key),
-      put: async (entries: Record<string, unknown>) => this.ctx.storage.put(entries),
-    };
-
-    try {
-      const { worker } = await createExecutorWorker({
-        env: {
-          OPENAI_API_KEY: this.env.OPENAI_API_KEY,
-          ZAI_API_KEY: this.env.ZAI_API_KEY,
-          GEMINI_API_KEY: this.env.GEMINI_API_KEY,
-        },
-        storage,
-        mode: toLegacyMode(this.extendedState.mode),
-      });
-
-      // If async enabled, use timeout-based fallback
-      if (asyncEnabled) {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), SYNC_EXECUTION_TIMEOUT_MS);
-
-        try {
-          const result = await worker.execute(toolRequest, decision, controller.signal);
-          clearTimeout(timeoutId);
-
-          // Sync success — persist and return
-          await this.postExecutionCleanup(result, toolRequest, storage, idemKey);
-          return jsonResponse({ success: true, data: result });
-        } catch (syncErr) {
-          clearTimeout(timeoutId);
-
-          // Timeout or abort → fall back to async enqueue
-          if (controller.signal.aborted) {
-            return this.enqueueAsyncExecution(toolRequest, computedRiskTier, request.url);
-          }
-          throw syncErr; // Re-throw non-timeout errors
-        }
-      }
-
-      // Non-async path: pure sync execution (original behavior)
-      const result = await worker.execute(toolRequest, decision);
-      await this.postExecutionCleanup(result, toolRequest, storage, idemKey);
-      return jsonResponse({ success: true, data: result });
-    } catch (err) {
-      safeLog.error('[AutopilotCoordinator] Execute error', {
-        error: err instanceof Error ? err.message : String(err),
-        requestId: toolRequest.id,
-      });
-
-      return jsonResponse({
-        success: false,
-        data: freezeToolResult({
-          requestId: toolRequest.id,
-          kind: ToolResultKind.FAILURE,
-          traceContext: toolRequest.traceContext,
-          durationMs: 0,
-          completedAt: new Date().toISOString(),
-          errorCode: ErrorCode.INTERNAL_ERROR,
-          error: 'execution failed',
-          retryable: true,
-        }),
-      }, 500);
-    }
+  /** GET /metrics — JSON metrics snapshot (auth required) */
+  private handleMetrics(): Response {
+    const snapshot = createSnapshot(this.metricsState);
+    return jsonResponse({ success: true, data: snapshot });
   }
 
-  /**
-   * Post-execution cleanup: increment weekly count + persist idempotency.
-   */
-  private async postExecutionCleanup(
-    result: ToolResult,
-    toolRequest: ToolRequest,
-    storage: ExecutorStorage,
-    idemKey: string,
-  ): Promise<void> {
-    if (result.kind === ToolResultKind.SUCCESS && 'executionCost' in result) {
-      try {
-        await incrementWeeklyCount(storage, (result as { executionCost: { specialistId: string } }).executionCost.specialistId);
-      } catch {
-        // Weekly count update is non-critical
-      }
-    }
-
-    try {
-      const entry: IdempotencyEntry = Object.freeze({
-        result,
-        expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
-      });
-      await this.ctx.storage.put({ [idemKey]: entry });
-    } catch {
-      // Idempotency cache is non-critical
-    }
-
-    safeLog.info('[AutopilotCoordinator] Tool execution completed', {
-      requestId: toolRequest.id,
-      kind: result.kind,
-      category: toolRequest.category,
+  /** GET /metrics/prometheus — Prometheus text format */
+  private handleMetricsPrometheus(): Response {
+    const snapshot = createSnapshot(this.metricsState);
+    const text = exportPrometheus(snapshot);
+    return new Response(text, {
+      status: 200,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     });
   }
 
-  /**
-   * Enqueue a tool execution for async processing.
-   * Guards/policy already validated before this point (Security: no bypass).
-   */
-  private async enqueueAsyncExecution(
-    toolRequest: ToolRequest,
-    computedRiskTier: number,
-    requestUrl: string,
-  ): Promise<Response> {
-    try {
-      const payload = ExecutionTaskPayloadSchema.parse({
-        requestId: toolRequest.id,
-        toolName: toolRequest.name,
-        category: toolRequest.category,
-        params: toolRequest.params,
-        effects: toolRequest.effects,
-        computedRiskTier,
-        traceContext: toolRequest.traceContext,
-        idempotencyKey: toolRequest.idempotencyKey,
-      });
-
-      const task = createExecutionTask(
-        'autopilot-system', // ownerId — system-level execution
-        payload,
-        { priority: computedRiskTier >= 3 ? 'low' : 'medium' }, // High risk = lower priority
-      );
-
-      const { nextState, accepted } = enqueueExecution(this.executionQueue, task);
-      if (!accepted) {
-        return errorResponse('Execution queue full or duplicate', 429, 'QUEUE_FULL');
-      }
-
-      this.executionQueue = nextState;
-
-      // Persist task to storage for durability
-      await this.ctx.storage.put({ [`${EXEC_TASK_PREFIX}${task.id}`]: task });
-
-      safeLog.info('[AutopilotCoordinator] Async execution enqueued', {
-        taskId: task.id,
-        requestId: toolRequest.id,
-        category: toolRequest.category,
-      });
-
-      const baseUrl = new URL(requestUrl).origin;
-      const asyncResponse = createAsyncAcceptedResponse(task.id, baseUrl);
-      return jsonResponse({ success: true, data: asyncResponse }, 202);
-    } catch (err) {
-      safeLog.error('[AutopilotCoordinator] Async enqueue failed', {
-        error: err instanceof Error ? err.message : String(err),
-        requestId: toolRequest.id,
-      });
-      return errorResponse('Failed to enqueue async execution', 500, 'ENQUEUE_FAILED');
-    }
+  /** GET /ops/summary — Compact operational summary for dashboards */
+  private handleOpsSummary(): Response {
+    const snapshot = createSnapshot(this.metricsState);
+    const providers = getHealthSnapshot(this.healthProbeState);
+    const summary = createOpsSummary(snapshot, providers);
+    return jsonResponse({ success: true, data: summary });
   }
 
-  /**
-   * GET /task/:id — Poll for async execution result.
-   * Security: scoped by ownerId (IDOR prevention).
-   * Returns: 200 (completed/failed), 202 (pending/processing), 404 (unknown), 410 (expired).
-   */
-  private async handleTaskPoll(taskId: string, _request: Request): Promise<Response> {
-    if (!taskId || taskId.length > 256) {
-      return errorResponse('Invalid task ID', 400, 'VALIDATION_ERROR');
-    }
-
-    // Check result storage first (completed tasks)
-    const resultKey = `${EXEC_RESULT_PREFIX}${taskId}`;
-    const result = await this.ctx.storage.get<ExecutionResult>(resultKey);
-
-    if (result) {
-      if (isResultExpired(result, Date.now())) {
-        return jsonResponse({ success: false, error: { code: 'EXPIRED', message: 'Task result expired' } }, 410);
-      }
-      // Sanitize: only return minimal data (Security: no internal error leakage)
-      return jsonResponse({
-        success: true,
-        data: {
-          taskId: result.taskId,
-          status: result.status,
-          data: result.status === 'completed' ? result.data : undefined,
-          errorCode: result.status === 'failed' ? result.errorCode : undefined,
-          completedAt: result.completedAt,
-          durationMs: result.durationMs,
-        },
-      });
-    }
-
-    // Check if task is pending/processing
-    const taskKey = `${EXEC_TASK_PREFIX}${taskId}`;
-    const task = await this.ctx.storage.get<ExecutionTask>(taskKey);
-
-    if (task) {
-      return jsonResponse({
-        success: true,
-        data: {
-          taskId: task.id,
-          status: task.status,
-          createdAt: task.createdAt,
-          retryAfterMs: 5000,
-        },
-      }, 202);
-    }
-
-    return errorResponse('Task not found', 404, 'NOT_FOUND');
+  /** Build execution context for coordinator-execute module (DI) */
+  private buildExecuteContext() {
+    return {
+      extendedMode: this.extendedState.mode,
+      budgetSpent: this.budgetSnapshot.spent,
+      budgetLimit: this.budgetSnapshot.limit,
+      apiKeys: {
+        OPENAI_API_KEY: this.env.OPENAI_API_KEY,
+        ZAI_API_KEY: this.env.ZAI_API_KEY,
+        GEMINI_API_KEY: this.env.GEMINI_API_KEY,
+      },
+      strictEffects: this.env.AUTOPILOT_STRICT_EFFECTS === 'true',
+      asyncEnabled: this.env.AUTOPILOT_ASYNC_EXECUTION === 'true',
+      storage: {
+        get: async <T>(key: string) => this.ctx.storage.get<T>(key),
+        put: async (entries: Record<string, unknown>) => this.ctx.storage.put(entries),
+        delete: async (key: string) => this.ctx.storage.delete(key),
+      },
+      isOperational: () => this.isSystemOperational(),
+      getExecutionQueue: () => this.executionQueue,
+      setExecutionQueue: (state: ExecutionQueueState) => { this.executionQueue = state; },
+    };
   }
 
   /**
@@ -835,6 +553,11 @@ export class AutopilotCoordinator extends DurableObject<Env> {
         this.syncLegacyState(reason, now);
         this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
 
+        this.metricsState = metricsRecordTransition(this.metricsState, {
+          from: timeoutResult.mode ?? 'UNKNOWN', to: 'STOPPED',
+          reason: reason, timestamp: now,
+        });
+
         safeLog.error('[AutopilotCoordinator] Auto-STOP timeout', {
           timedOutMode: timeoutResult.mode,
           elapsedMs: timeoutResult.elapsedMs,
@@ -858,6 +581,9 @@ export class AutopilotCoordinator extends DurableObject<Env> {
 
         const guardResult = runGuardCheck(guardInput, now);
         this.lastGuardCheck = guardResult;
+        this.metricsState = metricsRecordVerdict(this.metricsState, {
+          verdict: guardResult.verdict, reasons: guardResult.reasons, timestamp: now,
+        });
 
         // Priority 1: Hard-fail → STOPPED
         if (guardResult.shouldTransitionToStopped) {
@@ -865,6 +591,10 @@ export class AutopilotCoordinator extends DurableObject<Env> {
           this.extendedState = applyExtendedTransition(this.extendedState, 'STOPPED', reason, now);
           this.syncLegacyState(reason, now);
           this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
+
+          this.metricsState = metricsRecordTransition(this.metricsState, {
+            from: 'OPERATIONAL', to: 'STOPPED', reason, timestamp: now,
+          });
 
           safeLog.error('[AutopilotCoordinator] Auto-STOP triggered', {
             reasons: guardResult.reasons,
