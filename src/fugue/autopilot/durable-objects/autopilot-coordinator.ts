@@ -16,10 +16,21 @@ import {
   transitionMode,
   applyTransition,
   isOperational,
+  createInitialExtendedState,
+  applyExtendedTransition,
+  isExtendedStateOperational,
+  toLegacyMode,
   type RuntimeState,
   type RuntimeMode,
   type ModeTransitionResult,
+  type ExtendedRuntimeState,
 } from '../runtime/coordinator';
+import type { ExtendedMode, TransitionPolicy } from '../runtime/mode-machine';
+import {
+  checkModeTimeout,
+  DEFAULT_TRANSITION_POLICY,
+  isModeOperational,
+} from '../runtime/mode-machine';
 import {
   runGuardCheck,
   evaluateRecovery,
@@ -61,9 +72,14 @@ import { safeLog } from '../../../utils/log-sanitizer';
 
 const ALARM_INTERVAL_MS = 10_000; // 10s heartbeat alarm
 const STORAGE_KEY_STATE = 'autopilot:state';
+const STORAGE_KEY_STATE_V2 = 'autopilot:state:v2';
 const STORAGE_KEY_HEARTBEAT = 'autopilot:heartbeat';
 const STORAGE_KEY_CIRCUIT = 'autopilot:circuit';
 const STORAGE_KEY_BUDGET = 'autopilot:budget';
+
+/** Hysteresis counters for DEGRADE/RECOVER transitions */
+const DEGRADE_HYSTERESIS_THRESHOLD = 3;
+const RECOVER_HYSTERESIS_THRESHOLD = 3;
 
 /** Idempotency key prefix and TTL (1 hour) */
 const IDEMPOTENCY_PREFIX = 'autopilot:idem:';
@@ -80,6 +96,7 @@ interface IdempotencyEntry {
 
 export interface AutopilotStatus {
   readonly mode: RuntimeMode;
+  readonly extendedMode: ExtendedMode;
   readonly isOperational: boolean;
   readonly transitionCount: number;
   readonly lastTransition: ModeTransitionResult | null;
@@ -99,6 +116,12 @@ export interface BudgetSnapshot {
 export interface TransitionRequest {
   readonly targetMode: RuntimeMode;
   readonly reason: string;
+}
+
+/** Hysteresis state for flap suppression (stored in memory, reset on DO restart) */
+interface HysteresisState {
+  consecutiveDegradeVerdicts: number;
+  consecutiveContinueVerdicts: number;
 }
 
 // =============================================================================
@@ -135,19 +158,23 @@ const DEFAULT_BUDGET_SNAPSHOT: BudgetSnapshot = Object.freeze({
 
 export class AutopilotCoordinator extends DurableObject<Env> {
   private runtimeState: RuntimeState;
+  private extendedState: ExtendedRuntimeState;
   private heartbeatState: HeartbeatState;
   private circuitBreakerState: CircuitBreakerState;
   private budgetSnapshot: BudgetSnapshot;
   private lastGuardCheck: GuardCheckResult | null;
+  private hysteresis: HysteresisState;
   private initialized: boolean;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.runtimeState = createInitialState();
+    this.extendedState = createInitialExtendedState();
     this.heartbeatState = createHeartbeatState(Date.now());
     this.circuitBreakerState = createCircuitBreakerState();
     this.budgetSnapshot = DEFAULT_BUDGET_SNAPSHOT;
     this.lastGuardCheck = null;
+    this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
     this.initialized = false;
   }
 
@@ -158,14 +185,29 @@ export class AutopilotCoordinator extends DurableObject<Env> {
     if (this.initialized) return;
 
     try {
-      const [state, heartbeat, circuit, budget] = await Promise.all([
+      const [state, stateV2, heartbeat, circuit, budget] = await Promise.all([
         this.ctx.storage.get<RuntimeState>(STORAGE_KEY_STATE),
+        this.ctx.storage.get<ExtendedRuntimeState>(STORAGE_KEY_STATE_V2),
         this.ctx.storage.get<HeartbeatState>(STORAGE_KEY_HEARTBEAT),
         this.ctx.storage.get<CircuitBreakerState>(STORAGE_KEY_CIRCUIT),
         this.ctx.storage.get<BudgetSnapshot>(STORAGE_KEY_BUDGET),
       ]);
 
       if (state) this.runtimeState = Object.freeze({ ...state });
+      // v2 takes priority; fall back to legacy state conversion
+      if (stateV2) {
+        this.extendedState = Object.freeze({ ...stateV2 });
+      } else if (state) {
+        // Convert legacy state to extended state
+        const legacyMode: ExtendedMode = state.mode === 'NORMAL' ? 'NORMAL' : 'STOPPED';
+        this.extendedState = Object.freeze({
+          mode: legacyMode,
+          previousMode: null,
+          lastTransition: state.lastTransition,
+          transitionCount: state.transitionCount,
+          enteredCurrentModeAt: Date.now(),
+        });
+      }
       if (heartbeat) this.heartbeatState = Object.freeze({ ...heartbeat });
       if (circuit) this.circuitBreakerState = Object.freeze({ ...circuit });
       if (budget) this.budgetSnapshot = Object.freeze({ ...budget });
@@ -183,12 +225,28 @@ export class AutopilotCoordinator extends DurableObject<Env> {
    * Persist all state to SQLite storage atomically.
    */
   private async persistState(): Promise<void> {
+    // Mirror write: always persist both v1 (legacy) and v2 (extended)
     await this.ctx.storage.put({
       [STORAGE_KEY_STATE]: this.runtimeState,
+      [STORAGE_KEY_STATE_V2]: this.extendedState,
       [STORAGE_KEY_HEARTBEAT]: this.heartbeatState,
       [STORAGE_KEY_CIRCUIT]: this.circuitBreakerState,
       [STORAGE_KEY_BUDGET]: this.budgetSnapshot,
     });
+  }
+
+  /** Check if system is operational using extended mode */
+  private isSystemOperational(): boolean {
+    return isModeOperational(this.extendedState.mode);
+  }
+
+  /** Sync legacy runtimeState from extended state */
+  private syncLegacyState(reason: string, nowMs: number): void {
+    const legacyMode = toLegacyMode(this.extendedState.mode);
+    if (legacyMode !== this.runtimeState.mode) {
+      const result = transitionMode(this.runtimeState, legacyMode, reason, nowMs);
+      this.runtimeState = applyTransition(this.runtimeState, result);
+    }
   }
 
   /**
@@ -260,9 +318,10 @@ export class AutopilotCoordinator extends DurableObject<Env> {
   private handleStatus(): Response {
     const status = freezeStatus({
       mode: this.runtimeState.mode,
-      isOperational: isOperational(this.runtimeState),
-      transitionCount: this.runtimeState.transitionCount,
-      lastTransition: this.runtimeState.lastTransition,
+      extendedMode: this.extendedState.mode,
+      isOperational: this.isSystemOperational(),
+      transitionCount: this.extendedState.transitionCount,
+      lastTransition: this.extendedState.lastTransition,
       lastGuardCheck: this.lastGuardCheck,
       heartbeatState: this.heartbeatState,
       circuitBreakerState: this.circuitBreakerState,
@@ -285,13 +344,24 @@ export class AutopilotCoordinator extends DurableObject<Env> {
       return errorResponse('targetMode must be NORMAL or STOPPED', 400, 'VALIDATION_ERROR');
     }
 
-    const result = transitionMode(this.runtimeState, targetMode, reason);
+    const now = Date.now();
+
+    // Legacy path
+    const result = transitionMode(this.runtimeState, targetMode, reason, now);
     this.runtimeState = applyTransition(this.runtimeState, result);
+
+    // Sync extended state: map legacy NORMAL/STOPPED to extended mode
+    const extTarget: ExtendedMode = targetMode;
+    this.extendedState = applyExtendedTransition(this.extendedState, extTarget, reason, now);
+    // Reset hysteresis on manual transition
+    this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
+
     await this.persistState();
 
     safeLog.info('[AutopilotCoordinator] Mode transition', {
       from: result.previousMode,
       to: result.currentMode,
+      extendedMode: this.extendedState.mode,
       success: result.success,
       reason: result.reason,
     });
@@ -299,7 +369,7 @@ export class AutopilotCoordinator extends DurableObject<Env> {
     return jsonResponse({ success: true, data: result });
   }
 
-  /** POST /recovery */
+  /** POST /recovery — Initiates STOPPED→RECOVERY (Phase 3) or STOPPED→NORMAL (legacy) */
   private async handleRecovery(request: Request): Promise<Response> {
     const body = await request.json().catch(() => null);
     if (!body) return errorResponse('Request body must be valid JSON', 400, 'INVALID_BODY');
@@ -311,24 +381,32 @@ export class AutopilotCoordinator extends DurableObject<Env> {
       return jsonResponse({ success: false, data: recoveryResult }, 403);
     }
 
-    const result = transitionMode(
-      this.runtimeState,
-      'NORMAL',
-      `recovery: ${recoveryResult.reason}`,
-    );
+    const now = Date.now();
+    const reason = `recovery: ${recoveryResult.reason}`;
+
+    // Phase 3: STOPPED → RECOVERY (alarm will promote to NORMAL after health gate)
+    // Extended state goes through RECOVERY intermediate
+    this.extendedState = applyExtendedTransition(this.extendedState, 'RECOVERY', reason, now);
+
+    // Legacy path: still STOPPED→NORMAL for backward compatibility
+    const result = transitionMode(this.runtimeState, 'NORMAL', reason, now);
     this.runtimeState = applyTransition(this.runtimeState, result);
+
     this.circuitBreakerState = createCircuitBreakerState();
+    // Reset hysteresis for recovery
+    this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
     await this.persistState();
 
-    safeLog.info('[AutopilotCoordinator] Recovery completed', {
+    safeLog.info('[AutopilotCoordinator] Recovery initiated', {
       approvedBy: recoveryRequest.approvedBy,
       reason: recoveryRequest.reason,
-      mode: this.runtimeState.mode,
+      extendedMode: this.extendedState.mode,
+      legacyMode: this.runtimeState.mode,
     });
 
     return jsonResponse({
       success: true,
-      data: { recovery: recoveryResult, transition: result },
+      data: { recovery: recoveryResult, transition: result, extendedMode: this.extendedState.mode },
     });
   }
 
@@ -412,8 +490,9 @@ export class AutopilotCoordinator extends DurableObject<Env> {
 
     const toolRequest = validation.data.request as unknown as ToolRequest;
 
-    // 3. Check if system is operational
-    if (!isOperational(this.runtimeState)) {
+    // 3. Check if system is operational (extended mode: NORMAL or DEGRADED)
+    // RECOVERY mode rejects with 503 (health check phase, not accepting work)
+    if (!this.isSystemOperational()) {
       return jsonResponse({
         success: false,
         data: freezeToolResult({
@@ -423,8 +502,8 @@ export class AutopilotCoordinator extends DurableObject<Env> {
           durationMs: 0,
           completedAt: new Date().toISOString(),
           errorCode: ErrorCode.INTERNAL_ERROR,
-          error: `system not operational (mode: ${this.runtimeState.mode})`,
-          retryable: false,
+          error: `system not operational (mode: ${this.extendedState.mode})`,
+          retryable: this.extendedState.mode === 'RECOVERY',
         }),
       }, 503);
     }
@@ -503,7 +582,7 @@ export class AutopilotCoordinator extends DurableObject<Env> {
           GEMINI_API_KEY: this.env.GEMINI_API_KEY,
         },
         storage,
-        mode: this.runtimeState.mode === 'NORMAL' ? 'NORMAL' : 'STOPPED',
+        mode: toLegacyMode(this.extendedState.mode),
       });
 
       // 8. Execute
@@ -569,7 +648,37 @@ export class AutopilotCoordinator extends DurableObject<Env> {
       const now = Date.now();
       this.heartbeatState = recordHeartbeat(this.heartbeatState, now);
 
-      if (isOperational(this.runtimeState)) {
+      // Phase 3: mode timeout check (DEGRADED/RECOVERY auto-STOP)
+      const timeoutResult = checkModeTimeout(
+        {
+          mode: this.extendedState.mode,
+          previousMode: this.extendedState.previousMode,
+          lastTransition: null,
+          transitionCount: this.extendedState.transitionCount,
+          enteredCurrentModeAt: this.extendedState.enteredCurrentModeAt,
+        },
+        DEFAULT_TRANSITION_POLICY,
+        now,
+      );
+
+      if (timeoutResult.timedOut) {
+        const reason = `auto-stop-timeout: ${timeoutResult.mode} exceeded ${timeoutResult.maxMs}ms (elapsed: ${timeoutResult.elapsedMs}ms)`;
+        this.extendedState = applyExtendedTransition(this.extendedState, 'STOPPED', reason, now);
+        this.syncLegacyState(reason, now);
+        this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
+
+        safeLog.error('[AutopilotCoordinator] Auto-STOP timeout', {
+          timedOutMode: timeoutResult.mode,
+          elapsedMs: timeoutResult.elapsedMs,
+          maxMs: timeoutResult.maxMs,
+        });
+
+        await this.persistState();
+        return;
+      }
+
+      // Guard checks only when operational (NORMAL or DEGRADED)
+      if (this.isSystemOperational()) {
         const guardInput: GuardInput = {
           budget: {
             spent: this.budgetSnapshot.spent,
@@ -582,19 +691,99 @@ export class AutopilotCoordinator extends DurableObject<Env> {
         const guardResult = runGuardCheck(guardInput, now);
         this.lastGuardCheck = guardResult;
 
+        // Priority 1: Hard-fail → STOPPED
         if (guardResult.shouldTransitionToStopped) {
-          const stopResult = transitionMode(
-            this.runtimeState,
-            'STOPPED',
-            `auto-stop: ${guardResult.reasons.join('; ')}`,
-            now,
-          );
-          this.runtimeState = applyTransition(this.runtimeState, stopResult);
+          const reason = `auto-stop: ${guardResult.reasons.join('; ')}`;
+          this.extendedState = applyExtendedTransition(this.extendedState, 'STOPPED', reason, now);
+          this.syncLegacyState(reason, now);
+          this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
 
           safeLog.error('[AutopilotCoordinator] Auto-STOP triggered', {
             reasons: guardResult.reasons,
             warnings: guardResult.warnings,
+            extendedMode: this.extendedState.mode,
           });
+        }
+        // Priority 2: DEGRADE verdict with hysteresis
+        else if (guardResult.shouldTransitionToDegraded && this.extendedState.mode === 'NORMAL') {
+          this.hysteresis = {
+            ...this.hysteresis,
+            consecutiveDegradeVerdicts: this.hysteresis.consecutiveDegradeVerdicts + 1,
+            consecutiveContinueVerdicts: 0,
+          };
+
+          if (this.hysteresis.consecutiveDegradeVerdicts >= DEGRADE_HYSTERESIS_THRESHOLD) {
+            const reason = `auto-degrade: ${guardResult.warnings.join('; ')} (${this.hysteresis.consecutiveDegradeVerdicts} consecutive)`;
+            this.extendedState = applyExtendedTransition(this.extendedState, 'DEGRADED', reason, now);
+            this.syncLegacyState(reason, now);
+            this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
+
+            safeLog.warn('[AutopilotCoordinator] Auto-DEGRADE triggered', {
+              warnings: guardResult.warnings,
+              extendedMode: this.extendedState.mode,
+            });
+          }
+        }
+        // Priority 3: CONTINUE verdict — recover from DEGRADED
+        else if (guardResult.verdict === 'CONTINUE' && this.extendedState.mode === 'DEGRADED') {
+          this.hysteresis = {
+            ...this.hysteresis,
+            consecutiveContinueVerdicts: this.hysteresis.consecutiveContinueVerdicts + 1,
+            consecutiveDegradeVerdicts: 0,
+          };
+
+          if (this.hysteresis.consecutiveContinueVerdicts >= RECOVER_HYSTERESIS_THRESHOLD) {
+            const reason = `auto-recover: ${this.hysteresis.consecutiveContinueVerdicts} consecutive CONTINUE verdicts`;
+            this.extendedState = applyExtendedTransition(this.extendedState, 'NORMAL', reason, now);
+            this.syncLegacyState(reason, now);
+            this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
+
+            safeLog.info('[AutopilotCoordinator] Auto-RECOVER from DEGRADED', {
+              extendedMode: this.extendedState.mode,
+            });
+          }
+        }
+        // Reset hysteresis when verdict doesn't match expected direction
+        else {
+          if (guardResult.verdict === 'CONTINUE') {
+            this.hysteresis = { ...this.hysteresis, consecutiveDegradeVerdicts: 0 };
+          }
+        }
+      }
+      // RECOVERY mode: check health gate for promotion to NORMAL
+      else if (this.extendedState.mode === 'RECOVERY') {
+        const guardInput: GuardInput = {
+          budget: {
+            spent: this.budgetSnapshot.spent,
+            limit: this.budgetSnapshot.limit,
+          },
+          circuitBreaker: { state: this.circuitBreakerState },
+          heartbeat: { state: this.heartbeatState },
+        };
+
+        const guardResult = runGuardCheck(guardInput, now);
+        this.lastGuardCheck = guardResult;
+
+        // Health gate: promote to NORMAL if guards pass
+        if (guardResult.verdict === 'CONTINUE') {
+          this.hysteresis = {
+            ...this.hysteresis,
+            consecutiveContinueVerdicts: this.hysteresis.consecutiveContinueVerdicts + 1,
+          };
+
+          if (this.hysteresis.consecutiveContinueVerdicts >= RECOVER_HYSTERESIS_THRESHOLD) {
+            const reason = `recovery-complete: health gate passed ${this.hysteresis.consecutiveContinueVerdicts} consecutive checks`;
+            this.extendedState = applyExtendedTransition(this.extendedState, 'NORMAL', reason, now);
+            this.syncLegacyState(reason, now);
+            this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
+
+            safeLog.info('[AutopilotCoordinator] Recovery completed, promoted to NORMAL', {
+              extendedMode: this.extendedState.mode,
+            });
+          }
+        } else {
+          // Reset consecutive count if any check fails during recovery
+          this.hysteresis = { ...this.hysteresis, consecutiveContinueVerdicts: 0 };
         }
       }
 
@@ -605,12 +794,11 @@ export class AutopilotCoordinator extends DurableObject<Env> {
       });
 
       try {
-        const failResult = transitionMode(
-          this.runtimeState,
-          'STOPPED',
-          `fail-closed: alarm error (${err instanceof Error ? err.message : 'unknown'})`,
-        );
+        const reason = `fail-closed: alarm error (${err instanceof Error ? err.message : 'unknown'})`;
+        this.extendedState = applyExtendedTransition(this.extendedState, 'STOPPED', reason);
+        const failResult = transitionMode(this.runtimeState, 'STOPPED', reason);
         this.runtimeState = applyTransition(this.runtimeState, failResult);
+        this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
         await this.persistState();
       } catch (persistErr) {
         safeLog.error('[AutopilotCoordinator] Failed to persist fail-closed state', {
