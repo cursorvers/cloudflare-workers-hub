@@ -39,6 +39,18 @@ import {
   recordFailure as cbRecordFailure,
   type CircuitBreakerState,
 } from '../runtime/circuit-breaker';
+import { evaluatePolicy } from '../policy/engine';
+import { DEFAULT_RULES } from '../policy/rules';
+import type { PolicyContext, PolicyDecision } from '../policy/types';
+import { BUDGET_STATES, ORIGINS, SUBJECT_TYPES, TRUST_ZONES } from '../types';
+import type { ToolRequest, ToolResult } from '../executor/types';
+import { ToolResultKind, ErrorCode, freezeToolResult } from '../executor/types';
+import {
+  createExecutorWorker,
+  incrementWeeklyCount,
+  type ExecutorStorage,
+} from '../executor/factory';
+import { validateExecuteRequest, MAX_EXECUTE_BODY_SIZE } from '../executor/validation';
 import { safeLog } from '../../../utils/log-sanitizer';
 
 // =============================================================================
@@ -219,6 +231,10 @@ export class AutopilotCoordinator extends DurableObject<Env> {
         return this.handleCircuitFailure();
       }
 
+      if (path === '/execute' && request.method === 'POST') {
+        return this.handleExecute(request);
+      }
+
       return errorResponse('Not found', 404, 'NOT_FOUND');
     } catch (err) {
       safeLog.error('[AutopilotCoordinator] Request error', {
@@ -344,6 +360,139 @@ export class AutopilotCoordinator extends DurableObject<Env> {
     this.circuitBreakerState = cbRecordFailure(this.circuitBreakerState, undefined, now);
     await this.persistState();
     return jsonResponse({ success: true, data: { circuitBreakerState: this.circuitBreakerState } });
+  }
+
+  /**
+   * POST /execute — Execute a tool request through the full pipeline.
+   *
+   * Flow: validate → compute policy (server-side) → route → execute → persist CB → return result
+   * Security: PolicyDecision is NEVER accepted from the client.
+   */
+  private async handleExecute(request: Request): Promise<Response> {
+    // 1. Body size check
+    const contentLength = parseInt(request.headers.get('content-length') ?? '0', 10);
+    if (contentLength > MAX_EXECUTE_BODY_SIZE) {
+      return errorResponse('Request body too large', 413, 'PAYLOAD_TOO_LARGE');
+    }
+
+    // 2. Parse and validate
+    let bodyText: string;
+    try {
+      bodyText = await request.text();
+      // Use byte length for accurate size check (multi-byte chars)
+      if (new TextEncoder().encode(bodyText).byteLength > MAX_EXECUTE_BODY_SIZE) {
+        return errorResponse('Request body too large', 413, 'PAYLOAD_TOO_LARGE');
+      }
+    } catch {
+      return errorResponse('Failed to read request body', 400, 'INVALID_BODY');
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(bodyText);
+    } catch {
+      return errorResponse('Request body must be valid JSON', 400, 'INVALID_BODY');
+    }
+
+    const validation = validateExecuteRequest(parsed);
+    if (!validation.success || !validation.data) {
+      return errorResponse(`Validation failed: ${validation.error}`, 400, 'VALIDATION_ERROR');
+    }
+
+    const toolRequest = validation.data.request as unknown as ToolRequest;
+
+    // 3. Check if system is operational
+    if (!isOperational(this.runtimeState)) {
+      return jsonResponse({
+        success: false,
+        data: freezeToolResult({
+          requestId: toolRequest.id,
+          kind: ToolResultKind.FAILURE,
+          traceContext: toolRequest.traceContext,
+          durationMs: 0,
+          completedAt: new Date().toISOString(),
+          errorCode: ErrorCode.INTERNAL_ERROR,
+          error: `system not operational (mode: ${this.runtimeState.mode})`,
+          retryable: false,
+        }),
+      }, 503);
+    }
+
+    // 4. Compute policy decision server-side
+    const budgetState = this.budgetSnapshot.spent >= this.budgetSnapshot.limit
+      ? BUDGET_STATES.HALTED
+      : this.budgetSnapshot.spent >= this.budgetSnapshot.limit * 0.8
+        ? BUDGET_STATES.DEGRADED
+        : BUDGET_STATES.NORMAL;
+
+    const policyCtx: PolicyContext = {
+      subject: { id: 'autopilot-system', type: SUBJECT_TYPES.SYSTEM },
+      origin: ORIGINS.INTERNAL,
+      effects: toolRequest.effects,
+      riskTier: toolRequest.riskTier,
+      trustZone: TRUST_ZONES.TRUSTED_CONFIG,
+      budgetState,
+      traceContext: toolRequest.traceContext,
+    };
+
+    const decision: PolicyDecision = evaluatePolicy(policyCtx, DEFAULT_RULES, []);
+
+    // 5. Create executor worker via factory
+    const storage: ExecutorStorage = {
+      get: async <T>(key: string) => this.ctx.storage.get<T>(key),
+      put: async (entries: Record<string, unknown>) => this.ctx.storage.put(entries),
+    };
+
+    try {
+      const { worker } = await createExecutorWorker({
+        env: {
+          OPENAI_API_KEY: this.env.OPENAI_API_KEY,
+          ZAI_API_KEY: this.env.ZAI_API_KEY,
+          GEMINI_API_KEY: this.env.GEMINI_API_KEY,
+        },
+        storage,
+        mode: this.runtimeState.mode === 'NORMAL' ? 'NORMAL' : 'STOPPED',
+      });
+
+      // 6. Execute
+      const result = await worker.execute(toolRequest, decision);
+
+      // 7. Post-execution: increment weekly count for successful execution
+      if (result.kind === ToolResultKind.SUCCESS && 'executionCost' in result) {
+        try {
+          await incrementWeeklyCount(storage, result.executionCost.specialistId);
+        } catch {
+          // Weekly count update is non-critical
+        }
+      }
+
+      safeLog.info('[AutopilotCoordinator] Tool execution completed', {
+        requestId: toolRequest.id,
+        kind: result.kind,
+        category: toolRequest.category,
+      });
+
+      return jsonResponse({ success: true, data: result });
+    } catch (err) {
+      safeLog.error('[AutopilotCoordinator] Execute error', {
+        error: err instanceof Error ? err.message : String(err),
+        requestId: toolRequest.id,
+      });
+
+      return jsonResponse({
+        success: false,
+        data: freezeToolResult({
+          requestId: toolRequest.id,
+          kind: ToolResultKind.FAILURE,
+          traceContext: toolRequest.traceContext,
+          durationMs: 0,
+          completedAt: new Date().toISOString(),
+          errorCode: ErrorCode.INTERNAL_ERROR,
+          error: 'execution failed',
+          retryable: true,
+        }),
+      }, 500);
+    }
   }
 
   /**

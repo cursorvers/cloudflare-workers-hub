@@ -26,6 +26,7 @@ const ROUTES: readonly RouteDefinition[] = Object.freeze([
   { method: 'POST', path: '/api/autopilot/webhook', doPath: '/webhook', auth: 'webhook' },
   { method: 'POST', path: '/api/autopilot/circuit/success', doPath: '/circuit/success', auth: 'bearer' },
   { method: 'POST', path: '/api/autopilot/circuit/failure', doPath: '/circuit/failure', auth: 'bearer' },
+  { method: 'POST', path: '/api/autopilot/execute', doPath: '/execute', auth: 'bearer' },
 ]);
 
 function resolveCorsHeaders(request: Request): Record<string, string> {

@@ -352,6 +352,60 @@ describe('executor/ExecutorWorker', () => {
     expect(updates[4].state.consecutiveFailures).toBe(5);
   });
 
+  it('does not record CB failure for VALIDATION_ERROR (prevents manipulation)', async () => {
+    const onCircuitUpdate = vi.fn();
+    const cbState = createCircuitBreakerState();
+    const circuitStates = new Map([['codex', cbState], ['glm', cbState]]);
+    const validationError = freezeToolResult({
+      requestId: 'req-1',
+      kind: ToolResultKind.FAILURE,
+      traceContext: makeTraceContext(),
+      durationMs: 5,
+      completedAt: '2026-02-11T00:00:00.000Z',
+      errorCode: ErrorCode.VALIDATION_ERROR,
+      error: 'invalid params',
+      retryable: false,
+    });
+    const sendRequest = vi.fn().mockResolvedValue(validationError);
+    const worker = new ExecutorWorker(makeConfig({
+      adapter: makeAdapter(sendRequest),
+      onCircuitUpdate,
+      circuitStates,
+    }));
+
+    await worker.execute(makeRequest(), allowedDecision);
+
+    // VALIDATION_ERROR should NOT trigger CB failure
+    expect(onCircuitUpdate).not.toHaveBeenCalled();
+  });
+
+  it('does not record CB failure for INTERNAL_ERROR (prevents manipulation)', async () => {
+    const onCircuitUpdate = vi.fn();
+    const cbState = createCircuitBreakerState();
+    const circuitStates = new Map([['codex', cbState], ['glm', cbState]]);
+    const internalError = freezeToolResult({
+      requestId: 'req-1',
+      kind: ToolResultKind.FAILURE,
+      traceContext: makeTraceContext(),
+      durationMs: 5,
+      completedAt: '2026-02-11T00:00:00.000Z',
+      errorCode: ErrorCode.INTERNAL_ERROR,
+      error: 'internal failure',
+      retryable: false,
+    });
+    const sendRequest = vi.fn().mockResolvedValue(internalError);
+    const worker = new ExecutorWorker(makeConfig({
+      adapter: makeAdapter(sendRequest),
+      onCircuitUpdate,
+      circuitStates,
+    }));
+
+    await worker.execute(makeRequest(), allowedDecision);
+
+    // INTERNAL_ERROR should NOT trigger CB failure
+    expect(onCircuitUpdate).not.toHaveBeenCalled();
+  });
+
   it('does not call onCircuitUpdate when no CB state exists for specialist', async () => {
     const onCircuitUpdate = vi.fn();
     const worker = new ExecutorWorker(makeConfig({

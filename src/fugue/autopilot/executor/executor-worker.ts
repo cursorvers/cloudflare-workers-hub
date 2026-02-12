@@ -170,7 +170,7 @@ export class ExecutorWorker implements ToolExecutor {
       // Success or denied — no retry
       if (result.kind === ToolResultKind.SUCCESS || result.kind === ToolResultKind.DENIED) {
         try { this.sideEffects.onSuccess(result, plan); } catch { /* fire-and-forget */ }
-        this.updateCircuit(plan.specialistId, true);
+        this.updateCircuit(plan.specialistId, result);
         return result;
       }
 
@@ -181,7 +181,7 @@ export class ExecutorWorker implements ToolExecutor {
         } else {
           try { this.sideEffects.onFailure(result, plan); } catch { /* fire-and-forget */ }
         }
-        this.updateCircuit(plan.specialistId, false);
+        this.updateCircuit(plan.specialistId, result);
         return result;
       }
 
@@ -205,15 +205,31 @@ export class ExecutorWorker implements ToolExecutor {
     });
   }
 
-  /** Update circuit breaker state for a specialist after execution. */
-  private updateCircuit(specialistId: string, success: boolean): void {
+  /**
+   * Update circuit breaker state for a specialist after execution.
+   * Only server-side errors (TIMEOUT, PROVIDER_ERROR, RATE_LIMITED) count as CB failures.
+   * VALIDATION_ERROR and INTERNAL_ERROR are excluded to prevent CB manipulation.
+   */
+  private updateCircuit(specialistId: string, result: ToolResult): void {
     try {
       const current = this.circuitStates.get(specialistId);
       if (!current) return; // No CB tracking for this specialist
-      const next = success
-        ? cbRecordSuccess(current)
-        : cbRecordFailure(current, this.circuitConfig);
-      this.onCircuitUpdate(specialistId, next);
+
+      const isSuccess = result.kind === ToolResultKind.SUCCESS || result.kind === ToolResultKind.DENIED;
+      if (isSuccess) {
+        this.onCircuitUpdate(specialistId, cbRecordSuccess(current));
+        return;
+      }
+
+      // Only count retryable server-side errors as CB failures
+      const cbFailureCodes: readonly string[] = [ErrorCode.PROVIDER_ERROR, ErrorCode.RATE_LIMITED, ErrorCode.TIMEOUT];
+      const errorCode = result.kind === ToolResultKind.FAILURE || result.kind === ToolResultKind.TIMEOUT
+        ? result.errorCode
+        : null;
+      if (errorCode && cbFailureCodes.includes(errorCode)) {
+        this.onCircuitUpdate(specialistId, cbRecordFailure(current, this.circuitConfig));
+      }
+      // VALIDATION_ERROR, INTERNAL_ERROR — no CB update (prevents manipulation)
     } catch { /* fire-and-forget — CB update must never break execution */ }
   }
 }
