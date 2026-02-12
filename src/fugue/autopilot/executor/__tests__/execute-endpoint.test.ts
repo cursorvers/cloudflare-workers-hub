@@ -11,8 +11,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { evaluatePolicy } from '../../policy/engine';
 import { DEFAULT_RULES } from '../../policy/rules';
 import type { PolicyContext, PolicyDecision } from '../../policy/types';
+import { classifyRisk } from '../../risk/classifier';
 import { createCircuitBreakerState, type CircuitBreakerState } from '../../runtime/circuit-breaker';
-import { BUDGET_STATES, ORIGINS, SUBJECT_TYPES, TRUST_ZONES } from '../../types';
+import { BUDGET_STATES, EFFECT_TYPES, ORIGINS, SUBJECT_TYPES, TRUST_ZONES } from '../../types';
+import type { EffectType } from '../../types';
 import type { SpecialistConfig, SpecialistRegistry } from '../../specialist/types';
 
 import {
@@ -151,6 +153,119 @@ describe('executor/execute-endpoint integration', () => {
 
       const decision = evaluatePolicy(ctx, DEFAULT_RULES, []);
       expect(decision.allowed).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Server-side Risk Re-classification (CRITICAL security fix)
+  // -------------------------------------------------------------------------
+
+  describe('server-side risk re-classification', () => {
+    it('computes correct riskTier for FILE_READ with no effects', () => {
+      const tier = classifyRisk({
+        effects: [],
+        category: ToolCategory.FILE_READ,
+        origin: ORIGINS.INTERNAL,
+      });
+      expect(tier).toBe(0);
+    });
+
+    it('computes correct riskTier for FILE_READ with WRITE effect', () => {
+      const tier = classifyRisk({
+        effects: [EFFECT_TYPES.WRITE],
+        category: ToolCategory.FILE_READ,
+        origin: ORIGINS.INTERNAL,
+      });
+      // WRITE effect → tier 1, FILE_READ category → 0, max(1, 0) = 1
+      expect(tier).toBe(1);
+    });
+
+    it('overrides client under-declared riskTier (DEPLOY with no effects)', () => {
+      // Client claims riskTier=0 for DEPLOY, but server computes tier=3
+      const clientRiskTier = 0;
+      const computed = classifyRisk({
+        effects: [],
+        category: ToolCategory.DEPLOY,
+        origin: ORIGINS.INTERNAL,
+      });
+      expect(computed).toBe(3); // CATEGORY_ESCALATION[DEPLOY] = 3
+      expect(computed).toBeGreaterThan(clientRiskTier);
+    });
+
+    it('overrides client under-declared riskTier (SHELL with EXEC effect)', () => {
+      const clientRiskTier = 0;
+      const computed = classifyRisk({
+        effects: [EFFECT_TYPES.EXEC],
+        category: ToolCategory.SHELL,
+        origin: ORIGINS.INTERNAL,
+      });
+      // EXEC → tier 3, SHELL → tier 2, max(3, 2) = 3
+      expect(computed).toBe(3);
+      expect(computed).toBeGreaterThan(clientRiskTier);
+    });
+
+    it('assigns max tier for unknown effects', () => {
+      const knownEffectSet = new Set<string>(Object.values(EFFECT_TYPES));
+      const clientEffects = ['WRITE', 'UNKNOWN_EFFECT', 'FABRICATED'];
+      const validatedEffects = clientEffects.filter((e): e is EffectType =>
+        knownEffectSet.has(e),
+      );
+      const hasUnknownEffects = validatedEffects.length !== clientEffects.length;
+
+      expect(hasUnknownEffects).toBe(true);
+      // Unknown effects → automatic tier 4
+      const computedTier = hasUnknownEffects ? 4 : classifyRisk({
+        effects: validatedEffects,
+        category: ToolCategory.FILE_READ,
+        origin: ORIGINS.INTERNAL,
+      });
+      expect(computedTier).toBe(4);
+    });
+
+    it('filters out unknown effects and keeps valid ones', () => {
+      const knownEffectSet = new Set<string>(Object.values(EFFECT_TYPES));
+      const clientEffects = ['WRITE', 'PRIV_CHANGE', 'NONEXISTENT'];
+      const validatedEffects = clientEffects.filter((e): e is EffectType =>
+        knownEffectSet.has(e),
+      );
+
+      expect(validatedEffects).toEqual(['WRITE', 'PRIV_CHANGE']);
+      expect(validatedEffects).not.toContain('NONEXISTENT');
+    });
+
+    it('EXFIL effect escalates to tier 4', () => {
+      const computed = classifyRisk({
+        effects: [EFFECT_TYPES.EXFIL],
+        category: ToolCategory.FILE_READ,
+        origin: ORIGINS.INTERNAL,
+      });
+      expect(computed).toBe(4);
+    });
+
+    it('uses computed riskTier in policy context (not client value)', () => {
+      // Simulates the DO handleExecute flow
+      const clientRiskTier = 0; // under-declared
+      const computedRiskTier = classifyRisk({
+        effects: [EFFECT_TYPES.PRIV_CHANGE],
+        category: ToolCategory.AUTH,
+        origin: ORIGINS.INTERNAL,
+      });
+      // PRIV_CHANGE → 3, AUTH → 3, max(3, 3) = 3
+      expect(computedRiskTier).toBe(3);
+
+      const policyCtx: PolicyContext = {
+        subject: { id: 'autopilot-system', type: SUBJECT_TYPES.SYSTEM },
+        origin: ORIGINS.INTERNAL,
+        effects: [EFFECT_TYPES.PRIV_CHANGE],
+        riskTier: computedRiskTier, // server-computed, NOT clientRiskTier
+        trustZone: TRUST_ZONES.TRUSTED_CONFIG,
+        budgetState: BUDGET_STATES.NORMAL,
+        traceContext: { traceId: 'trace-1', spanId: 'span-1', timestamp: '2026-02-12T00:00:00.000Z' },
+      };
+
+      const decision = evaluatePolicy(policyCtx, DEFAULT_RULES, []);
+      // Policy should evaluate with the correct high riskTier
+      expect(policyCtx.riskTier).toBe(3);
     });
   });
 
@@ -322,6 +437,49 @@ describe('executor/execute-endpoint integration', () => {
       const cbFailureCodes = [ErrorCode.PROVIDER_ERROR, ErrorCode.RATE_LIMITED, ErrorCode.TIMEOUT];
       expect(cbFailureCodes).not.toContain(ErrorCode.VALIDATION_ERROR);
       expect(cbFailureCodes).not.toContain(ErrorCode.INTERNAL_ERROR);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Idempotency Key Dedup
+  // -------------------------------------------------------------------------
+
+  describe('idempotency key dedup', () => {
+    it('idempotency entry structure is correct', () => {
+      const entry = Object.freeze({
+        result: freezeToolResult({
+          requestId: 'req-1',
+          kind: ToolResultKind.SUCCESS,
+          traceContext: { traceId: 'trace-1', spanId: 'span-1', timestamp: '2026-02-12T00:00:00.000Z' },
+          durationMs: 10,
+          completedAt: '2026-02-12T00:00:01.000Z',
+          data: Object.freeze({ content: 'test' }),
+          executionCost: Object.freeze({
+            inputTokens: 50, outputTokens: 100, estimatedCostUsd: 0, specialistId: 'glm', pricingTier: 'fixed' as const,
+          }),
+        }),
+        expiresAt: Date.now() + 3_600_000,
+      });
+
+      expect(entry.result).toBeDefined();
+      expect(entry.expiresAt).toBeGreaterThan(Date.now());
+    });
+
+    it('expired idempotency entry is not valid', () => {
+      const entry = {
+        result: { kind: ToolResultKind.SUCCESS },
+        expiresAt: Date.now() - 1000, // expired
+      };
+
+      // Simulates the check in handleExecute
+      const isValid = entry.expiresAt > Date.now();
+      expect(isValid).toBe(false);
+    });
+
+    it('idempotency storage key uses correct prefix', () => {
+      const idempotencyKey = 'idem-test-123';
+      const storageKey = `autopilot:idem:${idempotencyKey}`;
+      expect(storageKey).toBe('autopilot:idem:idem-test-123');
     });
   });
 

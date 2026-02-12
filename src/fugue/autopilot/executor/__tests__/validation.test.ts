@@ -6,6 +6,7 @@ import {
   validateExecuteRequest,
   MAX_EXECUTE_BODY_SIZE,
 } from '../validation';
+import { EFFECT_TYPES } from '../../types';
 import { ToolCategory } from '../types';
 
 // =============================================================================
@@ -102,10 +103,38 @@ describe('executor/validation', () => {
     });
 
     it('rejects too many effects', () => {
-      const effects = Array.from({ length: 11 }, (_, i) => `E${i}`);
+      // Use valid effect values repeated to exceed max count
+      const effects = Array.from({ length: 11 }, () => EFFECT_TYPES.WRITE);
       const req = { ...makeValidRequest(), effects };
       const result = ToolRequestSchema.safeParse(req);
       expect(result.success).toBe(false);
+    });
+
+    it('rejects unknown effect values', () => {
+      const req = { ...makeValidRequest(), effects: ['UNKNOWN_EFFECT'] };
+      const result = ToolRequestSchema.safeParse(req);
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects fabricated effect names', () => {
+      const req = { ...makeValidRequest(), effects: ['READ'] };
+      const result = ToolRequestSchema.safeParse(req);
+      // READ is not in EFFECT_TYPES enum
+      expect(result.success).toBe(false);
+    });
+
+    it('accepts all valid effect types', () => {
+      for (const effect of Object.values(EFFECT_TYPES)) {
+        const req = { ...makeValidRequest(), effects: [effect] };
+        const result = ToolRequestSchema.safeParse(req);
+        expect(result.success).toBe(true);
+      }
+    });
+
+    it('accepts empty effects array', () => {
+      const req = { ...makeValidRequest(), effects: [] };
+      const result = ToolRequestSchema.safeParse(req);
+      expect(result.success).toBe(true);
     });
 
     it('rejects string id exceeding max length', () => {

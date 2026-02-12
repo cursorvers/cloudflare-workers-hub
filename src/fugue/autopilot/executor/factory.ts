@@ -31,14 +31,36 @@ export function weeklyStorageKey(specialistId: string, isoWeek: string): string 
   return `autopilot:weekly:v1:${specialistId}:${isoWeek}`;
 }
 
-/** Get current ISO week string: YYYY-Www */
+/**
+ * Get ISO 8601 week string: YYYY-Www
+ *
+ * ISO 8601 rule: Week 1 contains the first Thursday of the year.
+ * A date belongs to the ISO week-year of its Thursday.
+ * Handles year boundaries correctly (e.g. 2025-12-29 → 2026-W01).
+ */
 export function currentIsoWeek(nowMs?: number): string {
   const d = new Date(nowMs ?? Date.now());
-  // ISO week date calculation
-  const jan4 = new Date(d.getFullYear(), 0, 4);
-  const dayOfYear = Math.floor((d.getTime() - jan4.getTime()) / 86_400_000) + 4;
-  const weekNumber = Math.ceil(dayOfYear / 7);
-  return `${d.getFullYear()}-W${String(weekNumber).padStart(2, '0')}`;
+
+  // Find the Thursday of the current ISO week
+  // getDay: 0=Sun, 1=Mon...6=Sat → ISO: Mon=1...Sun=7
+  const dayOfWeek = d.getUTCDay() || 7; // Convert Sunday (0) to 7
+  const thursday = new Date(d);
+  thursday.setUTCDate(d.getUTCDate() + (4 - dayOfWeek)); // Adjust to Thursday
+
+  // ISO week-year is the year of the Thursday
+  const isoYear = thursday.getUTCFullYear();
+
+  // Week 1 starts on the Monday of the week containing Jan 4
+  const jan4 = new Date(Date.UTC(isoYear, 0, 4));
+  const jan4DayOfWeek = jan4.getUTCDay() || 7;
+  const week1Monday = new Date(jan4);
+  week1Monday.setUTCDate(jan4.getUTCDate() - (jan4DayOfWeek - 1));
+
+  // Calculate week number
+  const diffMs = thursday.getTime() - week1Monday.getTime();
+  const weekNumber = 1 + Math.round(diffMs / (7 * 86_400_000));
+
+  return `${isoYear}-W${String(weekNumber).padStart(2, '0')}`;
 }
 
 // =============================================================================

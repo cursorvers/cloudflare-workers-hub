@@ -6,6 +6,7 @@
  */
 
 import { z } from 'zod';
+import { EFFECT_TYPES } from '../types';
 import { ToolCategory, ErrorCode } from './types';
 
 // =============================================================================
@@ -34,6 +35,7 @@ const traceContextSchema = z.object({
 // =============================================================================
 
 const toolCategoryValues = Object.values(ToolCategory) as [string, ...string[]];
+const effectTypeValues = Object.values(EFFECT_TYPES) as [string, ...string[]];
 
 export const ToolRequestSchema = z.object({
   id: z.string().min(1).max(MAX_STRING_LENGTH),
@@ -43,7 +45,7 @@ export const ToolRequestSchema = z.object({
     (obj) => Object.keys(obj).length <= MAX_PARAMS_KEYS,
     { message: `params must have at most ${MAX_PARAMS_KEYS} keys` },
   ),
-  effects: z.array(z.string().min(1).max(MAX_STRING_LENGTH)).max(MAX_EFFECTS),
+  effects: z.array(z.enum(effectTypeValues)).max(MAX_EFFECTS),
   riskTier: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
   traceContext: traceContextSchema,
   attempt: z.number().int().min(1).max(100),

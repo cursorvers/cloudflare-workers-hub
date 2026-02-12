@@ -65,9 +65,39 @@ describe('executor/factory', () => {
     });
 
     it('currentIsoWeek accepts custom timestamp', () => {
-      // 2026-02-12 is in week 7 of 2026
+      // 2026-02-12 is Thursday of week 7 of 2026
       const week = currentIsoWeek(new Date('2026-02-12T00:00:00Z').getTime());
-      expect(week).toMatch(/^2026-W\d{2}$/);
+      expect(week).toBe('2026-W07');
+    });
+
+    it('currentIsoWeek handles year boundary: 2025-12-29 → 2026-W01', () => {
+      // 2025-12-29 is Monday; ISO: Thu of that week is 2026-01-01 → W01 of 2026
+      const week = currentIsoWeek(new Date('2025-12-29T00:00:00Z').getTime());
+      expect(week).toBe('2026-W01');
+    });
+
+    it('currentIsoWeek handles year boundary: 2025-12-28 → 2025-W52', () => {
+      // 2025-12-28 is Sunday; Thu of that week is 2025-12-25 → W52 of 2025
+      const week = currentIsoWeek(new Date('2025-12-28T00:00:00Z').getTime());
+      expect(week).toBe('2025-W52');
+    });
+
+    it('currentIsoWeek handles year boundary: 2027-01-01 → 2026-W53', () => {
+      // 2027-01-01 is Friday; Thu of that week is 2026-12-31 → W53 of 2026
+      const week = currentIsoWeek(new Date('2027-01-01T00:00:00Z').getTime());
+      expect(week).toBe('2026-W53');
+    });
+
+    it('currentIsoWeek handles year boundary: 2027-01-04 → 2027-W01', () => {
+      // 2027-01-04 is Monday; Thu of that week is 2027-01-07 → W01 of 2027
+      const week = currentIsoWeek(new Date('2027-01-04T00:00:00Z').getTime());
+      expect(week).toBe('2027-W01');
+    });
+
+    it('currentIsoWeek handles 2024-12-30 → 2025-W01', () => {
+      // 2024-12-30 is Monday; Thu of that week is 2025-01-02 → W01 of 2025
+      const week = currentIsoWeek(new Date('2024-12-30T00:00:00Z').getTime());
+      expect(week).toBe('2025-W01');
     });
   });
 

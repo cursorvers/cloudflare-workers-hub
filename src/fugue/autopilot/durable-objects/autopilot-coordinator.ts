@@ -42,7 +42,9 @@ import {
 import { evaluatePolicy } from '../policy/engine';
 import { DEFAULT_RULES } from '../policy/rules';
 import type { PolicyContext, PolicyDecision } from '../policy/types';
-import { BUDGET_STATES, ORIGINS, SUBJECT_TYPES, TRUST_ZONES } from '../types';
+import { classifyRisk } from '../risk/classifier';
+import { BUDGET_STATES, EFFECT_TYPES, ORIGINS, SUBJECT_TYPES, TRUST_ZONES } from '../types';
+import type { EffectType } from '../types';
 import type { ToolRequest, ToolResult } from '../executor/types';
 import { ToolResultKind, ErrorCode, freezeToolResult } from '../executor/types';
 import {
@@ -62,6 +64,15 @@ const STORAGE_KEY_STATE = 'autopilot:state';
 const STORAGE_KEY_HEARTBEAT = 'autopilot:heartbeat';
 const STORAGE_KEY_CIRCUIT = 'autopilot:circuit';
 const STORAGE_KEY_BUDGET = 'autopilot:budget';
+
+/** Idempotency key prefix and TTL (1 hour) */
+const IDEMPOTENCY_PREFIX = 'autopilot:idem:';
+const IDEMPOTENCY_TTL_MS = 60 * 60 * 1000;
+
+interface IdempotencyEntry {
+  readonly result: unknown;
+  readonly expiresAt: number;
+}
 
 // =============================================================================
 // Types
@@ -418,7 +429,37 @@ export class AutopilotCoordinator extends DurableObject<Env> {
       }, 503);
     }
 
-    // 4. Compute policy decision server-side
+    // 4. Idempotency check — return cached result for duplicate requests
+    const idemKey = `${IDEMPOTENCY_PREFIX}${toolRequest.idempotencyKey}`;
+    const cachedEntry = await this.ctx.storage.get<IdempotencyEntry>(idemKey);
+    if (cachedEntry && cachedEntry.expiresAt > Date.now()) {
+      return jsonResponse({ success: true, data: cachedEntry.result });
+    }
+
+    // 5. Server-side risk re-classification (CRITICAL: never trust client riskTier/effects)
+    const knownEffectSet = new Set<string>(Object.values(EFFECT_TYPES));
+    const validatedEffects: readonly EffectType[] = Object.freeze(
+      toolRequest.effects.filter((e): e is EffectType => knownEffectSet.has(e)),
+    );
+    const hasUnknownEffects = validatedEffects.length !== toolRequest.effects.length;
+
+    // Unknown effects → max risk tier; otherwise compute from category + effects
+    const computedRiskTier = hasUnknownEffects
+      ? 4 as const
+      : classifyRisk({ effects: validatedEffects, category: toolRequest.category, origin: ORIGINS.INTERNAL });
+
+    if (toolRequest.riskTier !== computedRiskTier) {
+      safeLog.warn('[AutopilotCoordinator] Risk tier mismatch (client overridden)', {
+        requestId: toolRequest.id,
+        clientRiskTier: toolRequest.riskTier,
+        computedRiskTier,
+        category: toolRequest.category,
+        clientEffects: toolRequest.effects,
+        validatedEffects,
+      });
+    }
+
+    // 6. Compute policy decision server-side
     const budgetState = this.budgetSnapshot.spent >= this.budgetSnapshot.limit
       ? BUDGET_STATES.HALTED
       : this.budgetSnapshot.spent >= this.budgetSnapshot.limit * 0.8
@@ -428,8 +469,8 @@ export class AutopilotCoordinator extends DurableObject<Env> {
     const policyCtx: PolicyContext = {
       subject: { id: 'autopilot-system', type: SUBJECT_TYPES.SYSTEM },
       origin: ORIGINS.INTERNAL,
-      effects: toolRequest.effects,
-      riskTier: toolRequest.riskTier,
+      effects: validatedEffects,
+      riskTier: computedRiskTier,
       trustZone: TRUST_ZONES.TRUSTED_CONFIG,
       budgetState,
       traceContext: toolRequest.traceContext,
@@ -437,7 +478,7 @@ export class AutopilotCoordinator extends DurableObject<Env> {
 
     const decision: PolicyDecision = evaluatePolicy(policyCtx, DEFAULT_RULES, []);
 
-    // 5. Create executor worker via factory
+    // 7. Create executor worker via factory
     const storage: ExecutorStorage = {
       get: async <T>(key: string) => this.ctx.storage.get<T>(key),
       put: async (entries: Record<string, unknown>) => this.ctx.storage.put(entries),
@@ -454,16 +495,27 @@ export class AutopilotCoordinator extends DurableObject<Env> {
         mode: this.runtimeState.mode === 'NORMAL' ? 'NORMAL' : 'STOPPED',
       });
 
-      // 6. Execute
+      // 8. Execute
       const result = await worker.execute(toolRequest, decision);
 
-      // 7. Post-execution: increment weekly count for successful execution
+      // 9. Post-execution: increment weekly count + persist idempotency entry
       if (result.kind === ToolResultKind.SUCCESS && 'executionCost' in result) {
         try {
           await incrementWeeklyCount(storage, result.executionCost.specialistId);
         } catch {
           // Weekly count update is non-critical
         }
+      }
+
+      // Persist idempotency entry (fire-and-forget, non-critical)
+      try {
+        const entry: IdempotencyEntry = Object.freeze({
+          result,
+          expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
+        });
+        await this.ctx.storage.put({ [idemKey]: entry });
+      } catch {
+        // Idempotency cache is non-critical
       }
 
       safeLog.info('[AutopilotCoordinator] Tool execution completed', {
