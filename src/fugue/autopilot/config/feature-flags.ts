@@ -4,6 +4,7 @@ export interface FeatureFlags {
   readonly embeddingBasedThrashing: boolean;
   readonly advancedAnomalyDetection: boolean;
   readonly phaseThreeModesEnabled: boolean;
+  readonly asyncExecutionEnabled: boolean;
 }
 
 export const DEFAULT_FEATURE_FLAGS: FeatureFlags = Object.freeze({
@@ -12,6 +13,7 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = Object.freeze({
   embeddingBasedThrashing: false,
   advancedAnomalyDetection: false,
   phaseThreeModesEnabled: false,
+  asyncExecutionEnabled: false,
 });
 
 export function createFeatureFlags(

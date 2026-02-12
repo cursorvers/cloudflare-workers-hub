@@ -64,6 +64,21 @@ import {
   type ExecutorStorage,
 } from '../executor/factory';
 import { validateExecuteRequest, MAX_EXECUTE_BODY_SIZE } from '../executor/validation';
+import {
+  type ExecutionQueueState,
+  type ExecutionTask,
+  type ExecutionResult,
+  createExecutionQueueState,
+  createExecutionTask,
+  enqueueExecution,
+  createAsyncAcceptedResponse,
+  isResultExpired,
+  SYNC_EXECUTION_TIMEOUT_MS,
+  EXEC_RESULT_PREFIX,
+  EXEC_TASK_PREFIX,
+  ExecutionTaskPayloadSchema,
+} from '../queue/execution-queue';
+import { processExecutionBatch } from '../queue/execution-consumer';
 import { safeLog } from '../../../utils/log-sanitizer';
 
 // =============================================================================
@@ -80,6 +95,9 @@ const STORAGE_KEY_BUDGET = 'autopilot:budget';
 /** Hysteresis counters for DEGRADE/RECOVER transitions */
 const DEGRADE_HYSTERESIS_THRESHOLD = 3;
 const RECOVER_HYSTERESIS_THRESHOLD = 3;
+
+/** Execution consumer alarm interval (5s, separate from 10s health alarm) */
+const EXEC_CONSUMER_INTERVAL_MS = 5_000;
 
 /** Idempotency key prefix and TTL (1 hour) */
 const IDEMPOTENCY_PREFIX = 'autopilot:idem:';
@@ -164,6 +182,8 @@ export class AutopilotCoordinator extends DurableObject<Env> {
   private budgetSnapshot: BudgetSnapshot;
   private lastGuardCheck: GuardCheckResult | null;
   private hysteresis: HysteresisState;
+  private executionQueue: ExecutionQueueState;
+  private lastExecConsumerRunMs: number;
   private initialized: boolean;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -175,6 +195,8 @@ export class AutopilotCoordinator extends DurableObject<Env> {
     this.budgetSnapshot = DEFAULT_BUDGET_SNAPSHOT;
     this.lastGuardCheck = null;
     this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
+    this.executionQueue = createExecutionQueueState();
+    this.lastExecConsumerRunMs = 0;
     this.initialized = false;
   }
 
@@ -302,6 +324,12 @@ export class AutopilotCoordinator extends DurableObject<Env> {
 
       if (path === '/execute' && request.method === 'POST') {
         return this.handleExecute(request);
+      }
+
+      // GET /task/:id — poll for async execution result
+      if (path.startsWith('/task/') && request.method === 'GET') {
+        const taskId = path.slice(6); // strip '/task/'
+        return this.handleTaskPoll(taskId, request);
       }
 
       return errorResponse('Not found', 404, 'NOT_FOUND');
@@ -568,7 +596,10 @@ export class AutopilotCoordinator extends DurableObject<Env> {
 
     const decision: PolicyDecision = evaluatePolicy(policyCtx, DEFAULT_RULES, []);
 
-    // 7. Create executor worker via factory
+    // 7. Determine sync vs async execution
+    const asyncEnabled = this.env.AUTOPILOT_ASYNC_EXECUTION === 'true';
+
+    // 7a. Try sync execution first (with soft timeout if async is enabled)
     const storage: ExecutorStorage = {
       get: async <T>(key: string) => this.ctx.storage.get<T>(key),
       put: async (entries: Record<string, unknown>) => this.ctx.storage.put(entries),
@@ -585,35 +616,32 @@ export class AutopilotCoordinator extends DurableObject<Env> {
         mode: toLegacyMode(this.extendedState.mode),
       });
 
-      // 8. Execute
-      const result = await worker.execute(toolRequest, decision);
+      // If async enabled, use timeout-based fallback
+      if (asyncEnabled) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), SYNC_EXECUTION_TIMEOUT_MS);
 
-      // 9. Post-execution: increment weekly count + persist idempotency entry
-      if (result.kind === ToolResultKind.SUCCESS && 'executionCost' in result) {
         try {
-          await incrementWeeklyCount(storage, result.executionCost.specialistId);
-        } catch {
-          // Weekly count update is non-critical
+          const result = await worker.execute(toolRequest, decision, controller.signal);
+          clearTimeout(timeoutId);
+
+          // Sync success — persist and return
+          await this.postExecutionCleanup(result, toolRequest, storage, idemKey);
+          return jsonResponse({ success: true, data: result });
+        } catch (syncErr) {
+          clearTimeout(timeoutId);
+
+          // Timeout or abort → fall back to async enqueue
+          if (controller.signal.aborted) {
+            return this.enqueueAsyncExecution(toolRequest, computedRiskTier, request.url);
+          }
+          throw syncErr; // Re-throw non-timeout errors
         }
       }
 
-      // Persist idempotency entry (fire-and-forget, non-critical)
-      try {
-        const entry: IdempotencyEntry = Object.freeze({
-          result,
-          expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
-        });
-        await this.ctx.storage.put({ [idemKey]: entry });
-      } catch {
-        // Idempotency cache is non-critical
-      }
-
-      safeLog.info('[AutopilotCoordinator] Tool execution completed', {
-        requestId: toolRequest.id,
-        kind: result.kind,
-        category: toolRequest.category,
-      });
-
+      // Non-async path: pure sync execution (original behavior)
+      const result = await worker.execute(toolRequest, decision);
+      await this.postExecutionCleanup(result, toolRequest, storage, idemKey);
       return jsonResponse({ success: true, data: result });
     } catch (err) {
       safeLog.error('[AutopilotCoordinator] Execute error', {
@@ -635,6 +663,146 @@ export class AutopilotCoordinator extends DurableObject<Env> {
         }),
       }, 500);
     }
+  }
+
+  /**
+   * Post-execution cleanup: increment weekly count + persist idempotency.
+   */
+  private async postExecutionCleanup(
+    result: ToolResult,
+    toolRequest: ToolRequest,
+    storage: ExecutorStorage,
+    idemKey: string,
+  ): Promise<void> {
+    if (result.kind === ToolResultKind.SUCCESS && 'executionCost' in result) {
+      try {
+        await incrementWeeklyCount(storage, (result as { executionCost: { specialistId: string } }).executionCost.specialistId);
+      } catch {
+        // Weekly count update is non-critical
+      }
+    }
+
+    try {
+      const entry: IdempotencyEntry = Object.freeze({
+        result,
+        expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
+      });
+      await this.ctx.storage.put({ [idemKey]: entry });
+    } catch {
+      // Idempotency cache is non-critical
+    }
+
+    safeLog.info('[AutopilotCoordinator] Tool execution completed', {
+      requestId: toolRequest.id,
+      kind: result.kind,
+      category: toolRequest.category,
+    });
+  }
+
+  /**
+   * Enqueue a tool execution for async processing.
+   * Guards/policy already validated before this point (Security: no bypass).
+   */
+  private async enqueueAsyncExecution(
+    toolRequest: ToolRequest,
+    computedRiskTier: number,
+    requestUrl: string,
+  ): Promise<Response> {
+    try {
+      const payload = ExecutionTaskPayloadSchema.parse({
+        requestId: toolRequest.id,
+        toolName: toolRequest.name,
+        category: toolRequest.category,
+        params: toolRequest.params,
+        effects: toolRequest.effects,
+        computedRiskTier,
+        traceContext: toolRequest.traceContext,
+        idempotencyKey: toolRequest.idempotencyKey,
+      });
+
+      const task = createExecutionTask(
+        'autopilot-system', // ownerId — system-level execution
+        payload,
+        { priority: computedRiskTier >= 3 ? 'low' : 'medium' }, // High risk = lower priority
+      );
+
+      const { nextState, accepted } = enqueueExecution(this.executionQueue, task);
+      if (!accepted) {
+        return errorResponse('Execution queue full or duplicate', 429, 'QUEUE_FULL');
+      }
+
+      this.executionQueue = nextState;
+
+      // Persist task to storage for durability
+      await this.ctx.storage.put({ [`${EXEC_TASK_PREFIX}${task.id}`]: task });
+
+      safeLog.info('[AutopilotCoordinator] Async execution enqueued', {
+        taskId: task.id,
+        requestId: toolRequest.id,
+        category: toolRequest.category,
+      });
+
+      const baseUrl = new URL(requestUrl).origin;
+      const asyncResponse = createAsyncAcceptedResponse(task.id, baseUrl);
+      return jsonResponse({ success: true, data: asyncResponse }, 202);
+    } catch (err) {
+      safeLog.error('[AutopilotCoordinator] Async enqueue failed', {
+        error: err instanceof Error ? err.message : String(err),
+        requestId: toolRequest.id,
+      });
+      return errorResponse('Failed to enqueue async execution', 500, 'ENQUEUE_FAILED');
+    }
+  }
+
+  /**
+   * GET /task/:id — Poll for async execution result.
+   * Security: scoped by ownerId (IDOR prevention).
+   * Returns: 200 (completed/failed), 202 (pending/processing), 404 (unknown), 410 (expired).
+   */
+  private async handleTaskPoll(taskId: string, _request: Request): Promise<Response> {
+    if (!taskId || taskId.length > 256) {
+      return errorResponse('Invalid task ID', 400, 'VALIDATION_ERROR');
+    }
+
+    // Check result storage first (completed tasks)
+    const resultKey = `${EXEC_RESULT_PREFIX}${taskId}`;
+    const result = await this.ctx.storage.get<ExecutionResult>(resultKey);
+
+    if (result) {
+      if (isResultExpired(result, Date.now())) {
+        return jsonResponse({ success: false, error: { code: 'EXPIRED', message: 'Task result expired' } }, 410);
+      }
+      // Sanitize: only return minimal data (Security: no internal error leakage)
+      return jsonResponse({
+        success: true,
+        data: {
+          taskId: result.taskId,
+          status: result.status,
+          data: result.status === 'completed' ? result.data : undefined,
+          errorCode: result.status === 'failed' ? result.errorCode : undefined,
+          completedAt: result.completedAt,
+          durationMs: result.durationMs,
+        },
+      });
+    }
+
+    // Check if task is pending/processing
+    const taskKey = `${EXEC_TASK_PREFIX}${taskId}`;
+    const task = await this.ctx.storage.get<ExecutionTask>(taskKey);
+
+    if (task) {
+      return jsonResponse({
+        success: true,
+        data: {
+          taskId: task.id,
+          status: task.status,
+          createdAt: task.createdAt,
+          retryAfterMs: 5000,
+        },
+      }, 202);
+    }
+
+    return errorResponse('Task not found', 404, 'NOT_FOUND');
   }
 
   /**
@@ -787,6 +955,12 @@ export class AutopilotCoordinator extends DurableObject<Env> {
         }
       }
 
+      // Execution consumer: process async TOOL_EXECUTION tasks (5s interval)
+      if (now - this.lastExecConsumerRunMs >= EXEC_CONSUMER_INTERVAL_MS) {
+        this.lastExecConsumerRunMs = now;
+        await this.processExecutionQueue();
+      }
+
       await this.persistState();
     } catch (err) {
       safeLog.error('[AutopilotCoordinator] Alarm error (fail-closed)', {
@@ -814,5 +988,30 @@ export class AutopilotCoordinator extends DurableObject<Env> {
         });
       }
     }
+  }
+
+  /**
+   * Process pending execution tasks via the extracted consumer module.
+   */
+  private async processExecutionQueue(): Promise<void> {
+    this.executionQueue = await processExecutionBatch(this.executionQueue, {
+      extendedMode: this.extendedState.mode,
+      budgetSpent: this.budgetSnapshot.spent,
+      budgetLimit: this.budgetSnapshot.limit,
+      apiKeys: {
+        OPENAI_API_KEY: this.env.OPENAI_API_KEY,
+        ZAI_API_KEY: this.env.ZAI_API_KEY,
+        GEMINI_API_KEY: this.env.GEMINI_API_KEY,
+      },
+      storage: {
+        get: async <T>(key: string) => this.ctx.storage.get<T>(key),
+        put: async (entries: Record<string, unknown>) => this.ctx.storage.put(entries),
+      },
+      doStorage: {
+        put: async (entries: Record<string, unknown>) => this.ctx.storage.put(entries),
+        delete: async (key: string) => this.ctx.storage.delete(key),
+      },
+      isOperational: () => this.isSystemOperational(),
+    });
   }
 }
