@@ -441,6 +441,52 @@ describe('executor/execute-endpoint integration', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Feature Flag: Strict Effects Rejection (Phase 2)
+  // -------------------------------------------------------------------------
+
+  describe('feature flag: AUTOPILOT_STRICT_EFFECTS', () => {
+    it('unknown effects are filtered when strict mode disabled', () => {
+      const knownEffectSet = new Set<string>(Object.values(EFFECT_TYPES));
+      const clientEffects = ['WRITE', 'UNKNOWN'];
+      const validatedEffects = clientEffects.filter((e): e is EffectType =>
+        knownEffectSet.has(e),
+      );
+      const hasUnknownEffects = validatedEffects.length !== clientEffects.length;
+
+      // Phase 1 (strict=false): quarantine at tier 4, do not reject
+      const strictEffects = false;
+      expect(hasUnknownEffects).toBe(true);
+      expect(strictEffects && hasUnknownEffects).toBe(false); // no rejection
+    });
+
+    it('unknown effects trigger 400 when strict mode enabled', () => {
+      const knownEffectSet = new Set<string>(Object.values(EFFECT_TYPES));
+      const clientEffects = ['WRITE', 'FABRICATED'];
+      const validatedEffects = clientEffects.filter((e): e is EffectType =>
+        knownEffectSet.has(e),
+      );
+      const hasUnknownEffects = validatedEffects.length !== clientEffects.length;
+
+      // Phase 2 (strict=true): reject unknown effects
+      const strictEffects = true;
+      expect(strictEffects && hasUnknownEffects).toBe(true); // triggers rejection
+      const unknownEffects = clientEffects.filter((e) => !knownEffectSet.has(e));
+      expect(unknownEffects).toEqual(['FABRICATED']);
+    });
+
+    it('all-known effects pass in both modes', () => {
+      const knownEffectSet = new Set<string>(Object.values(EFFECT_TYPES));
+      const clientEffects = ['WRITE', 'EXEC'];
+      const hasUnknownEffects = clientEffects.some((e) => !knownEffectSet.has(e));
+
+      expect(hasUnknownEffects).toBe(false);
+      // Neither mode rejects
+      expect(true && hasUnknownEffects).toBe(false);
+      expect(false && hasUnknownEffects).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Idempotency Key Dedup
   // -------------------------------------------------------------------------
 

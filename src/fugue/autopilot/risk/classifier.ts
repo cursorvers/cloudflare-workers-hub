@@ -15,7 +15,8 @@ export interface RiskClassificationInput {
   readonly origin: Origin;
 }
 
-const EFFECT_TIER_MAP = Object.freeze<Record<EffectType, RiskTier>>({
+/** Exported for release-gate consistency tests */
+export const EFFECT_TIER_MAP = Object.freeze<Record<EffectType, RiskTier>>({
   [EFFECT_TYPES.WRITE]: 1,
   [EFFECT_TYPES.PRIV_CHANGE]: 3,
   [EFFECT_TYPES.SECRET_READ]: 3,
@@ -23,7 +24,8 @@ const EFFECT_TIER_MAP = Object.freeze<Record<EffectType, RiskTier>>({
   [EFFECT_TYPES.EXEC]: 3,
 });
 
-const CATEGORY_ESCALATION = Object.freeze<Record<ToolCategory, RiskTier>>({
+/** Exported for release-gate consistency tests */
+export const CATEGORY_ESCALATION = Object.freeze<Record<ToolCategory, RiskTier>>({
   [ToolCategory.FILE_READ]: 0,
   [ToolCategory.FILE_WRITE]: 0,
   [ToolCategory.GIT]: 1,

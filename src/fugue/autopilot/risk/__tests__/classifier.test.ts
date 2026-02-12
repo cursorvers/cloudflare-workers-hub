@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ToolCategory, type ToolRequest } from '../../executor/types';
 import {
+  EFFECT_TYPES,
   ORIGINS,
   SUBJECT_TYPES,
   type EffectType,
@@ -10,7 +11,7 @@ import {
   type TraceId,
 } from '../../types';
 
-import { classifyRisk, classifyToolRequest } from '../classifier';
+import { classifyRisk, classifyToolRequest, EFFECT_TIER_MAP, CATEGORY_ESCALATION } from '../classifier';
 
 function makeTraceContext(overrides: Partial<TraceContext> = {}): TraceContext {
   const base: TraceContext = {
@@ -168,6 +169,76 @@ describe('risk/classifier.classifyRisk', () => {
 
     expect(base).toBeLessThanOrEqual(plusExec);
     expect(plusExec).toBeLessThanOrEqual(plusExfil);
+  });
+});
+
+// =============================================================================
+// Release Gate: Enum Consistency Checks
+// =============================================================================
+
+describe('risk/classifier release gate: enum consistency', () => {
+  it('every EFFECT_TYPES value has an entry in EFFECT_TIER_MAP', () => {
+    const effectValues = Object.values(EFFECT_TYPES);
+    const mapKeys = Object.keys(EFFECT_TIER_MAP);
+
+    for (const effect of effectValues) {
+      expect(mapKeys, `EFFECT_TIER_MAP missing entry for '${effect}'`).toContain(effect);
+    }
+  });
+
+  it('every EFFECT_TIER_MAP key is a valid EFFECT_TYPES value', () => {
+    const effectValues = new Set(Object.values(EFFECT_TYPES));
+    const mapKeys = Object.keys(EFFECT_TIER_MAP);
+
+    for (const key of mapKeys) {
+      expect(effectValues.has(key as EffectType), `Stale EFFECT_TIER_MAP entry '${key}'`).toBe(true);
+    }
+  });
+
+  it('EFFECT_TIER_MAP has exact same size as EFFECT_TYPES', () => {
+    const effectCount = Object.values(EFFECT_TYPES).length;
+    const mapCount = Object.keys(EFFECT_TIER_MAP).length;
+    expect(mapCount).toBe(effectCount);
+  });
+
+  it('every ToolCategory value has an entry in CATEGORY_ESCALATION', () => {
+    const categoryValues = Object.values(ToolCategory);
+    const mapKeys = Object.keys(CATEGORY_ESCALATION);
+
+    for (const category of categoryValues) {
+      expect(mapKeys, `CATEGORY_ESCALATION missing entry for '${category}'`).toContain(category);
+    }
+  });
+
+  it('every CATEGORY_ESCALATION key is a valid ToolCategory value', () => {
+    const categoryValues = new Set(Object.values(ToolCategory));
+    const mapKeys = Object.keys(CATEGORY_ESCALATION);
+
+    for (const key of mapKeys) {
+      expect(categoryValues.has(key as ToolCategory), `Stale CATEGORY_ESCALATION entry '${key}'`).toBe(true);
+    }
+  });
+
+  it('CATEGORY_ESCALATION has exact same size as ToolCategory', () => {
+    const categoryCount = Object.values(ToolCategory).length;
+    const mapCount = Object.keys(CATEGORY_ESCALATION).length;
+    expect(mapCount).toBe(categoryCount);
+  });
+
+  it('all EFFECT_TIER_MAP values are valid RiskTier (0-4)', () => {
+    for (const [effect, tier] of Object.entries(EFFECT_TIER_MAP)) {
+      expect(tier, `EFFECT_TIER_MAP['${effect}'] = ${tier} is not a valid RiskTier`).toBeGreaterThanOrEqual(0);
+      expect(tier).toBeLessThanOrEqual(4);
+      expect(Number.isInteger(tier)).toBe(true);
+    }
+  });
+
+  it('all CATEGORY_ESCALATION values are valid RiskTier (0-4)', () => {
+    for (const [category, tier] of Object.entries(CATEGORY_ESCALATION)) {
+      expect(tier, `CATEGORY_ESCALATION['${category}'] = ${tier} is not a valid RiskTier`).toBeGreaterThanOrEqual(0);
+      expect(tier).toBeLessThanOrEqual(4);
+      expect(Number.isInteger(tier)).toBe(true);
+    }
   });
 });
 

@@ -89,6 +89,8 @@ export interface Env {
   // FUGUE Autopilot Specialist API Keys
   ZAI_API_KEY?: string;              // GLM-4.7 (ZhipuAI) API key
   GEMINI_API_KEY?: string;           // Google Gemini API key
+  // FUGUE Autopilot Feature Flags
+  AUTOPILOT_STRICT_EFFECTS?: string; // "true" to reject unknown effects with 400 (Phase 2)
   // Google Slides (optional, for auto-generating slides from digests)
   GOOGLE_CLIENT_ID?: string;       // Google OAuth client ID
   GOOGLE_CLIENT_SECRET?: string;   // Google OAuth client secret

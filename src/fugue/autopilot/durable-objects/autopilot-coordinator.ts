@@ -443,6 +443,17 @@ export class AutopilotCoordinator extends DurableObject<Env> {
     );
     const hasUnknownEffects = validatedEffects.length !== toolRequest.effects.length;
 
+    // Phase 2 strict mode: reject unknown effects with 400
+    const strictEffects = this.env.AUTOPILOT_STRICT_EFFECTS === 'true';
+    if (hasUnknownEffects && strictEffects) {
+      const unknownEffects = toolRequest.effects.filter((e) => !knownEffectSet.has(e));
+      return errorResponse(
+        `Unknown effects rejected: ${unknownEffects.join(', ')}`,
+        400,
+        'INVALID_EFFECTS',
+      );
+    }
+
     // Unknown effects → max risk tier; otherwise compute from category + effects
     const computedRiskTier = hasUnknownEffects
       ? 4 as const
