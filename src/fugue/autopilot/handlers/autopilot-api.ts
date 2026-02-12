@@ -3,6 +3,7 @@ import {
   authenticateBearer,
   verifyWebhookSignature,
 } from '../auth';
+import { checkWebhookMiddleware } from '../cache/nonce-rate-limit';
 
 const WEBHOOK_MAX_AGE_MS = 5 * 60 * 1000;
 
@@ -52,6 +53,7 @@ function resolveCorsHeaders(request: Request): Record<string, string> {
       'Authorization',
       'X-Autopilot-Signature',
       'X-Autopilot-Timestamp',
+      'X-Autopilot-Nonce',
     ].join(', '),
     'Access-Control-Allow-Credentials': 'true',
   };
@@ -132,6 +134,22 @@ async function verifyWebhookAuth(request: Request, env: Env, body: string): Prom
 
   if (!verification.valid) {
     return unauthorizedResponse(verification.reason);
+  }
+
+  // Nonce + rate-limit check (v1.3: replay prevention + throttle)
+  const nonce = request.headers.get('X-Autopilot-Nonce')
+    ?? request.headers.get('X-Nonce')
+    ?? undefined;
+  const clientIp = request.headers.get('CF-Connecting-IP') ?? 'unknown';
+  const kv = env.CACHE ?? env.KV;
+
+  const middleware = await checkWebhookMiddleware(kv, nonce, `webhook:${clientIp}`);
+  if (!middleware.allowed) {
+    const status = middleware.rateLimitResult && !middleware.rateLimitResult.allowed ? 429 : 403;
+    return new Response(JSON.stringify({ error: 'Request denied', reason: middleware.reason }), {
+      status,
+      headers: JSON_HEADERS,
+    });
   }
 
   return null;
