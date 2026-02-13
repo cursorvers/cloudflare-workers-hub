@@ -912,6 +912,21 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
       return handleReceiptBackfill(request, env);
     }
 
+    // Repair HTML receipt text evidence + optionally re-classify (admin only)
+    // Creates receipt.txt alongside receipt.html for human-readable evidence (Obsidian-friendly)
+    // and re-runs classification to fix currency/amount drift (e.g. $25 treated as JPY).
+    if (path === '/api/receipts/repair-html-text' && request.method === 'POST') {
+      const { verifyAPIKey } = await import('./utils/api-auth');
+      if (!verifyAPIKey(request, env, 'admin')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const { handleRepairHtmlReceiptText } = await import('./handlers/receipt-html-text-repair');
+      return handleRepairHtmlReceiptText(request, env);
+    }
+
     // Receipt Upload API endpoint (freee integration)
     if (path === '/api/receipts/upload' && request.method === 'POST') {
       return handleReceiptUpload(request, env);

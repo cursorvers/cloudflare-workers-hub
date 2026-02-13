@@ -51,7 +51,20 @@ interface RuleBasedResult {
  * - Defaults to JPY when currency cannot be determined.
  */
 function extractAmount(text: string): { amount: number; currency: string; extracted: boolean } {
-  const patterns: Array<{ regex: RegExp; currency: string; parse: (raw: string) => number | null }> = [
+  // Heuristic currency hint: if the text contains an explicit currency marker anywhere,
+  // prefer that over the default. This prevents cases like "Total 25.00" from being
+  // treated as JPY when the same receipt also contains "$25.00".
+  const hint = (() => {
+    if (/(?:USD|US\$|\$)/i.test(text)) return 'USD';
+    if (/(?:JPY|[¥￥]|円)/i.test(text)) return 'JPY';
+    return null;
+  })();
+
+  const patterns: Array<{
+    regex: RegExp;
+    currency: string | null;
+    parse: (raw: string) => number | null;
+  }> = [
     // ¥1,234 or ￥1,234
     {
       regex: /[¥￥]\s*([\d,]+)/,
@@ -82,7 +95,7 @@ function extractAmount(text: string): { amount: number; currency: string; extrac
     // 合計 1,234 / Total 1,234 / Amount: 1,234
     {
       regex: /(?:合計|total|amount|金額|請求額|お支払い)[:\s]*([\d,]+(?:\.\d{1,2})?)/i,
-      currency: 'JPY',
+      currency: hint ?? 'JPY',
       parse: (raw) => {
         const n = Number.parseFloat(raw.replace(/,/g, ''));
         return Number.isFinite(n) ? Math.round(n) : null;
@@ -104,11 +117,17 @@ function extractAmount(text: string): { amount: number; currency: string; extrac
     if (match) {
       const amount = parse(match[1]);
       if (typeof amount === 'number' && Number.isFinite(amount) && amount > 0) {
-        return { amount, currency, extracted: true };
+        const resolvedCurrency = (currency ?? hint ?? 'JPY').toString().trim().toUpperCase();
+        return { amount, currency: resolvedCurrency || 'JPY', extracted: true };
       }
     }
   }
-  return { amount: 0, currency: 'JPY', extracted: false };
+
+  return {
+    amount: 0,
+    currency: (hint ?? 'JPY').toString().trim().toUpperCase() || 'JPY',
+    extracted: false,
+  };
 }
 
 /**

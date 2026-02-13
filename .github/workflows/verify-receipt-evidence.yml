@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Mode: verify, retry_failed, or repair_freee_links'
+        description: 'Mode: verify, retry_failed, repair_freee_links, or repair_html_text'
         required: true
         default: 'verify'
         type: choice
@@ -12,6 +12,7 @@ on:
           - verify
           - retry_failed
           - repair_freee_links
+          - repair_html_text
       sample_limit:
         description: 'How many recent receipts to sample (verify) or repair (repair_freee_links)'
         required: true
@@ -76,6 +77,25 @@ jobs:
             echo "$resp" | jq '{success, dry_run, scanned, ok, repaired, would_repair, conflicts, skipped, errors}' | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+
+          if [ "${MODE}" = "repair_html_text" ]; then
+            limit="${SAMPLE_LIMIT}"
+            if ! [[ "$limit" =~ ^[0-9]+$ ]]; then
+              echo "::error::sample_limit must be a number"
+              exit 1
+            fi
+            dry="${DRY_RUN}"
+            if [ "$dry" != "true" ] && [ "$dry" != "false" ]; then
+              echo "::error::dry_run must be 'true' or 'false'"
+              exit 1
+            fi
+
+            echo "Running POST /api/receipts/repair-html-text (limit=${limit}, dry_run=${dry}) ..."
+            resp="$(curl -sS -H "${auth_header}" -X POST "${BASE_URL}/api/receipts/repair-html-text?limit=${limit}&dry_run=${dry}&reclassify=true&only_missing_text=false")"
+            echo "$resp" | jq '{success, dry_run, reclassify, only_missing_text, scanned, wrote_text, would_write_text, reclassified, needs_review, skipped, errors}' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
 
           # verify mode
           limit="${SAMPLE_LIMIT}"
