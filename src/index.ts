@@ -945,7 +945,7 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
     }
 
     // Receipt Detail + File Download (admin only)
-    if (request.method === 'GET' && path.startsWith('/api/receipts/')) {
+    if ((request.method === 'GET' || request.method === 'HEAD') && path.startsWith('/api/receipts/')) {
       const mFile = path.match(/^\/api\/receipts\/([A-Za-z0-9_-]+)\/file$/);
       if (mFile) {
         const { verifyAPIKey } = await import('./utils/api-auth');
