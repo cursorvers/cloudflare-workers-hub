@@ -25,6 +25,7 @@ interface BackfillReceipt {
   file_hash: string;
   vendor_name: string;
   amount: number;
+  currency: string;
   transaction_date: string;
   account_category: string | null;
   classification_confidence: number;
@@ -41,6 +42,7 @@ interface BackfillResult {
   newAmount?: number;
   newCategory?: string;
   newConfidence?: number;
+  newCurrency?: string;
   dealId?: number | null;
   dealStatus?: string;
   error?: string;
@@ -100,7 +102,7 @@ function buildClassificationTextFromD1(receipt: BackfillReceipt): string {
   const parts = [
     `From: ${receipt.vendor_name}`,
     `Date: ${receipt.transaction_date}`,
-    `Amount: ${receipt.amount} JPY`,
+    `Amount: ${receipt.amount} ${receipt.currency || 'JPY'}`,
     `Source: ${receipt.source_type || 'unknown'}`,
   ];
 
@@ -172,24 +174,27 @@ async function backfillReceipt(
   const classification = await classifyReceipt(env, classificationText, {
     vendor_name: receipt.vendor_name,
     amount: receipt.amount,
+    currency: receipt.currency,
     transaction_date: receipt.transaction_date,
   });
 
   // Step 3: Update D1 with new classification
   const newVendor = classification.vendor_name || receipt.vendor_name;
   const newAmount = classification.amount > 0 ? Math.round(classification.amount) : receipt.amount;
+  const newCurrency = (classification.currency || receipt.currency || 'JPY').toString().trim().toUpperCase() || 'JPY';
   const newCategory = classification.account_category || receipt.account_category;
   const newConfidence = classification.confidence;
 
   await env.DB!.prepare(
     `UPDATE receipts
-     SET vendor_name = ?, amount = ?, account_category = ?,
+     SET vendor_name = ?, amount = ?, currency = ?, account_category = ?,
          classification_confidence = ?, classification_method = ?,
          updated_at = datetime('now')
      WHERE id = ?`
   ).bind(
     newVendor,
     newAmount,
+    newCurrency,
     newCategory,
     newConfidence,
     classification.method,
@@ -205,6 +210,7 @@ async function backfillReceipt(
     newAmount,
     newCategory: newCategory ?? undefined,
     newConfidence,
+    newCurrency,
   };
 
   let newDealsCreated = dealsCreated;
@@ -218,6 +224,7 @@ async function backfillReceipt(
         file_hash: receipt.file_hash,
         vendor_name: newVendor,
         amount: newAmount,
+        currency: newCurrency,
         transaction_date: receipt.transaction_date,
         account_category: newCategory,
         classification_confidence: newConfidence,
@@ -293,13 +300,13 @@ export async function handleReceiptBackfill(
 
   // Query receipts needing backfill: no deal, has freee_receipt_id
   const query = filterIds
-    ? `SELECT id, r2_object_key, file_hash, vendor_name, amount, transaction_date,
+    ? `SELECT id, r2_object_key, file_hash, vendor_name, amount, currency, transaction_date,
               account_category, classification_confidence, freee_receipt_id, source_type
        FROM receipts
        WHERE freee_deal_id IS NULL AND freee_receipt_id IS NOT NULL
          AND id IN (${filterIds.map(() => '?').join(',')})
        ORDER BY created_at DESC LIMIT ?`
-    : `SELECT id, r2_object_key, file_hash, vendor_name, amount, transaction_date,
+    : `SELECT id, r2_object_key, file_hash, vendor_name, amount, currency, transaction_date,
               account_category, classification_confidence, freee_receipt_id, source_type
        FROM receipts
        WHERE freee_deal_id IS NULL AND freee_receipt_id IS NOT NULL
@@ -391,7 +398,7 @@ export async function handleReceiptBackfillCron(env: Env): Promise<void> {
   }
 
   const { results: receipts } = await env.DB.prepare(
-    `SELECT id, r2_object_key, file_hash, vendor_name, amount, transaction_date,
+    `SELECT id, r2_object_key, file_hash, vendor_name, amount, currency, transaction_date,
             account_category, classification_confidence, freee_receipt_id, source_type
      FROM receipts
      WHERE freee_deal_id IS NULL AND freee_receipt_id IS NOT NULL
