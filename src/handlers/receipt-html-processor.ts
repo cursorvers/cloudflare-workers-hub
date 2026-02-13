@@ -220,6 +220,25 @@ export async function processHtmlReceipt(
       onlyIf: { etagDoesNotMatch: '*' },
     });
 
+
+    // Also store a UTF-8 plain text version for human review (e.g., Obsidian preview).
+    const textKey = r2Key.replace(/\.html$/i, '.txt');
+    const textBytes = new TextEncoder().encode(textContent);
+    await bucket.put(textKey, textBytes, {
+      httpMetadata: {
+        contentType: 'text/plain; charset=utf-8',
+        contentDisposition: 'attachment; filename="receipt.txt"',
+      },
+      customMetadata: {
+        fileHash,
+        messageId: email.messageId,
+        retentionUntil,
+        tenantId: DEFAULT_TENANT_ID,
+        worm: 'true',
+        source: 'html_body_text',
+      },
+      onlyIf: { etagDoesNotMatch: '*' },
+    });
     if (!htmlR2Result) {
       safeLog.warn('[Gmail Poller] HTML R2 put returned null (WORM dedup or write issue)', {
         r2Key,
@@ -306,80 +325,91 @@ export async function processHtmlReceipt(
     });
 
     // Deal creation (same as PDF path)
-    try {
-      if (metrics.dealsCreated < MAX_DEALS_PER_RUN) {
-        const receiptInput: ReceiptInput = {
-          id: receiptId,
-          freee_receipt_id: freeeResult.receipt.id,
-          file_hash: fileHash,
-          vendor_name: classificationResult.vendor_name,
-          amount: classificationResult.amount,
-          transaction_date: classificationResult.transaction_date,
-          account_category: classificationResult.account_category ?? null,
-          classification_confidence: classificationResult.confidence ?? null,
-          tenant_id: DEFAULT_TENANT_ID,
-        };
-
-        const dealResult = await createDealFromReceipt(env, receiptInput);
-
-        try {
-          await env.DB!.prepare(
-            `UPDATE receipts
-             SET freee_deal_id = ?, freee_partner_id = ?,
-                 account_item_id = ?, tax_code = ?,
-                 account_mapping_confidence = ?,
-                 account_mapping_method = ?,
-                 updated_at = datetime('now')
-             WHERE id = ?`
-          ).bind(
-            dealResult.dealId,
-            dealResult.partnerId,
-            dealResult.accountItemId ?? null,
-            dealResult.taxCode ?? null,
-            dealResult.mappingConfidence,
-            dealResult.mappingMethod ?? null,
-            receiptId
-          ).run();
-        } catch {
-          // best-effort D1 update
-        }
-
-        if (dealResult.status === 'created') {
-          metrics.dealsCreated += 1;
-        }
-
-        safeLog.info('[Gmail Poller] HTML deal processed', {
+    if (metrics.dealsCreated < MAX_DEALS_PER_RUN) {
+      const currency = (classificationResult.currency || 'JPY').toString().trim().toUpperCase();
+      if (currency !== 'JPY') {
+        safeLog.info('[Gmail Poller] Non-JPY currency; skipping deal creation', {
           receiptId,
-          dealId: dealResult.dealId,
-          status: dealResult.status,
-          mappingConfidence: dealResult.mappingConfidence,
+          currency,
+          amount: classificationResult.amount,
         });
       } else {
-        safeLog.info('[Gmail Poller] HTML deal skipped (rate limit cap reached)', {
-          receiptId,
-          dealsCreated: metrics.dealsCreated,
-          maxDealsPerRun: MAX_DEALS_PER_RUN,
-        });
+        try {
+          const receiptInput: ReceiptInput = {
+            id: receiptId,
+            freee_receipt_id: freeeResult.receipt.id,
+            file_hash: fileHash,
+            vendor_name: classificationResult.vendor_name,
+            amount: classificationResult.amount,
+            currency: classificationResult.currency || 'JPY',
+            transaction_date: classificationResult.transaction_date,
+            account_category: classificationResult.account_category ?? null,
+            classification_confidence: classificationResult.confidence ?? null,
+            tenant_id: DEFAULT_TENANT_ID,
+          };
+
+          const dealResult = await createDealFromReceipt(env, receiptInput);
+
+          try {
+            await env.DB!.prepare(
+              `UPDATE receipts
+               SET freee_deal_id = ?, freee_partner_id = ?,
+                   account_item_id = ?, tax_code = ?,
+                   account_mapping_confidence = ?,
+                   account_mapping_method = ?,
+                   updated_at = datetime('now')
+               WHERE id = ?`
+            ).bind(
+              dealResult.dealId,
+              dealResult.partnerId,
+              dealResult.accountItemId ?? null,
+              dealResult.taxCode ?? null,
+              dealResult.mappingConfidence,
+              dealResult.mappingMethod ?? null,
+              receiptId
+            ).run();
+          } catch {
+            // best-effort D1 update
+          }
+
+          if (dealResult.status === 'created') {
+            metrics.dealsCreated += 1;
+          }
+
+          safeLog.info('[Gmail Poller] HTML deal processed', {
+            receiptId,
+            dealId: dealResult.dealId,
+            status: dealResult.status,
+            mappingConfidence: dealResult.mappingConfidence,
+          });
+        } catch (dealError) {
+          const msg = dealError instanceof Error ? dealError.message : String(dealError);
+          safeLog.warn('[Gmail Poller] HTML deal creation failed (receipt saved)', {
+            receiptId,
+            freeeReceiptId: freeeResult.receipt.id,
+            error: msg,
+          });
+          try {
+            await env.DB!.prepare(
+              `INSERT INTO receipt_dlq (receipt_id, error_code, error_message, source_type, message_id)
+               VALUES (?, ?, ?, 'html_body', ?)`
+            ).bind(
+              receiptId,
+              'HTML_DEAL_CREATION_FAILED',
+              msg,
+              email.messageId
+            ).run();
+          } catch {
+            // DLQ insert is best-effort
+          }
+        }
       }
-    } catch (dealError) {
-      safeLog.warn('[Gmail Poller] HTML deal creation failed (receipt saved)', {
+    } else {
+      safeLog.info('[Gmail Poller] HTML deal skipped (rate limit cap reached)', {
         receiptId,
-        freeeReceiptId: freeeResult.receipt.id,
-        error: dealError instanceof Error ? dealError.message : String(dealError),
+        dealsCreated: metrics.dealsCreated,
+        maxDealsPerRun: MAX_DEALS_PER_RUN,
       });
-      try {
-        await env.DB!.prepare(
-          `INSERT INTO receipt_dlq (receipt_id, error_code, error_message, source_type, message_id)
-           VALUES (?, ?, ?, 'html_body', ?)`
-        ).bind(
-          receiptId,
-          'HTML_DEAL_CREATION_FAILED',
-          dealError instanceof Error ? dealError.message : String(dealError),
-          email.messageId
-        ).run();
-      } catch {
-        // DLQ insert is best-effort
-      }
     }
 
     await workflow.complete(String(freeeResult.receipt.id));

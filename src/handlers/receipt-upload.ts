@@ -400,6 +400,7 @@ export async function handleReceiptUpload(
       // When amount=0 (e.g. Chrome extension sends no amount), try AI classification
       let classifiedVendor = metadata.vendor_name;
       let classifiedAmount = metadata.amount;
+      let classifiedCurrency = metadata.currency;
       let classifiedDate = metadata.transaction_date;
       let classifiedAccountCategory = extractString(formData.get('account_category')) ?? null;
       let classifiedConfidence = 1; // Manual upload = full confidence
@@ -447,6 +448,9 @@ export async function handleReceiptUpload(
           classifiedDate = classification.transaction_date || metadata.transaction_date;
           classifiedAccountCategory = classification.account_category ?? classifiedAccountCategory;
           classifiedMethod = classification.method;
+          if (classification.currency) {
+            classifiedCurrency = String(classification.currency).trim().toUpperCase() || classifiedCurrency;
+          }
 
           const amountExtracted = classification.amount_extracted ?? (classifiedAmount > 0);
           const hasQualityIssue = isEmailLikeVendor(rawVendor)
@@ -519,6 +523,7 @@ export async function handleReceiptUpload(
         file_hash: fileHash,
         vendor_name: classifiedVendor,
         amount: classifiedAmount,
+        currency: classifiedCurrency,
         transaction_date: classifiedDate,
         account_category: classifiedAccountCategory,
         classification_confidence: classifiedConfidence,

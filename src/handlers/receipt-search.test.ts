@@ -83,6 +83,33 @@ describe('receipt-search handleReceiptDetail', () => {
     expect(String(json.file_url)).toBe('https://example.com/api/receipts/r1/file');
   });
 
+
+  it('returns text_url when HTML receipt text file exists', async () => {
+    const env = makeEnv();
+    (env.DB as any)._state.receipt = { id: 'r-html', r2_object_key: 'receipts/t/r-html/receipt.html', file_hash: 'sha256' };
+    env.RECEIPTS = {
+      head: async (key: string) => {
+        if (key.endsWith('receipt.html')) {
+          return { size: 10, writeHttpMetadata: (h: Headers) => h.set('Content-Type', 'text/html') } as any;
+        }
+        if (key.endsWith('receipt.txt')) {
+          return { size: 10, writeHttpMetadata: (h: Headers) => h.set('Content-Type', 'text/plain') } as any;
+        }
+        return null;
+      },
+      get: async (_key: string) => null,
+    } as any;
+
+    const req = new Request('https://example.com/api/receipts/r-html');
+    const res = await handleReceiptDetail(req, env, 'r-html');
+    expect(res.status).toBe(200);
+
+    const json = await res.json();
+    expect(json.has_file).toBe(true);
+    expect(String(json.file_url)).toBe('https://example.com/api/receipts/r-html/file');
+    expect(String(json.text_url)).toBe('https://example.com/api/receipts/r-html/file?variant=text');
+  });
+
   it('returns has_file=false and file_url=null when R2 object is missing', async () => {
     const env = makeEnv();
     (env.DB as any)._state.receipt = { id: 'r2', r2_object_key: 'receipts/t/r2/a.pdf', file_hash: 'sha256' };

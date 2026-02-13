@@ -53,6 +53,7 @@ export interface ReceiptInput {
   file_hash?: string | null;
   vendor_name: string;
   amount: number;
+  currency?: string | null;
   transaction_date: string;
   account_category?: string | null;
   classification_confidence?: number | null;
@@ -236,6 +237,26 @@ export async function createDealFromReceipt(
   receipt: ReceiptInput
 ): Promise<DealResult> {
   const idempotencyKey = buildIdempotencyKey(receipt);
+
+  const currency = (receipt.currency ?? 'JPY').toString().trim().toUpperCase();
+  if (currency && currency !== 'JPY') {
+    safeLog(env, 'warn', '[FreeeDealService] skipping deal: non-JPY currency (manual review required)', {
+      receiptId: receipt.id,
+      vendorName: receipt.vendor_name,
+      amount: receipt.amount,
+      currency,
+    });
+    return {
+      dealId: null,
+      partnerId: null,
+      mappingConfidence: 0,
+      status: 'needs_review',
+      accountItemId: null,
+      taxCode: null,
+      mappingMethod: null,
+      selectionProvider: null,
+    };
+  }
 
   // Guard: amount must be positive to create a freee deal.
   // Zero-amount receipts indicate extraction failure (e.g., R2 missing) — skip deal creation.

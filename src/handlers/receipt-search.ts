@@ -292,12 +292,22 @@ export async function handleReceiptDetail(
     ? new URL(`/api/receipts/${receiptId}/file`, request.url).toString()
     : null;
 
+  let text_url: string | null = null;
+  if (has_file && r2Key.toLowerCase().endsWith('.html')) {
+    const textKey = r2Key.replace(/\.html$/i, '.txt');
+    const textHead = await bucket.head(textKey);
+    if (textHead) {
+      text_url = new URL(`/api/receipts/${receiptId}/file?variant=text`, request.url).toString();
+    }
+  }
+
   return new Response(
     JSON.stringify({
       receipt,
       audit_trail: auditTrail.results || [],
       has_file,
       file_url,
+      text_url,
     }),
     {
       headers: { 'Content-Type': 'application/json' },
