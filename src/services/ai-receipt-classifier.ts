@@ -46,34 +46,69 @@ interface RuleBasedResult {
 // =============================================================================
 
 /**
- * Extract amount (JPY) from text using regex patterns.
- * Returns { amount, extracted } where extracted=true if a pattern matched.
+ * Extract amount + currency from text using regex patterns.
+ * - Does NOT perform FX conversion (keeps amount in the detected currency).
+ * - Defaults to JPY when currency cannot be determined.
  */
-function extractAmount(text: string): { amount: number; extracted: boolean } {
-  const patterns = [
+function extractAmount(text: string): { amount: number; currency: string; extracted: boolean } {
+  const patterns: Array<{ regex: RegExp; currency: string; parse: (raw: string) => number | null }> = [
     // ¥1,234 or ￥1,234
-    /[¥￥]\s*([\d,]+)/,
+    {
+      regex: /[¥￥]\s*([\d,]+)/,
+      currency: 'JPY',
+      parse: (raw) => {
+        const n = Number.parseInt(raw.replace(/,/g, ''), 10);
+        return Number.isFinite(n) ? n : null;
+      },
+    },
     // 1,234円
-    /([\d,]+)\s*円/,
+    {
+      regex: /([\d,]+)\s*円/,
+      currency: 'JPY',
+      parse: (raw) => {
+        const n = Number.parseInt(raw.replace(/,/g, ''), 10);
+        return Number.isFinite(n) ? n : null;
+      },
+    },
     // JPY 1234
-    /JPY\s*([\d,]+)/i,
+    {
+      regex: /JPY\s*([\d,]+)/i,
+      currency: 'JPY',
+      parse: (raw) => {
+        const n = Number.parseInt(raw.replace(/,/g, ''), 10);
+        return Number.isFinite(n) ? n : null;
+      },
+    },
     // 合計 1,234 / Total 1,234 / Amount: 1,234
-    /(?:合計|total|amount|金額|請求額|お支払い)[:\s]*([\d,]+)/i,
-    // $12.34 (convert later if needed, for now treat as JPY hint)
-    /\$\s*([\d,.]+)/,
+    {
+      regex: /(?:合計|total|amount|金額|請求額|お支払い)[:\s]*([\d,]+(?:\.\d{1,2})?)/i,
+      currency: 'JPY',
+      parse: (raw) => {
+        const n = Number.parseFloat(raw.replace(/,/g, ''));
+        return Number.isFinite(n) ? Math.round(n) : null;
+      },
+    },
+    // USD 12.34 / US$12.34 / $12.34
+    {
+      regex: /(?:USD|US\$|\$)\s*([\d,.]+)/i,
+      currency: 'USD',
+      parse: (raw) => {
+        const n = Number.parseFloat(raw.replace(/,/g, ''));
+        return Number.isFinite(n) ? n : null;
+      },
+    },
   ];
 
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
+  for (const { regex, currency, parse } of patterns) {
+    const match = text.match(regex);
     if (match) {
-      const raw = match[1].replace(/,/g, '');
-      const amount = Math.round(Number.parseFloat(raw));
-      if (Number.isFinite(amount) && amount > 0) {
-        return { amount, extracted: true };
+      const amount = parse(match[1]);
+      if (typeof amount === 'number' && Number.isFinite(amount) && amount > 0) {
+        return { amount, currency, extracted: true };
       }
     }
   }
-  return { amount: 0, extracted: false };
+  return { amount: 0, currency: 'JPY', extracted: false };
 }
 
 /**
@@ -185,7 +220,7 @@ function tryRuleBasedClassification(
 ): RuleBasedResult {
   for (const rule of VENDOR_RULES) {
     if (rule.pattern.test(text)) {
-      const { amount, extracted: amountExtracted } = extractAmount(text);
+      const { amount, currency, extracted: amountExtracted } = extractAmount(text);
       const date = extractDate(text);
 
       return {
@@ -196,6 +231,7 @@ function tryRuleBasedClassification(
           confidence: rule.confidence,
           method: 'rule_based',
           amount,
+          currency,
           amount_extracted: amountExtracted,
           ...(date ? { transaction_date: date } : {}),
         },
@@ -266,8 +302,8 @@ Extract and return ONLY a JSON object with the following structure:
 {
   "document_type": "invoice" | "receipt" | "expense_report" | "other",
   "vendor_name": "exact vendor name",
-  "amount": number (in yen, no comma),
-  "currency": "JPY",
+  "amount": number (do NOT convert currencies; use the amount as shown on the receipt; no comma),
+  "currency": "JPY" | "USD" | "EUR" | "GBP" | "AUD" | "CAD" | "CHF" | "CNY" | "KRW" | "SGD" | "HKD" (ISO 4217; if unknown, use "JPY"),
   "transaction_date": "YYYY-MM-DD",
   "account_category": "勘定科目 (e.g., 消耗品費, 広告宣伝費, 通信費)",
   "tax_type": "課税区分 (e.g., 課税10%, 非課税)",
@@ -294,13 +330,24 @@ Extract and return ONLY a JSON object with the following structure:
     });
     throw new Error('AI response parsing failed');
   }
+  const rawAmount = aiResult.amount;
+  let aiAmount = 0;
+  if (typeof rawAmount === 'number') {
+    aiAmount = rawAmount;
+  } else if (typeof rawAmount === 'string') {
+    const n = Number.parseFloat(rawAmount.replace(/,/g, ''));
+    aiAmount = Number.isFinite(n) ? n : 0;
+  }
 
-  const aiAmount = typeof aiResult.amount === 'number' ? aiResult.amount : 0;
+  const rawCurrency = typeof aiResult.currency === 'string' ? aiResult.currency : 'JPY';
+  const currency = rawCurrency.trim().toUpperCase();
+  const normalizedCurrency = /^[A-Z]{3}$/.test(currency) ? currency : 'JPY';
+
   return {
     document_type: aiResult.document_type || 'other',
     vendor_name: aiResult.vendor_name || 'Unknown',
     amount: aiAmount,
-    currency: aiResult.currency || 'JPY',
+    currency: normalizedCurrency,
     transaction_date: aiResult.transaction_date || new Date().toISOString().split('T')[0],
     account_category: aiResult.account_category,
     tax_type: aiResult.tax_type,
@@ -333,7 +380,7 @@ export async function classifyReceipt(
       document_type: 'receipt',
       vendor_name: ruleResult.result.vendor_name ?? 'Unknown',
       amount: ruleResult.result.amount ?? 0,
-      currency: 'JPY',
+      currency: ruleResult.result.currency ?? 'JPY',
       transaction_date: ruleResult.result.transaction_date ?? new Date().toISOString().split('T')[0],
       account_category: ruleResult.result.account_category,
       tax_type: undefined,
@@ -359,7 +406,7 @@ export async function classifyReceipt(
   const cacheKey = await calculateHash(`v2\n${tenant}\n${text}\n${JSON.stringify(normalizedMetadata)}`);
   let cached: string | null = null;
   try {
-    cached = await env.KV.get(`classification:v2:${cacheKey}`);
+    cached = await env.KV.get(`classification:v3:${cacheKey}`);
   } catch (error) {
     // Cache is non-critical; degrade gracefully under KV quota/outage.
     safeLog(env, 'warn', 'Classification cache read failed (continuing)', {
@@ -378,7 +425,7 @@ export async function classifyReceipt(
 
   // Cache result for 30 days
   try {
-    await env.KV.put(`classification:v2:${cacheKey}`, JSON.stringify(result), {
+    await env.KV.put(`classification:v3:${cacheKey}`, JSON.stringify(result), {
       expirationTtl: 30 * 24 * 60 * 60, // 30 days
     });
   } catch (error) {

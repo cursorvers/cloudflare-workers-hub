@@ -453,35 +453,44 @@ export async function processAttachment(
     // 2026-02-09: amount=0 gate REMOVED. Create deals regardless (as needs_review if low confidence).
     // Rate limit guard: cap deal creation per run to stay within freee 300 req/hr
     let dealStatus: 'created' | 'needs_review' | 'skipped' | 'failed' = 'skipped';
-    try {
-      if (metrics.dealsCreated < MAX_DEALS_PER_RUN) {
-        const receiptInput: ReceiptInput = {
-          id: receiptId,
-          freee_receipt_id: freeeResult.receipt.id,
-          file_hash: fileHash,
-          vendor_name: classificationResult.vendor_name,
+    if (metrics.dealsCreated < MAX_DEALS_PER_RUN) {
+      const currency = (classificationResult.currency || 'JPY').toString().trim().toUpperCase();
+      if (currency !== 'JPY') {
+        dealStatus = 'skipped';
+        safeLog.info('[Gmail Poller] Non-JPY currency; skipping deal creation', {
+          receiptId,
+          currency,
           amount: classificationResult.amount,
-          transaction_date: classificationResult.transaction_date,
-          account_category: classificationResult.account_category ?? null,
-          classification_confidence: classificationResult.confidence ?? null,
-          tenant_id: DEFAULT_TENANT_ID,
-        };
-
-        const dealResult = await createDealFromReceipt(env, receiptInput);
-        dealStatus = dealResult.status;
-
-        // Update receipts D1 record with deal fields
+        });
+      } else {
         try {
-          await env.DB!.prepare(
-            `UPDATE receipts
-             SET freee_deal_id = ?, freee_partner_id = ?,
-                 account_item_id = ?, tax_code = ?,
-                 account_mapping_confidence = ?,
-                 account_mapping_method = ?,
-                 updated_at = datetime('now')
-             WHERE id = ?`
-          )
-            .bind(
+          const receiptInput: ReceiptInput = {
+            id: receiptId,
+            freee_receipt_id: freeeResult.receipt.id,
+            file_hash: fileHash,
+            vendor_name: classificationResult.vendor_name,
+            amount: classificationResult.amount,
+            currency: classificationResult.currency || 'JPY',
+            transaction_date: classificationResult.transaction_date,
+            account_category: classificationResult.account_category ?? null,
+            classification_confidence: classificationResult.confidence ?? null,
+            tenant_id: DEFAULT_TENANT_ID,
+          };
+
+          const dealResult = await createDealFromReceipt(env, receiptInput);
+          dealStatus = dealResult.status;
+
+          // Update receipts D1 record with deal fields
+          try {
+            await env.DB!.prepare(
+              `UPDATE receipts
+               SET freee_deal_id = ?, freee_partner_id = ?,
+                   account_item_id = ?, tax_code = ?,
+                   account_mapping_confidence = ?,
+                   account_mapping_method = ?,
+                   updated_at = datetime('now')
+               WHERE id = ?`
+            ).bind(
               dealResult.dealId,
               dealResult.partnerId,
               dealResult.accountItemId ?? null,
@@ -489,62 +498,63 @@ export async function processAttachment(
               dealResult.mappingConfidence,
               dealResult.mappingMethod ?? null,
               receiptId
-            )
-            .run();
-        } catch (dbError) {
-          // non-fatal: deal was created, D1 update is best-effort
-          safeLog.warn('[Gmail Poller] Failed to update receipt with deal info', {
-            receiptId,
-            error: dbError instanceof Error ? dbError.message : String(dbError),
-          });
-        }
+            ).run();
+          } catch (dbError) {
+            // non-fatal: deal was created, D1 update is best-effort
+            safeLog.warn('[Gmail Poller] Failed to update receipt with deal info', {
+              receiptId,
+              error: dbError instanceof Error ? dbError.message : String(dbError),
+            });
+          }
 
-        if (dealResult.status === 'needs_review') {
-          safeLog.info('[Gmail Poller] Deal needs review', {
+          if (dealResult.status === 'needs_review') {
+            safeLog.info('[Gmail Poller] Deal needs review', {
+              receiptId,
+              mappingConfidence: dealResult.mappingConfidence,
+              provider: dealResult.selectionProvider,
+              amountExtracted: classificationResult.amount_extracted,
+            });
+          } else {
+            safeLog.info('[Gmail Poller] Deal created', {
+              receiptId,
+              dealId: dealResult.dealId,
+              partnerId: dealResult.partnerId,
+              mappingConfidence: dealResult.mappingConfidence,
+            });
+            metrics.dealsCreated += 1;
+          }
+        } catch (dealError) {
+          dealStatus = 'failed';
+          const msg = dealError instanceof Error ? dealError.message : String(dealError);
+          safeLog.warn('[Gmail Poller] Deal creation failed (receipt saved)', {
             receiptId,
-            mappingConfidence: dealResult.mappingConfidence,
-            provider: dealResult.selectionProvider,
-            amountExtracted: classificationResult.amount_extracted,
+            freeeReceiptId: freeeResult.receipt.id,
+            error: msg,
           });
-        } else {
-          safeLog.info('[Gmail Poller] Deal created', {
-            receiptId,
-            dealId: dealResult.dealId,
-            partnerId: dealResult.partnerId,
-            mappingConfidence: dealResult.mappingConfidence,
-          });
-          metrics.dealsCreated += 1;
+          // Record to DLQ for retry
+          try {
+            await env.DB!.prepare(
+              `INSERT INTO receipt_dlq (receipt_id, error_code, error_message, source_type, message_id, attachment_id)
+               VALUES (?, ?, ?, 'pdf', ?, ?)`
+            ).bind(
+              receiptId,
+              'DEAL_CREATION_FAILED',
+              msg,
+              email.messageId,
+              attachmentId
+            ).run();
+          } catch {
+            // DLQ insert is best-effort
+          }
         }
-      } else {
-        dealStatus = 'skipped';
-        safeLog.info('[Gmail Poller] Deal skipped (rate limit cap reached)', {
-          receiptId,
-          dealsCreated: metrics.dealsCreated,
-          maxDealsPerRun: MAX_DEALS_PER_RUN,
-        });
       }
-    } catch (dealError) {
-      dealStatus = 'failed';
-      safeLog.warn('[Gmail Poller] Deal creation failed (receipt saved)', {
+    } else {
+      dealStatus = 'skipped';
+      safeLog.info('[Gmail Poller] Deal skipped (rate limit cap reached)', {
         receiptId,
-        freeeReceiptId: freeeResult.receipt.id,
-        error: dealError instanceof Error ? dealError.message : String(dealError),
+        dealsCreated: metrics.dealsCreated,
+        maxDealsPerRun: MAX_DEALS_PER_RUN,
       });
-      // Record to DLQ for retry
-      try {
-        await env.DB!.prepare(
-          `INSERT INTO receipt_dlq (receipt_id, error_code, error_message, source_type, message_id, attachment_id)
-           VALUES (?, ?, ?, 'pdf', ?, ?)`
-        ).bind(
-          receiptId,
-          'DEAL_CREATION_FAILED',
-          dealError instanceof Error ? dealError.message : String(dealError),
-          email.messageId,
-          attachmentId
-        ).run();
-      } catch {
-        // DLQ insert is best-effort
-      }
     }
 
     await workflow.complete(String(freeeResult.receipt.id));
