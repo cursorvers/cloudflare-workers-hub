@@ -55,7 +55,7 @@ jobs:
             exit 1
           fi
 
-          echo "Fetching latest  receipts (public search) ..."
+          echo "Fetching latest ${limit} receipts (public search) ..."
           search="$(curl -sS "${BASE_URL}/api/receipts/search?limit=${limit}&offset=0")"
           ids=( $(echo "$search" | jq -r '.results[].id') )
 
@@ -67,11 +67,10 @@ jobs:
           fi
 
           for id in "${ids[@]}"; do
-            echo "
-=== Receipt  ===" | tee -a ""
+            echo "\n### Receipt ${id}" >> "$GITHUB_STEP_SUMMARY"
 
             detail="$(curl -sS -H "${auth_header}" "${BASE_URL}/api/receipts/${id}")"
-            echo "" | jq "{id, status, has_file, file_url, r2_object_key, freee_receipt_id}" | tee -a ""
+            echo "$detail" | jq '{id, status, has_file, file_url, r2_object_key, freee_receipt_id}' >> "$GITHUB_STEP_SUMMARY"
 
             file_url="$(echo "$detail" | jq -r '.file_url // empty')"
             has_file="$(echo "$detail" | jq -r '.has_file')"
@@ -86,5 +85,5 @@ jobs:
             curl -sSI -H "${auth_header}" "$file_url" \
               | sed -n '1,12p' \
               | sed 's/\r$//' \
-              | awk '{print "- " -e}' | tee -a ""
+              | awk '{print "- " $0}' >> "$GITHUB_STEP_SUMMARY"
           done
