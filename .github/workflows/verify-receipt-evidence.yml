@@ -59,7 +59,7 @@ jobs:
           search="$(curl -sS "${BASE_URL}/api/receipts/search?limit=${limit}&offset=0")"
           ids=( $(echo "$search" | jq -r '.results[].id') )
 
-          echo "- Sample IDs: ${ids[*]:-none}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Sample IDs: ${ids[*]:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
 
           if [ "${#ids[@]}" -eq 0 ]; then
             echo "No receipts found."
@@ -67,10 +67,10 @@ jobs:
           fi
 
           for id in "${ids[@]}"; do
-            echo "\n### Receipt ${id}" >> "$GITHUB_STEP_SUMMARY"
+            echo "\n=== Receipt ${id} ===" | tee -a "$GITHUB_STEP_SUMMARY"
 
             detail="$(curl -sS -H "${auth_header}" "${BASE_URL}/api/receipts/${id}")"
-            echo "$detail" | jq '{id, status, has_file, file_url, r2_object_key, freee_receipt_id}' >> "$GITHUB_STEP_SUMMARY"
+            echo "$detail" | jq '{id, status, has_file, file_url, r2_object_key, freee_receipt_id}' | tee -a "$GITHUB_STEP_SUMMARY"
 
             file_url="$(echo "$detail" | jq -r '.file_url // empty')"
             has_file="$(echo "$detail" | jq -r '.has_file')"
@@ -85,5 +85,5 @@ jobs:
             curl -sSI -H "${auth_header}" "$file_url" \
               | sed -n '1,12p' \
               | sed 's/\r$//' \
-              | awk '{print "- " $0}' >> "$GITHUB_STEP_SUMMARY"
+              | awk '{print "- " $0}' | tee -a "$GITHUB_STEP_SUMMARY"
           done
