@@ -137,6 +137,11 @@ export interface Env {
   FREEE_COMPANY_ID?: string;       // freee company ID
   FREEE_ENCRYPTION_KEY?: string;   // AES-GCM encryption key for refresh token (32 chars)
   FREEE_BASE_URL?: string;         // freee API base URL (default: https://api.freee.co.jp/api/1)
+  // freee wallet txn (bank/credit card statement) matching
+  // When enabled, attempts to pick a likely matching withdrawal and set deal.payment.from_walletable_*
+  // so the receipt-linked deal is more likely to reconcile on the statement screen.
+  // Default: enabled (disable by setting to "false")
+  FREEE_WALLET_MATCH_ENABLED?: string;
   // Highlight API (iOS Shortcut)
   HIGHLIGHT_API_KEY?: string;      // API key for Limitless highlights feature
   // Base URL for self-calls (cron -> API) if needed
