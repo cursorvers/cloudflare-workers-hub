@@ -443,3 +443,153 @@ export async function processHtmlReceipt(
     }
   }
 }
+
+export interface RetryHtmlReceiptsResult {
+  readonly retried: number;
+  readonly succeeded: number;
+  readonly failed: number;
+  readonly skipped: number;
+}
+
+/**
+ * Retry failed HTML receipts where the failure was transient (i.e. an error_code exists).
+ *
+ * Note:
+ * - Receipts blocked for "manual review" often transition to `failed` without `recordError()`,
+ *   so they will not be retried here (error_code is NULL).
+ * - This is intentionally conservative to avoid creating unintended freee uploads/deals.
+ */
+export async function retryFailedHtmlReceipts(
+  env: Env,
+  bucket: R2Bucket,
+  freeeClient: ReturnType<typeof createFreeeClient>,
+  limit: number = 5,
+): Promise<RetryHtmlReceiptsResult> {
+  if (!env.DB) {
+    return { retried: 0, succeeded: 0, failed: 0, skipped: 0 };
+  }
+
+  const rows = await env.DB.prepare(
+    `SELECT
+       id, r2_object_key, file_hash, vendor_name, amount, currency,
+       transaction_date, account_category, classification_confidence,
+       tenant_id, retry_count, error_code
+     FROM receipts
+     WHERE source_type = 'html_body'
+       AND status = 'failed'
+       AND freee_receipt_id IS NULL
+       AND error_code IS NOT NULL
+       AND retry_count < 3
+     ORDER BY updated_at DESC
+     LIMIT ?`,
+  ).bind(limit).all<{
+    id: string;
+    r2_object_key: string;
+    file_hash: string;
+    vendor_name: string;
+    amount: number;
+    currency: string;
+    transaction_date: string;
+    account_category: string | null;
+    classification_confidence: number | null;
+    tenant_id: string;
+    retry_count: number;
+    error_code: string;
+  }>();
+
+  const result: { retried: number; succeeded: number; failed: number; skipped: number } = {
+    retried: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: 0,
+  };
+
+  for (const r of rows.results ?? []) {
+    result.retried += 1;
+
+    try {
+      const obj = await bucket.get(r.r2_object_key);
+      if (!obj) {
+        result.skipped += 1;
+        continue;
+      }
+
+      const html = await obj.text();
+      const textContent = stripHtmlTags(html).slice(0, 8000);
+
+      const workflow = createStateMachine(env, r.id);
+      try {
+        // failed -> submitting_freee is allowed by the workflow rules
+        await workflow.transition('submitting_freee', { source: 'html_retry' });
+      } catch {
+        // best-effort
+      }
+
+      const pdfBytes = await convertHtmlReceiptToPdf(textContent, {
+        subject: `Retry: ${r.vendor_name}`,
+        from: 'retry',
+        date: new Date().toISOString(),
+        receiptId: r.id,
+      });
+
+      const idempotencyKey = `gmail:html:retry:${r.id}`;
+      const pdfFileName = `receipt-${r.id}.pdf`;
+      const pdfBlob = new Blob([pdfBytes], { type: 'application/pdf' });
+
+      const freeeResult = await freeeClient.uploadReceipt(pdfBlob, pdfFileName, idempotencyKey);
+      await workflow.complete(String(freeeResult.receipt.id));
+
+      // Best-effort deal creation (consistent with main HTML path)
+      if ((r.currency || 'JPY') === 'JPY' && Number(r.amount) > 0) {
+        const receiptInput: ReceiptInput = {
+          id: r.id,
+          freee_receipt_id: freeeResult.receipt.id,
+          retry_link_if_existing: true,
+          file_hash: r.file_hash,
+          vendor_name: r.vendor_name,
+          amount: r.amount,
+          currency: r.currency || 'JPY',
+          transaction_date: r.transaction_date,
+          account_category: r.account_category ?? null,
+          classification_confidence: r.classification_confidence ?? null,
+          tenant_id: r.tenant_id || DEFAULT_TENANT_ID,
+        };
+
+        const dealResult = await createDealFromReceipt(env, receiptInput);
+        if (dealResult.dealId) {
+          await env.DB.prepare(
+            `UPDATE receipts
+             SET freee_deal_id = ?, freee_partner_id = ?,
+                 account_item_id = ?, tax_code = ?,
+                 account_mapping_confidence = ?,
+                 account_mapping_method = ?,
+                 updated_at = datetime('now')
+             WHERE id = ?`,
+          ).bind(
+            dealResult.dealId,
+            dealResult.partnerId,
+            dealResult.accountItemId ?? null,
+            dealResult.taxCode ?? null,
+            dealResult.mappingConfidence,
+            dealResult.mappingMethod ?? null,
+            r.id,
+          ).run();
+        }
+      }
+
+      result.succeeded += 1;
+    } catch (error) {
+      result.failed += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      safeLog.warn('[Gmail Poller] HTML retry failed', { receiptId: r.id, error: message });
+      try {
+        const workflow = createStateMachine(env, r.id);
+        await workflow.recordError(message, 'HTML_RETRY_FAILED');
+      } catch {
+        // best-effort
+      }
+    }
+  }
+
+  return result;
+}
