@@ -34,3 +34,24 @@ export function createTraceContext(parentSpanId?: SpanId): TraceContext {
     timestamp: new Date().toISOString(),
   });
 }
+
+
+/**
+ * Coerce an untrusted/serialized trace context (string fields) into branded types.
+ *
+ * WARNING: Trace contexts are for audit and correlation purposes ONLY.
+ * NEVER use for authentication or authorization.
+ */
+export function coerceTraceContext(input: {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  timestamp: string;
+}): TraceContext {
+  return Object.freeze({
+    traceId: input.traceId as TraceId,
+    spanId: input.spanId as SpanId,
+    ...(input.parentSpanId ? { parentSpanId: input.parentSpanId as SpanId } : {}),
+    timestamp: input.timestamp,
+  });
+}

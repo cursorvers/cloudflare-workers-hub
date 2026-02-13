@@ -19,6 +19,7 @@ import { createExecutorWorker, type ExecutorStorage } from '../executor/factory'
 import type { ExtendedMode } from '../runtime/coordinator';
 import { toLegacyMode } from '../runtime/coordinator';
 import { safeLog } from '../../../utils/log-sanitizer';
+import { coerceTraceContext } from '../utils/trace';
 
 import {
   type ExecutionQueueState,
@@ -170,7 +171,7 @@ function buildToolRequest(task: ExecutionTask): ToolRequest {
     params: task.payload.params,
     effects: task.payload.effects,
     riskTier: task.payload.computedRiskTier,
-    traceContext: task.payload.traceContext,
+    traceContext: coerceTraceContext(task.payload.traceContext),
     attempt: task.retryCount + 1,
     maxAttempts: task.maxRetries + 1,
     requestedAt: new Date(task.createdAt).toISOString(),
@@ -195,7 +196,7 @@ function computeDequeuePolicy(
     riskTier: task.payload.computedRiskTier,
     trustZone: TRUST_ZONES.TRUSTED_CONFIG,
     budgetState,
-    traceContext: task.payload.traceContext,
+    traceContext: coerceTraceContext(task.payload.traceContext),
   };
 
   return evaluatePolicy(policyCtx, DEFAULT_RULES, []);
