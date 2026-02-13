@@ -19,6 +19,7 @@
 import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { isFreeeIntegrationEnabled } from '../utils/freee-integration';
+import { createFreeeClient } from '../services/freee-client';
 import { createDealFromReceipt, type ReceiptInput } from '../services/freee-deal-service';
 
 const DEFAULT_LINK_BACKFILL_LIMIT = 5;
@@ -28,6 +29,7 @@ interface LinkBackfillRow {
   receipt_id: string;
   deal_id: number;
   freee_receipt_id: string;
+  r2_object_key: string;
   file_hash: string | null;
   vendor_name: string;
   amount: number;
@@ -37,6 +39,51 @@ interface LinkBackfillRow {
   classification_confidence: number | null;
   tenant_id: string;
   link_retry_count: number;
+}
+
+function isDeletedReceiptError(message: string): boolean {
+  return message.includes('証憑は既に削除されています') || message.toLowerCase().includes('receipt') && message.toLowerCase().includes('deleted');
+}
+
+async function tryReuploadReceiptEvidence(
+  env: Env,
+  row: LinkBackfillRow,
+): Promise<string | null> {
+  const bucket = env.RECEIPTS ?? env.R2 ?? null;
+  if (!bucket) {
+    return null;
+  }
+
+  if (!env.DB) {
+    return null;
+  }
+
+  const r2Key = row.r2_object_key;
+  if (!r2Key) {
+    return null;
+  }
+
+  const obj = await bucket.get(r2Key);
+  if (!obj) {
+    return null;
+  }
+
+  const blob = await obj.blob();
+  const fileName = r2Key.split('/').pop() || 'receipt.pdf';
+  const idempotencyKey = `reupload:deleted:${row.tenant_id || 'default'}:${row.file_hash ?? row.receipt_id}`;
+
+  const freeeClient = createFreeeClient(env);
+  const upload = await freeeClient.uploadReceipt(blob, fileName, idempotencyKey);
+  const newFreeeReceiptId = String(upload.receipt.id);
+
+  // Keep receipts table in sync (receipt_deals will be updated by recordDealLink later).
+  await env.DB.prepare(
+    `UPDATE receipts
+     SET freee_receipt_id = ?, updated_at = datetime('now')
+     WHERE id = ?`
+  ).bind(newFreeeReceiptId, row.receipt_id).run();
+
+  return newFreeeReceiptId;
 }
 
 export async function backfillReceiptDealLinks(
@@ -70,6 +117,7 @@ export async function backfillReceiptDealLinks(
          rd.receipt_id,
          rd.deal_id,
          rd.freee_receipt_id,
+         r.r2_object_key,
          r.file_hash,
          r.vendor_name,
          r.amount,
@@ -144,8 +192,36 @@ export async function backfillReceiptDealLinks(
          WHERE receipt_id = ?`
       ).bind(receiptId).run();
     } catch (error) {
-      failed += 1;
       const message = error instanceof Error ? error.message : String(error);
+
+      // If the evidence receipt was deleted in freee, re-upload from R2 and retry once.
+      if (isDeletedReceiptError(message)) {
+        try {
+          const newFreeeReceiptId = await tryReuploadReceiptEvidence(env, row);
+          if (newFreeeReceiptId) {
+            const retryInput: ReceiptInput = { ...receiptInput, freee_receipt_id: newFreeeReceiptId };
+            await createDealFromReceipt(env, retryInput);
+
+            verified += 1;
+            await env.DB.prepare(
+              `UPDATE receipt_deals
+               SET link_verified_at = datetime('now'),
+                   link_last_error = NULL
+               WHERE receipt_id = ?`
+            ).bind(receiptId).run();
+            continue;
+          }
+        } catch (retryError) {
+          const retryMsg = retryError instanceof Error ? retryError.message : String(retryError);
+          safeLog.warn('[DealLinkBackfill] Re-upload + retry failed', {
+            receiptId,
+            dealId: row.deal_id,
+            error: retryMsg,
+          });
+        }
+      }
+
+      failed += 1;
       safeLog.warn('[DealLinkBackfill] Link attempt failed', {
         receiptId,
         dealId: row.deal_id,
