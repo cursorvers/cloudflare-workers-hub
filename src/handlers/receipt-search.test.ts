@@ -8,7 +8,7 @@ function makeEnv(overrides: any = {}) {
       const state = (db as any)._state as any;
 
       return {
-        bind: (...args: any[]) => {
+        bind: (..._args: any[]) => {
           return {
             first: async () => {
               if (sql.includes('SELECT * FROM receipts')) return state.receipt ?? null;
@@ -46,7 +46,15 @@ function makeEnv(overrides: any = {}) {
 
 function makeBucket({ headOk = true, getOk = true }: { headOk?: boolean; getOk?: boolean }) {
   return {
-    head: async (_key: string) => (headOk ? ({ size: 123, writeHttpMetadata: (h: Headers) => h.set('Content-Type', 'application/pdf') } as any) : null),
+    head: async (_key: string) =>
+      headOk
+        ? ({
+            size: 123,
+            writeHttpMetadata: (h: Headers) => {
+              h.set('Content-Type', 'application/pdf');
+            },
+          } as any)
+        : null,
     get: async (_key: string) => {
       if (!getOk) return null;
       return {
@@ -111,7 +119,7 @@ describe('receipt-search handleReceiptFileDownload', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/pdf');
     expect(res.headers.get('content-disposition') || '').toContain('attachment;');
-
+  });
 
   it('returns headers only on HEAD when present', async () => {
     const env = makeEnv();
@@ -123,9 +131,8 @@ describe('receipt-search handleReceiptFileDownload', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/pdf');
     expect(res.headers.get('content-disposition') || '').toContain('attachment;');
-    // Body should be empty for HEAD.
+
     const body = await res.text();
     expect(body).toBe('');
-  });
   });
 });

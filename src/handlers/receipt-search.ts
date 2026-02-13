@@ -337,6 +337,25 @@ export async function handleReceiptFileDownload(
     return new Response('Receipt storage not configured', { status: 500 });
   }
 
+  if (request.method === 'HEAD') {
+    const head = await bucket.head(receipt.r2_object_key);
+    if (!head) {
+      return new Response('Receipt file not found', { status: 404 });
+    }
+
+    const fileName = String(receipt.r2_object_key).split('/').pop() || 'receipt.bin';
+    const headers = new Headers();
+    // head() returns metadata only; write headers when available.
+    (head as any).writeHttpMetadata?.(headers);
+    headers.set('Content-Disposition', `attachment; filename="${fileName.replace(/"/g, '')}"`);
+    headers.set('Cache-Control', 'private, max-age=300');
+    if (typeof (head as any).size === 'number') {
+      headers.set('Content-Length', String((head as any).size));
+    }
+
+    return new Response(null, { headers });
+  }
+
   const obj = await bucket.get(receipt.r2_object_key);
   if (!obj) {
     return new Response('Receipt file not found', { status: 404 });
