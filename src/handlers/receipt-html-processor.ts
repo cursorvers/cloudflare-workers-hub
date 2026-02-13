@@ -242,7 +242,16 @@ export async function processHtmlReceipt(
         receiptId,
         externalRefTypes: email.htmlBody.externalRefTypes,
       });
-      await workflow.transition('failed', {
+      try {
+        await workflow.recordError(
+          'HTML has external references - needs manual review',
+          'HTML_EXTERNAL_REFERENCES',
+          { externalRefTypes: email.htmlBody.externalRefTypes }
+        );
+      } catch {
+        // best-effort
+      }
+      await workflow.transition('needs_review', {
         reason: 'HTML has external references - needs manual review',
         externalRefTypes: email.htmlBody.externalRefTypes,
       });

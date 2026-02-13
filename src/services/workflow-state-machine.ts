@@ -84,12 +84,12 @@ export interface AuditLog {
 
 const VALID_TRANSITIONS: Record<ReceiptStatus, ReceiptStatus[]> = {
   pending_validation: ['validated', 'failed'],
-  validated: ['classified', 'failed'],
+  validated: ['classified', 'needs_review', 'failed'],
   classified: ['extracting', 'needs_review', 'failed'],
-  extracting: ['extracted', 'failed'],
-  extracted: ['uploading_r2', 'failed'],
-  uploading_r2: ['uploaded_r2', 'failed'],
-  uploaded_r2: ['submitting_freee', 'failed'],
+  extracting: ['extracted', 'needs_review', 'failed'],
+  extracted: ['uploading_r2', 'needs_review', 'failed'],
+  uploading_r2: ['uploaded_r2', 'needs_review', 'failed'],
+  uploaded_r2: ['submitting_freee', 'needs_review', 'failed'],
   submitting_freee: ['freee_uploaded', 'failed', 'needs_review'],
   // Deal automation states
   freee_uploaded: ['mapping_account', 'completed', 'failed'],

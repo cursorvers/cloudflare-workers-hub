@@ -22,6 +22,7 @@ import { handleLimitlessPollerCron } from './limitless-poller';
 import { handleGmailReceiptPolling } from './receipt-gmail-poller';
 import { recordCronRun } from './receipt-backfill';
 import { HEALTH } from '../config/confidence-thresholds';
+import { recoverPdfReceiptsNeedingFreeeUpload } from './receipt-recovery';
 
 // ============================================================================
 // Cron Expression Constants
@@ -162,6 +163,14 @@ export async function handleScheduled(
 
       // Primary: Gmail receipt polling
       await runJob('gmail_polling', () => handleGmailReceiptPolling(env));
+
+      // Recovery: receipts stuck due to transient Gmail poll failures
+      await runJob('receipt_recovery', async () => {
+        const res = await recoverPdfReceiptsNeedingFreeeUpload(env);
+        if (res.scanned > 0) {
+          safeLog.info('[Scheduled] Receipt recovery summary', res);
+        }
+      });
 
       // Health check: alert if last successful poll is stale (>6h)
       if (cache && env.DISCORD_WEBHOOK_URL) {
