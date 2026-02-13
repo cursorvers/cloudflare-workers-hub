@@ -1,6 +1,8 @@
 name: Verify Receipt Evidence
 
 on:
+  schedule:
+    - cron: '25 0,12 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -28,7 +30,65 @@ on:
           - 'false'
 
 jobs:
+  scheduled_repairs:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repair HTML receipt evidence (missing text only)
+        env:
+          BASE_URL: https://orchestrator-hub.masa-stage1.workers.dev
+          WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WORKERS_API_KEY}" ]; then
+            echo "::error::WORKERS_API_KEY secret is missing"
+            exit 1
+          fi
+          auth_header="Authorization: Bearer ${WORKERS_API_KEY}"
+          echo "Running POST /api/receipts/repair-html-text (limit=100, dry_run=false, reclassify=false, only_missing_text=true) ..."
+          curl -sS -H "${auth_header}" -X POST \
+            "${BASE_URL}/api/receipts/repair-html-text?limit=100&dry_run=false&reclassify=false&only_missing_text=true" \
+            | jq '{success, dry_run, reclassify, only_missing_text, scanned, wrote_text, would_write_text, reclassified, needs_review, skipped, errors}'
+
+      - name: Repair freee receipt-to-deal links
+        env:
+          BASE_URL: https://orchestrator-hub.masa-stage1.workers.dev
+          WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WORKERS_API_KEY}" ]; then
+            echo "::error::WORKERS_API_KEY secret is missing"
+            exit 1
+          fi
+          auth_header="Authorization: Bearer ${WORKERS_API_KEY}"
+          echo "Running POST /api/receipts/repair-freee-links (limit=100, dry_run=false) ..."
+          curl -sS -H "${auth_header}" -X POST \
+            "${BASE_URL}/api/receipts/repair-freee-links?limit=100&dry_run=false" \
+            | jq '{success, dry_run, scanned, ok, repaired, would_repair, conflicts, skipped, errors}'
+
+      - name: Verify recent receipts (sample=3)
+        env:
+          BASE_URL: https://orchestrator-hub.masa-stage1.workers.dev
+          WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WORKERS_API_KEY}" ]; then
+            echo "::error::WORKERS_API_KEY secret is missing"
+            exit 1
+          fi
+          auth_header="Authorization: Bearer ${WORKERS_API_KEY}"
+          limit=3
+          echo "Fetching latest ${limit} receipts (public search) ..."
+          search="$(curl -sS "${BASE_URL}/api/receipts/search?limit=${limit}&offset=0")"
+          ids=( $(echo "$search" | jq -r '.results[].id') )
+          echo "Sample IDs: ${ids[*]:-none}"
+          for id in "${ids[@]}"; do
+            detail="$(curl -sS -H "${auth_header}" "${BASE_URL}/api/receipts/${id}")"
+            echo "$detail" | jq '{id: (.receipt.id // .id), status: (.receipt.status // .status), has_file, has_text: (.has_text // false), file_url, text_url}'
+          done
+
   run:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Verify / Retry Receipts Evidence
