@@ -28,6 +28,7 @@ jobs:
         run: |
           if grep -RInE '(\[env\.production\]|--env[ =]production|--env=production)' . \
             --exclude-dir node_modules \
+            --exclude ci.yml \
             --exclude set-production-receipts-secrets.sh; then
             echo "::error::Found deprecated env.production usage. Use env.canary or --env= (hub)."
             exit 1
