@@ -26,8 +26,10 @@ jobs:
 
       - name: Guardrail (no env.production)
         run: |
-          if grep -RInE '(\\[env\\.production\\]|--env production)' . \
+          # NOTE: Keep this regex tight. Do not double-escape, or it degenerates into a broad char-class match.
+          if grep -RInE '(\[env\.production\]|--env production)' . \
             --exclude-dir node_modules \
+            --exclude ci.yml \
             --exclude set-production-receipts-secrets.sh; then
             echo "::error::Found deprecated env.production usage. Use env.canary or --env= (hub)."
             exit 1
