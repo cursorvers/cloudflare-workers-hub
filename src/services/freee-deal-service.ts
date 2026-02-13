@@ -34,6 +34,14 @@ export interface DealCreateParams {
     amount: number;
     description?: string;
   }>;
+  // Optional: mark the deal as paid from a specific wallet (bank/credit card) to help
+  // freee reconcile against wallet_txns (statement lines).
+  payments?: Array<{
+    amount: number;
+    date: string;
+    from_walletable_id: number;
+    from_walletable_type: 'bank_account' | 'credit_card' | 'wallet' | 'private_account_item';
+  }>;
 }
 
 export interface DealResult {
@@ -102,6 +110,143 @@ interface RequestCapableFreeeClient {
 
 interface AccessTokenProvider {
   getAccessTokenPublic: () => Promise<string>;
+}
+
+interface FreeeWalletTxn {
+  id: number;
+  date: string;
+  amount: number;
+  due_amount?: number;
+  entry_side: 'income' | 'expense';
+  walletable_type: 'bank_account' | 'credit_card' | 'wallet';
+  walletable_id: number;
+  description: string;
+  status: number;
+}
+
+function isWalletMatchEnabled(env: Env): boolean {
+  return env.FREEE_WALLET_MATCH_ENABLED !== 'false';
+}
+
+function normalizeForContains(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[^a-z0-9぀-ヿ㐀-鿿]/g, '');
+}
+
+function parseISODate(dateStr: string): number {
+  const t = Date.parse(`${dateStr}T00:00:00Z`);
+  return Number.isFinite(t) ? t : Number.NaN;
+}
+
+function formatISODate(t: number): string {
+  return new Date(t).toISOString().slice(0, 10);
+}
+
+function absInt(n: number): number {
+  const v = Math.round(n);
+  return v < 0 ? -v : v;
+}
+
+async function findMatchingWalletPayment(
+  env: Env,
+  freeeClient: RequestCapableFreeeClient,
+  companyId: number,
+  receipt: ReceiptInput
+): Promise<NonNullable<DealCreateParams['payments']>[number] | null> {
+  if (!isWalletMatchEnabled(env)) return null;
+  if (!receipt.transaction_date) return null;
+  if (!Number.isFinite(receipt.amount) || receipt.amount <= 0) return null;
+
+  const base = parseISODate(receipt.transaction_date);
+  if (!Number.isFinite(base)) return null;
+
+  // Search statement lines around the receipt date. Keep range narrow to reduce API cost.
+  const start = formatISODate(base - 3 * 24 * 60 * 60 * 1000);
+  const end = formatISODate(base + 3 * 24 * 60 * 60 * 1000);
+
+  const urlParams = new URLSearchParams({
+    company_id: String(companyId),
+    start_date: start,
+    end_date: end,
+    entry_side: 'expense',
+    limit: '100',
+    offset: '0',
+  });
+
+  type WalletTxnListResponse = { wallet_txns: FreeeWalletTxn[] };
+
+  let walletTxns: FreeeWalletTxn[] = [];
+  try {
+    const resp = await freeeClient.request<WalletTxnListResponse>(
+      'GET',
+      `/wallet_txns?${urlParams.toString()}`
+    );
+    walletTxns = Array.isArray(resp.wallet_txns) ? resp.wallet_txns : [];
+  } catch (error) {
+    safeLog(env, 'warn', '[FreeeDealService] wallet_txns lookup failed (continuing without statement matching)', {
+      receiptId: receipt.id,
+      vendorName: receipt.vendor_name,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+
+  const targetAmount = absInt(receipt.amount);
+  const vendorNorm = normalizeForContains(receipt.vendor_name || '');
+
+  let best: { score: number; txn: FreeeWalletTxn } | null = null;
+
+  for (const txn of walletTxns) {
+    if (!txn) continue;
+    if (txn.entry_side !== 'expense') continue;
+
+    // Prefer unreconciled statement lines.
+    if (txn.status !== 1) continue;
+
+    const amt = absInt(txn.amount);
+    if (amt !== targetAmount) continue;
+
+    const t = parseISODate(txn.date);
+    if (!Number.isFinite(t)) continue;
+
+    const dayDiff = Math.abs(Math.round((t - base) / (24 * 60 * 60 * 1000)));
+    if (dayDiff > 3) continue;
+
+    const descNorm = normalizeForContains(txn.description || '');
+
+    let score = 100 - dayDiff * 10;
+    if (vendorNorm && descNorm.includes(vendorNorm)) score += 30;
+
+    // If due_amount exists and doesn't match, de-prioritize slightly.
+    if (typeof txn.due_amount === 'number') {
+      const due = absInt(txn.due_amount);
+      if (due !== 0 && due !== targetAmount) score -= 5;
+    }
+
+    if (!best || score > best.score) {
+      best = { score, txn };
+    }
+  }
+
+  if (!best) return null;
+
+  safeLog(env, 'info', '[FreeeDealService] matched wallet_txn for payment', {
+    receiptId: receipt.id,
+    vendorName: receipt.vendor_name,
+    amount: targetAmount,
+    walletTxnId: best.txn.id,
+    walletableType: best.txn.walletable_type,
+    walletableId: best.txn.walletable_id,
+  });
+
+  return {
+    amount: targetAmount,
+    date: best.txn.date,
+    from_walletable_id: best.txn.walletable_id,
+    from_walletable_type: best.txn.walletable_type,
+  };
 }
 
 interface CompanyIdProvider {
@@ -375,6 +520,8 @@ export async function createDealFromReceipt(
   const partnerName = receipt.vendor_name.trim() || 'Unknown';
   const partner = await resolvePartner(env, accessToken, partnerName);
 
+  const payment = await findMatchingWalletPayment(env, freeeClient, companyId, receipt);
+
   const dealPayload: DealCreateParams = {
     company_id: companyId,
     issue_date: receipt.transaction_date,
@@ -388,6 +535,7 @@ export async function createDealFromReceipt(
         description: partner.name,
       },
     ],
+    ...(payment ? { payments: [payment] } : {}),
   };
 
   const dealResponse = await freeeClient.request<DealApiResponse>(

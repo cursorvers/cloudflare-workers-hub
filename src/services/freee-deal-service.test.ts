@@ -68,6 +68,7 @@ const baseReceipt = {
 function setup() {
   const requestMock = vi
     .fn()
+    .mockResolvedValueOnce({ wallet_txns: [] })
     .mockResolvedValueOnce({ deal: { id: 101 } })
     .mockResolvedValueOnce({ receipt: { id: 555 } });
 
@@ -112,8 +113,8 @@ describe('buildIdempotencyKey (via createDealFromReceipt)', () => {
     } as any);
 
     expect(requestMock).toHaveBeenCalled();
-    expect(requestMock.mock.calls[0][3]).toBe('tenant-abc:hash-123');
-    expect(requestMock.mock.calls[1][3]).toBe('tenant-abc:hash-123');
+    const keys = requestMock.mock.calls.map((c) => c[3]).filter(Boolean);
+    expect(keys).toEqual(['tenant-abc:hash-123', 'tenant-abc:hash-123']);
   });
 
   it('defaults tenant_id to "default" when absent', async () => {
@@ -124,8 +125,8 @@ describe('buildIdempotencyKey (via createDealFromReceipt)', () => {
       tenant_id: undefined,
     } as any);
 
-    expect(requestMock.mock.calls[0][3]).toBe('default:hash-123');
-    expect(requestMock.mock.calls[1][3]).toBe('default:hash-123');
+    const keys = requestMock.mock.calls.map((c) => c[3]).filter(Boolean);
+    expect(keys).toEqual(['default:hash-123', 'default:hash-123']);
   });
 
   it('falls back to receipt id when file_hash is absent', async () => {
@@ -137,8 +138,8 @@ describe('buildIdempotencyKey (via createDealFromReceipt)', () => {
       tenant_id: 'tenant-xyz',
     } as any);
 
-    expect(requestMock.mock.calls[0][3]).toBe('tenant-xyz:receipt-1');
-    expect(requestMock.mock.calls[1][3]).toBe('tenant-xyz:receipt-1');
+    const keys = requestMock.mock.calls.map((c) => c[3]).filter(Boolean);
+    expect(keys).toEqual(['tenant-xyz:receipt-1', 'tenant-xyz:receipt-1']);
   });
 
   it('throws when both file_hash and receipt id are absent', async () => {
@@ -303,10 +304,11 @@ describe('createDealFromReceipt - happy path full flow', () => {
       })
     );
 
-    expect(requestMock).toHaveBeenCalledTimes(2);
-    expect(requestMock.mock.calls[0][0]).toBe('POST');
-    expect(requestMock.mock.calls[0][1]).toBe('/deals');
-    expect(requestMock.mock.calls[0][2]).toEqual({
+    expect(requestMock).toHaveBeenCalled();
+
+    const dealCall = requestMock.mock.calls.find((c) => c[0] === 'POST' && c[1] === '/deals');
+    expect(dealCall).toBeTruthy();
+    expect(dealCall?.[2]).toEqual({
       company_id: 123,
       issue_date: '2024-01-01',
       type: 'expense',
@@ -321,9 +323,9 @@ describe('createDealFromReceipt - happy path full flow', () => {
       ],
     });
 
-    expect(requestMock.mock.calls[1][0]).toBe('PUT');
-    expect(requestMock.mock.calls[1][1]).toBe('/receipts/555');
-    expect(requestMock.mock.calls[1][2]).toEqual({
+    const linkCall = requestMock.mock.calls.find((c) => c[0] === 'PUT' && c[1] === '/receipts/555');
+    expect(linkCall).toBeTruthy();
+    expect(linkCall?.[2]).toEqual({
       company_id: 123,
       deal_id: 101,
     });
@@ -347,6 +349,47 @@ describe('createDealFromReceipt - happy path full flow', () => {
     expect(insertStmt.run).toHaveBeenCalled();
   });
 
+  it('adds payments when a matching wallet_txn is found (helps reconcile statements)', async () => {
+    const { env, requestMock } = setup();
+
+    requestMock
+      .mockReset()
+      .mockResolvedValueOnce({
+        wallet_txns: [
+          {
+            id: 9001,
+            date: '2024-01-01',
+            amount: 1200,
+            due_amount: 1200,
+            entry_side: 'expense',
+            walletable_type: 'credit_card',
+            walletable_id: 999,
+            description: 'TEST VENDOR purchase',
+            status: 1,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ deal: { id: 101 } })
+      .mockResolvedValueOnce({ receipt: { id: 555 } });
+
+    await createDealFromReceipt(env, { ...baseReceipt } as any);
+
+    const dealCall = requestMock.mock.calls.find((c) => c[0] === 'POST' && c[1] === '/deals');
+    expect(dealCall).toBeTruthy();
+    expect(dealCall?.[2]).toEqual(
+      expect.objectContaining({
+        payments: [
+          {
+            amount: 1200,
+            date: '2024-01-01',
+            from_walletable_id: 999,
+            from_walletable_type: 'credit_card',
+          },
+        ],
+      })
+    );
+  });
+
   it('uses existing partner when found (does not create new partner)', async () => {
     const { env, requestMock } = setup();
     vi.mocked(findPartnerByName).mockResolvedValue({
@@ -358,9 +401,8 @@ describe('createDealFromReceipt - happy path full flow', () => {
 
     expect(result.partnerId).toBe(99);
     expect(vi.mocked(createPartner)).not.toHaveBeenCalled();
-    expect(requestMock.mock.calls[0][2]).toEqual(
-      expect.objectContaining({ partner_id: 99 })
-    );
+    const dealCall = requestMock.mock.calls.find((c) => c[0] === 'POST' && c[1] === '/deals');
+    expect(dealCall?.[2]).toEqual(expect.objectContaining({ partner_id: 99 }));
   });
 
   it('falls back to "Unknown" when vendor_name is blank after trim', async () => {
@@ -390,8 +432,9 @@ describe('createDealFromReceipt - error handling and edge cases', () => {
       } as any)
     ).rejects.toThrow('freee receipt id is required to link deals');
 
-    expect(requestMock).toHaveBeenCalledTimes(1);
-    expect(requestMock.mock.calls[0][1]).toBe('/deals');
+    expect(requestMock).toHaveBeenCalled();
+    expect(requestMock.mock.calls.some((c) => c[0] === 'POST' && c[1] === '/deals')).toBe(true);
+    expect(requestMock.mock.calls.some((c) => c[0] === 'PUT' && String(c[1]).startsWith('/receipts/'))).toBe(false);
   });
 
   it('does not require FREEE_COMPANY_ID env var when getCompanyId is available', async () => {
@@ -522,6 +565,7 @@ describe('createDealFromReceipt - error handling and edge cases', () => {
     // Reuse "setup" defaults for non-DB mocks.
     const requestMock = vi
       .fn()
+      .mockResolvedValueOnce({ wallet_txns: [] })
       .mockResolvedValueOnce({ deal: { id: 101 } })
       .mockResolvedValueOnce({ receipt: { id: 555 } });
     vi.mocked(createFreeeClient).mockReturnValue({
