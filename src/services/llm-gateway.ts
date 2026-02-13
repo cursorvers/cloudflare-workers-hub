@@ -11,6 +11,7 @@
  * - anthropic: Claude Sonnet / Haiku via ANTHROPIC_API_KEY
  * - workers_ai: Cloudflare Workers AI via env.AI binding
  * - openai: GPT models via OPENAI_API_KEY
+ * - zai: ZhipuAI (GLM) via ZAI_API_KEY (OpenAI-compatible chat completions)
  *
  * ---------------------------------------------------------------------------
  * Design: Case A (single-file, unified gateway)
@@ -31,6 +32,7 @@ import type { Env } from '../types';
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
 const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
+const ZAI_API_URL = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
 
 const DEFAULT_MAX_TOKENS = 4096;
 const DEFAULT_TEMPERATURE = 0.2;
@@ -42,6 +44,10 @@ const PRICING: Readonly<Record<string, Readonly<{ in: number; out: number }>>> =
   '@cf/meta/llama-3.1-8b-instruct': { in: 0.01, out: 0.01 },
   'gpt-4o-mini': { in: 0.15, out: 0.60 },
   'gpt-5.2': { in: 2, out: 8 },
+  // ZhipuAI (GLM): pricing varies by plan; treat as fixed-cost by default.
+  'glm-5': { in: 0, out: 0 },
+  'glm-4.7': { in: 0, out: 0 },
+  'glm-4.7-flash': { in: 0, out: 0 },
 };
 
 const FALLBACK_PRICING: Readonly<{ in: number; out: number }> = { in: 1, out: 3 };
@@ -50,7 +56,7 @@ const FALLBACK_PRICING: Readonly<{ in: number; out: number }> = { in: 1, out: 3 
 // Public Types
 // =============================================================================
 
-export const LlmProviderSchema = z.enum(['anthropic', 'workers_ai', 'openai']);
+export const LlmProviderSchema = z.enum(['anthropic', 'workers_ai', 'openai', 'zai']);
 export type LlmProvider = z.infer<typeof LlmProviderSchema>;
 
 export const LlmMessageSchema = z.object({
@@ -129,6 +135,16 @@ interface OpenAIResponse {
 
 interface WorkersAiResponse {
   readonly response?: string;
+}
+
+interface ZaiResponse {
+  readonly choices?: ReadonlyArray<{
+    readonly message?: { readonly content?: string | null };
+  }>;
+  readonly usage?: {
+    readonly prompt_tokens?: number;
+    readonly completion_tokens?: number;
+  };
 }
 
 // =============================================================================
@@ -212,6 +228,8 @@ export class LlmGateway {
         return this.callWorkersAi(req);
       case 'openai':
         return this.callOpenAi(req);
+      case 'zai':
+        return this.callZai(req);
       default:
         throw new LlmGatewayError('UNSUPPORTED_PROVIDER', `Unknown provider: ${String(req.provider)}`);
     }
@@ -359,6 +377,56 @@ export class LlmGateway {
     const costEvent = calculateCost(req.provider, req.model, tokensIn, tokensOut);
 
     safeLog.info('[LlmGateway] OpenAI call', {
+      model: req.model,
+      tokens_in: costEvent.tokens_in,
+      tokens_out: costEvent.tokens_out,
+      usd: costEvent.usd,
+    });
+
+    return { text, costEvent };
+  }
+
+  // ===========================================================================
+  // ZhipuAI (Z.ai / GLM)
+  // ===========================================================================
+
+  private async callZai(req: LlmRequest): Promise<LlmTextResult> {
+    const apiKey = this.env.ZAI_API_KEY;
+    if (!apiKey) {
+      throw new LlmGatewayError('PROVIDER_ERROR', 'ZAI_API_KEY not configured');
+    }
+
+    const body = {
+      model: req.model,
+      messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
+      max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
+      temperature: req.temperature ?? DEFAULT_TEMPERATURE,
+      stream: false,
+    };
+
+    const res = await fetch(ZAI_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => 'unknown');
+      const code = res.status >= 500 ? 'PROVIDER_UNAVAILABLE' : 'PROVIDER_ERROR';
+      throw new LlmGatewayError(code, `ZAI ${res.status}: ${errText.slice(0, 500)}`);
+    }
+
+    const data = (await res.json()) as ZaiResponse;
+    const text = data.choices?.[0]?.message?.content ?? '';
+    const tokensIn = data.usage?.prompt_tokens ?? 0;
+    const tokensOut = data.usage?.completion_tokens ?? 0;
+
+    const costEvent = calculateCost(req.provider, req.model, tokensIn, tokensOut);
+
+    safeLog.info('[LlmGateway] ZAI call', {
       model: req.model,
       tokens_in: costEvent.tokens_in,
       tokens_out: costEvent.tokens_out,

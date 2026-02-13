@@ -28,6 +28,7 @@ function createMockEnv(overrides: Partial<Env> = {}): Env {
     } as unknown as Ai,
     ANTHROPIC_API_KEY: 'test-anthropic-key',
     OPENAI_API_KEY: 'test-openai-key',
+    ZAI_API_KEY: 'test-zai-key',
     ENVIRONMENT: 'test',
     ...overrides,
   } as Env;
@@ -111,6 +112,43 @@ describe('LlmGateway', () => {
       expect(result.text).toBe('Hello from GPT');
       expect(result.costEvent.tokens_in).toBe(80);
       expect(result.costEvent.tokens_out).toBe(40);
+    });
+
+    it('should call ZAI (ZhipuAI GLM) API and return text + cost', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          choices: [{ message: { content: 'Hello from GLM' } }],
+          usage: { prompt_tokens: 12, completion_tokens: 34 },
+        }),
+        text: () => Promise.resolve('ok'),
+      });
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+      const env = createMockEnv();
+      const gateway = new LlmGateway(env);
+
+      const result = await gateway.generateText({
+        provider: 'zai',
+        model: 'glm-5',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      expect(result.text).toBe('Hello from GLM');
+      expect(result.costEvent.provider).toBe('zai');
+      expect(result.costEvent.model).toBe('glm-5');
+      expect(result.costEvent.tokens_in).toBe(12);
+      expect(result.costEvent.tokens_out).toBe(34);
+
+      expect(fetchMock).toHaveBeenCalled();
+      expect(fetchMock.mock.calls[0][0]).toContain('open.bigmodel.cn');
+      expect(fetchMock.mock.calls[0][1]).toMatchObject({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: 'Bearer test-zai-key',
+        }),
+      });
     });
 
     it('should throw PROVIDER_ERROR on Anthropic 4xx', async () => {

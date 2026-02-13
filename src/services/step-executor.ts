@@ -10,8 +10,10 @@
  * Design: Case A (waitUntil loop) with StepExecutionDriver abstraction
  * for future migration to Case B (DO) or Case C (Queue).
  *
- * MVP: Only sonnet/haiku agents are supported via LLM Gateway.
- * Other agents (codex, glm, gemini) result in run_blocked.
+ * Agents supported via LLM Gateway:
+ * - sonnet/haiku: Anthropic
+ * - codex: OpenAI
+ * - glm: ZAI (ZhipuAI GLM) with a Workers AI fallback
  */
 
 import { z } from 'zod';
@@ -45,9 +47,15 @@ const AGENT_CONFIG: Readonly<Record<AgentType, AgentConfig>> = {
   haiku: { provider: 'anthropic', model: 'claude-haiku-4-20250414', supported: true },
   opus: { provider: 'anthropic', model: 'claude-sonnet-4-20250514', supported: false },
   codex: { provider: 'openai', model: 'gpt-5.2', supported: true },
-  glm: { provider: 'workers_ai', model: '@cf/meta/llama-3.1-8b-instruct', supported: true },
+  glm: { provider: 'zai', model: 'glm-5', supported: true },
   gemini: { provider: 'workers_ai', model: '@cf/meta/llama-3.1-8b-instruct', supported: false },
 };
+
+const GLM_FALLBACK: AgentConfig = Object.freeze({
+  provider: 'workers_ai',
+  model: '@cf/meta/llama-3.1-8b-instruct',
+  supported: true,
+});
 
 // =============================================================================
 // Public Types
@@ -136,59 +144,95 @@ export class StepExecutor {
       attempt: step.attempts,
     });
 
-    try {
-      const prompt = buildStepPrompt(step.input);
+    const prompt = buildStepPrompt(step.input);
+    const configsToTry: ReadonlyArray<AgentConfig> = step.agent === 'glm'
+      ? [config, GLM_FALLBACK]
+      : [config];
 
-      const textResult = await this.llm.generateText({
-        provider: config.provider,
-        model: config.model,
-        messages: [
-          { role: 'system', content: 'You are a task execution agent. Execute the given task and return results.' },
-          { role: 'user', content: prompt },
-        ],
-        maxTokens: 4096,
-        temperature: 0.2,
-        requestId: `${runId}:${step.seq}:${step.attempts}`,
-      });
+    for (let i = 0; i < configsToTry.length; i++) {
+      const cfg = configsToTry[i];
+      try {
+        const textResult = await this.llm.generateText({
+          provider: cfg.provider,
+          model: cfg.model,
+          messages: [
+            { role: 'system', content: 'You are a task execution agent. Execute the given task and return results.' },
+            { role: 'user', content: prompt },
+          ],
+          maxTokens: 4096,
+          temperature: 0.2,
+          requestId: `${runId}:${step.seq}:${step.attempts}:${cfg.provider}:${cfg.model}`,
+        });
 
-      this.emitEvent(runId, 'run:step_completed', step.seq, {
-        agent: step.agent,
-        status: 'succeeded',
-        cost_usd: textResult.costEvent.usd,
-        tokens_in: textResult.costEvent.tokens_in,
-        tokens_out: textResult.costEvent.tokens_out,
-      });
+        this.emitEvent(runId, 'run:step_completed', step.seq, {
+          agent: step.agent,
+          status: 'succeeded',
+          provider: cfg.provider,
+          model: cfg.model,
+          cost_usd: textResult.costEvent.usd,
+          tokens_in: textResult.costEvent.tokens_in,
+          tokens_out: textResult.costEvent.tokens_out,
+        });
 
-      return {
-        status: 'succeeded',
-        result: { text: textResult.text, model: config.model },
-        cost_usd: textResult.costEvent.usd,
-      };
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      const isRetryable = err instanceof LlmGatewayError
-        && (err.code === 'PROVIDER_UNAVAILABLE' || err.code === 'CIRCUIT_OPEN');
+        return {
+          status: 'succeeded',
+          result: { text: textResult.text, model: cfg.model, provider: cfg.provider },
+          cost_usd: textResult.costEvent.usd,
+        };
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        const isGatewayErr = err instanceof LlmGatewayError;
 
-      safeLog.warn('[StepExecutor] Step execution failed', {
-        runId,
-        seq: step.seq,
-        agent: step.agent,
-        error: errorMsg,
-        retryable: isRetryable,
-      });
+        // If GLM primary provider fails (misconfig/outage), fall back to Workers AI once.
+        const canFallback = step.agent === 'glm'
+          && i === 0
+          && (
+            (isGatewayErr && (err.code === 'PROVIDER_ERROR' || err.code === 'PROVIDER_UNAVAILABLE' || err.code === 'CIRCUIT_OPEN'))
+            || !isGatewayErr
+          );
 
-      this.emitEvent(runId, 'run:step_completed', step.seq, {
-        agent: step.agent,
-        status: 'failed',
-        error: errorMsg,
-      });
+        if (canFallback) {
+          safeLog.warn('[StepExecutor] GLM provider failed; falling back to Workers AI', {
+            runId,
+            seq: step.seq,
+            agent: step.agent,
+            provider: cfg.provider,
+            model: cfg.model,
+            error: errorMsg,
+          });
+          continue;
+        }
 
-      return {
-        status: 'failed',
-        error: errorMsg,
-        cost_usd: 0,
-      };
+        const isRetryable = isGatewayErr && (err.code === 'PROVIDER_UNAVAILABLE' || err.code === 'CIRCUIT_OPEN');
+
+        safeLog.warn('[StepExecutor] Step execution failed', {
+          runId,
+          seq: step.seq,
+          agent: step.agent,
+          provider: cfg.provider,
+          model: cfg.model,
+          error: errorMsg,
+          retryable: isRetryable,
+        });
+
+        this.emitEvent(runId, 'run:step_completed', step.seq, {
+          agent: step.agent,
+          status: 'failed',
+          provider: cfg.provider,
+          model: cfg.model,
+          error: errorMsg,
+        });
+
+        return {
+          status: 'failed',
+          error: errorMsg,
+          cost_usd: 0,
+        };
+      }
     }
+
+    // Should be unreachable: loop either returns success or failure.
+    return { status: 'failed', error: 'unknown_error', cost_usd: 0 };
   }
 
   /**

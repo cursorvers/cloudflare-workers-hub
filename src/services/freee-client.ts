@@ -52,10 +52,18 @@ export interface FreeeUploadResult {
 }
 
 export interface FreeeDealDetail {
+  id?: number;
   account_item_id: number;
   tax_code: number;
   amount: number;
   description?: string;
+  item_id?: number;
+  section_id?: number;
+  tag_ids?: number[];
+  segment_1_tag_id?: number;
+  segment_2_tag_id?: number;
+  segment_3_tag_id?: number;
+  vat?: number;
 }
 
 export interface FreeeDealCreateParams {
@@ -63,8 +71,11 @@ export interface FreeeDealCreateParams {
   issue_date: string;
   type: 'expense' | 'income';
   partner_id?: number;
+  partner_code?: string;
+  due_date?: string;
   ref_number?: string;
   details: FreeeDealDetail[];
+  receipt_ids?: number[];
 }
 
 export interface FreeeDeal {
@@ -73,6 +84,11 @@ export interface FreeeDeal {
   issue_date: string;
   type: string;
   partner_id?: number;
+  partner_code?: string;
+  due_date?: string;
+  ref_number?: string;
+  details?: FreeeDealDetail[];
+  receipts?: Array<{ id: number }>;
 }
 
 export interface FreeeDealResult {
@@ -660,14 +676,40 @@ export class FreeeClient {
     receiptId: number,
     dealId: number
   ): Promise<void> {
-    const companyId = await this.resolveCompanyId();
-    await this.request<unknown>(
+    const companyId = Number.parseInt(await this.resolveCompanyId(), 10);
+    const { deal } = await this.request<FreeeDealResult>(
+      'GET',
+      `/deals/${dealId}?company_id=${companyId}`
+    );
+
+    const existingReceiptIds = Array.isArray(deal.receipts)
+      ? deal.receipts.map((r) => r.id).filter((id) => Number.isFinite(id))
+      : [];
+    if (existingReceiptIds.includes(receiptId)) {
+      return;
+    }
+
+    const details = Array.isArray(deal.details) ? deal.details : [];
+    if (details.length === 0) {
+      throw new Error(`Cannot attach receipt: deal ${dealId} has no details`);
+    }
+
+    const payload: FreeeDealCreateParams = {
+      company_id: companyId,
+      issue_date: deal.issue_date,
+      type: deal.type === 'income' ? 'income' : 'expense',
+      details,
+      receipt_ids: Array.from(new Set([...existingReceiptIds, receiptId])),
+    };
+    if (typeof deal.partner_id === 'number') payload.partner_id = deal.partner_id;
+    if (typeof deal.partner_code === 'string') payload.partner_code = deal.partner_code;
+    if (typeof deal.due_date === 'string') payload.due_date = deal.due_date;
+    if (typeof deal.ref_number === 'string') payload.ref_number = deal.ref_number;
+
+    await this.request<FreeeDealResult>(
       'PUT',
-      `/receipts/${receiptId}`,
-      {
-        company_id: parseInt(companyId, 10),
-        deal_id: dealId,
-      }
+      `/deals/${dealId}`,
+      payload
     );
 
     safeLog(this.env, 'info', 'Receipt linked to deal', {

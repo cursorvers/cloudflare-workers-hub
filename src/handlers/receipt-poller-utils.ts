@@ -99,6 +99,79 @@ export async function hasDuplicateHash(env: Env, fileHash: string): Promise<stri
   return existing?.id ?? null;
 }
 
+// ── Accounting content validation ────────────────────────────────────
+// Only upload to freee if the document contains actual accounting content.
+// Checks for: monetary amounts, accounting keywords, or known billing subjects.
+
+const ACCOUNTING_KEYWORDS_JA = [
+  '領収', '領収書', '領収証',
+  '請求', '請求書', 'ご請求',
+  '明細', '利用明細', 'ご利用明細',
+  '納品書', '見積書',
+  '合計', '小計', '税込', '税抜',
+  '振込', '引き落とし', '決済',
+  'お支払い', '支払い',
+  'ご入金', '課税', '非課税',
+] as const;
+
+const ACCOUNTING_KEYWORDS_EN = [
+  'receipt', 'invoice', 'tax invoice',
+  'billing', 'billing statement', 'payment receipt',
+  'payment', 'payment confirmation',
+  'total', 'subtotal', 'amount due',
+  'paid', 'charge', 'transaction',
+  'fee', 'bill', 'cost',
+  'order confirmation', 'subscription',
+  'statement',
+] as const;
+
+const AMOUNT_PATTERNS = [
+  /[¥￥]\s*[\d,]+/,        // ¥1,234 or ￥1,234
+  /[\d,]+\s*円/,            // 1,234円
+  /JPY\s*[\d,]+/i,         // JPY 1234
+  /\$\s*[\d,.]+/,           // $12.34
+  /USD\s*[\d,.]+/i,         // USD 12.34
+  /(?:合計|total|amount)[:\s]*[\d,]+/i,
+] as const;
+
+/**
+ * Check if text contains accounting-related content (monetary amounts or financial keywords).
+ * Returns { pass: true } if content appears to be a receipt/invoice,
+ * or { pass: false, reason } if not.
+ */
+export function hasAccountingContent(
+  text: string,
+  subject?: string
+): { pass: boolean; reason?: string } {
+  const combined = `${subject ?? ''}\n${text}`.toLowerCase();
+
+  // Check for monetary amount patterns (strongest signal)
+  for (const pattern of AMOUNT_PATTERNS) {
+    if (pattern.test(combined)) {
+      return { pass: true };
+    }
+  }
+
+  // Check for Japanese accounting keywords
+  for (const keyword of ACCOUNTING_KEYWORDS_JA) {
+    if (combined.includes(keyword)) {
+      return { pass: true };
+    }
+  }
+
+  // Check for English accounting keywords
+  for (const keyword of ACCOUNTING_KEYWORDS_EN) {
+    if (combined.includes(keyword)) {
+      return { pass: true };
+    }
+  }
+
+  return {
+    pass: false,
+    reason: 'No monetary amounts or accounting keywords found in document text',
+  };
+}
+
 // ── File name helpers ────────────────────────────────────────────────
 export function normalizeFileName(fileName: string, fallback: string): string {
   const cleaned = fileName.replace(/[\\/]/g, '_').replace(/[^a-zA-Z0-9._-]/g, '_');

@@ -59,7 +59,7 @@ function extractAmount(text: string): { amount: number; extracted: boolean } {
     /JPY\s*([\d,]+)/i,
     // 合計 1,234 / Total 1,234 / Amount: 1,234
     /(?:合計|total|amount|金額|請求額|お支払い)[:\s]*([\d,]+)/i,
-    // $12.34 (convert later if needed, for now treat as JPY hint)
+    // $12.34 (foreign currency; amount is still extracted but currency must be handled separately)
     /\$\s*([\d,.]+)/,
   ];
 
@@ -74,6 +74,12 @@ function extractAmount(text: string): { amount: number; extracted: boolean } {
     }
   }
   return { amount: 0, extracted: false };
+}
+
+function detectCurrency(text: string): string {
+  if (/[¥￥]|\bJPY\b/i.test(text)) return 'JPY';
+  if (/\$|\bUSD\b/i.test(text)) return 'USD';
+  return 'JPY';
 }
 
 /**
@@ -262,17 +268,17 @@ ${text}
 Metadata:
 ${JSON.stringify(promptMetadata, null, 2)}
 
-Extract and return ONLY a JSON object with the following structure:
-{
-  "document_type": "invoice" | "receipt" | "expense_report" | "other",
-  "vendor_name": "exact vendor name",
-  "amount": number (in yen, no comma),
-  "currency": "JPY",
-  "transaction_date": "YYYY-MM-DD",
-  "account_category": "勘定科目 (e.g., 消耗品費, 広告宣伝費, 通信費)",
-  "tax_type": "課税区分 (e.g., 課税10%, 非課税)",
-  "confidence": 0.0-1.0
-}`;
+  Extract and return ONLY a JSON object with the following structure:
+  {
+    "document_type": "invoice" | "receipt" | "expense_report" | "other",
+    "vendor_name": "exact vendor name",
+    "amount": number (no comma; keep the receipt's currency),
+    "currency": "JPY" | "USD",
+    "transaction_date": "YYYY-MM-DD",
+    "account_category": "勘定科目 (e.g., 消耗品費, 広告宣伝費, 通信費)",
+    "tax_type": "課税区分 (e.g., 課税10%, 非課税)",
+    "confidence": 0.0-1.0
+  }`;
 
   const response = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
     prompt,
@@ -296,11 +302,14 @@ Extract and return ONLY a JSON object with the following structure:
   }
 
   const aiAmount = typeof aiResult.amount === 'number' ? aiResult.amount : 0;
+  const currencyFromText = detectCurrency(text);
+  const currencyRaw = typeof aiResult.currency === 'string' ? aiResult.currency.trim().toUpperCase() : '';
+  const currency = currencyRaw === 'JPY' || currencyRaw === 'USD' ? currencyRaw : currencyFromText;
   return {
     document_type: aiResult.document_type || 'other',
     vendor_name: aiResult.vendor_name || 'Unknown',
     amount: aiAmount,
-    currency: aiResult.currency || 'JPY',
+    currency,
     transaction_date: aiResult.transaction_date || new Date().toISOString().split('T')[0],
     account_category: aiResult.account_category,
     tax_type: aiResult.tax_type,
@@ -333,7 +342,7 @@ export async function classifyReceipt(
       document_type: 'receipt',
       vendor_name: ruleResult.result.vendor_name ?? 'Unknown',
       amount: ruleResult.result.amount ?? 0,
-      currency: 'JPY',
+      currency: detectCurrency(text),
       transaction_date: ruleResult.result.transaction_date ?? new Date().toISOString().split('T')[0],
       account_category: ruleResult.result.account_category,
       tax_type: undefined,

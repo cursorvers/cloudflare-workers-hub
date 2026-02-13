@@ -17,9 +17,10 @@ import {
   type ShouldDownloadAttachment,
 } from '../services/gmail-receipt-client';
 import { createFreeeClient } from '../services/freee-client';
+import { createDealFromReceipt, type ReceiptInput } from '../services/freee-deal-service';
 import { isFreeeIntegrationEnabled } from '../utils/freee-integration';
 import { withLock } from './scheduled';
-import { HEALTH } from '../config/confidence-thresholds';
+import { HEALTH, CONFIDENCE } from '../config/confidence-thresholds';
 
 import { getReceiptBucket, MAX_RESULTS } from './receipt-poller-utils';
 import {
@@ -28,7 +29,7 @@ import {
   processedAttachmentKey,
   type PdfTextMetrics,
 } from './receipt-pdf-processor';
-import { processHtmlReceipt, htmlProcessedKey } from './receipt-html-processor';
+import { processHtmlReceipt, htmlProcessedKey, retryFailedHtmlReceipts } from './receipt-html-processor';
 
 // Re-export for backward compatibility (tests import from this module)
 export { buildClassificationText } from './receipt-pdf-processor';
@@ -263,6 +264,92 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
       durationMs: Date.now() - startTime,
     });
 
+    // Retry previously failed HTML receipts (e.g. blocked by external-reference guard)
+    if (isFreeeIntegrationEnabled(env) && env.GMAIL_HTML_RECEIPTS_ENABLED === 'true') {
+      try {
+        const retryResult = await retryFailedHtmlReceipts(env, bucket, freeeClient, 5);
+        if (retryResult.retried > 0) {
+          safeLog.info('[Gmail Poller] Retried failed HTML receipts', retryResult);
+        }
+      } catch (retryError) {
+        safeLog.warn('[Gmail Poller] Retry of failed receipts encountered an error', {
+          error: retryError instanceof Error ? retryError.message : String(retryError),
+        });
+      }
+    }
+
+    // Retry deal creation for completed receipts missing deals (e.g. after OAuth scope fix)
+    if (isFreeeIntegrationEnabled(env)) {
+      try {
+        const pendingDeals = await env.DB!.prepare(
+          `SELECT id, vendor_name, amount, transaction_date, account_category,
+                  classification_confidence, freee_receipt_id, file_hash, tenant_id
+           FROM receipts
+           WHERE status = 'completed'
+             AND freee_receipt_id IS NOT NULL
+             AND freee_deal_id IS NULL
+             AND document_type != 'other'
+           ORDER BY created_at ASC
+           LIMIT 8`
+        ).all<{
+          id: string; vendor_name: string; amount: number; transaction_date: string;
+          account_category: string | null; classification_confidence: number | null;
+          freee_receipt_id: string; file_hash: string; tenant_id: string;
+        }>();
+
+        if (pendingDeals.results && pendingDeals.results.length > 0) {
+          let dealsCreated = 0;
+          for (const r of pendingDeals.results) {
+            try {
+              const receiptInput: ReceiptInput = {
+                id: r.id,
+                freee_receipt_id: r.freee_receipt_id,
+                retry_link_if_existing: true,
+                file_hash: r.file_hash,
+                vendor_name: r.vendor_name,
+                amount: r.amount,
+                transaction_date: r.transaction_date,
+                account_category: r.account_category,
+                classification_confidence: r.classification_confidence,
+                tenant_id: r.tenant_id || 'default',
+              };
+              const dealResult = await createDealFromReceipt(env, receiptInput);
+              if (dealResult.dealId) {
+                await env.DB!.prepare(
+                  `UPDATE receipts SET freee_deal_id = ?, freee_partner_id = ?,
+                     account_item_id = ?, tax_code = ?,
+                     account_mapping_confidence = ?, account_mapping_method = ?,
+                     updated_at = datetime('now')
+                   WHERE id = ?`
+                ).bind(
+                  dealResult.dealId, dealResult.partnerId,
+                  dealResult.accountItemId ?? null, dealResult.taxCode ?? null,
+                  dealResult.mappingConfidence, dealResult.mappingMethod ?? null,
+                  r.id
+                ).run();
+                dealsCreated += 1;
+              }
+            } catch (dealError) {
+              safeLog.warn('[Gmail Poller] Deal retry failed for completed receipt', {
+                receiptId: r.id,
+                error: dealError instanceof Error ? dealError.message : String(dealError),
+              });
+            }
+          }
+          if (dealsCreated > 0 || pendingDeals.results.length > 0) {
+            safeLog.info('[Gmail Poller] Deal retry for completed receipts', {
+              attempted: pendingDeals.results.length,
+              created: dealsCreated,
+            });
+          }
+        }
+      } catch (dealRetryError) {
+        safeLog.warn('[Gmail Poller] Deal retry batch error', {
+          error: dealRetryError instanceof Error ? dealRetryError.message : String(dealRetryError),
+        });
+      }
+    }
+
     // Health tracking: record last successful poll timestamp
     if (env.KV) {
       try {
@@ -274,15 +361,115 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
       }
     }
 
-    // Alerting: notify on failures via Discord webhook (metadata only, no PII)
-    if (metrics.failed > 0 && env.DISCORD_WEBHOOK_URL) {
+    // ── Periodic audit: detect non-receipt leaks & data quality issues ──
+    const auditAlerts: string[] = [];
+    try {
+      const auditResults = await env.DB!.batch([
+        // Non-receipt docs uploaded to freee (should not happen after guard)
+        env.DB!.prepare(
+          `SELECT COUNT(*) as cnt FROM receipts
+           WHERE document_type = 'other' AND freee_receipt_id IS NOT NULL`
+        ),
+        // Email-like vendor names in completed receipts
+        env.DB!.prepare(
+          `SELECT COUNT(*) as cnt FROM receipts
+           WHERE status = 'completed' AND vendor_name LIKE '%@%'`
+        ),
+        // Suspiciously high amounts (> ¥500,000) — likely misextraction
+        env.DB!.prepare(
+          `SELECT COUNT(*) as cnt FROM receipts
+           WHERE amount > 500000 AND status = 'completed'`
+        ),
+        // Stale failed receipts (retry_count maxed out)
+        env.DB!.prepare(
+          `SELECT COUNT(*) as cnt FROM receipts
+           WHERE status = 'failed' AND retry_count >= 3`
+        ),
+        // Completed receipts without deals (deal retry backlog)
+        env.DB!.prepare(
+          `SELECT COUNT(*) as cnt FROM receipts
+           WHERE status = 'completed' AND freee_receipt_id IS NOT NULL
+             AND freee_deal_id IS NULL AND document_type <> 'other'`
+        ),
+        // Deal row exists but receipt row still has no freee_deal_id (likely link failure / sync gap)
+        env.DB!.prepare(
+          `SELECT COUNT(*) as cnt
+           FROM receipt_deals rd
+           INNER JOIN receipts r ON r.id = rd.receipt_id
+           WHERE r.status = 'completed'
+             AND r.freee_receipt_id IS NOT NULL
+             AND r.freee_deal_id IS NULL
+             AND r.document_type <> 'other'`
+        ),
+        // Needs-review count (detect if guard is too strict)
+        env.DB!.prepare(
+          `SELECT COUNT(*) as cnt FROM receipts WHERE status = 'needs_review'`
+        ),
+      ]);
+
+      const nonReceiptLeaks = (auditResults[0].results?.[0] as { cnt: number } | undefined)?.cnt ?? 0;
+      const emailVendors = (auditResults[1].results?.[0] as { cnt: number } | undefined)?.cnt ?? 0;
+      const suspiciousAmounts = (auditResults[2].results?.[0] as { cnt: number } | undefined)?.cnt ?? 0;
+      const staleFailed = (auditResults[3].results?.[0] as { cnt: number } | undefined)?.cnt ?? 0;
+      const dealBacklog = (auditResults[4].results?.[0] as { cnt: number } | undefined)?.cnt ?? 0;
+      const dealLinkGaps = (auditResults[5].results?.[0] as { cnt: number } | undefined)?.cnt ?? 0;
+      const needsReviewCount = (auditResults[6].results?.[0] as { cnt: number } | undefined)?.cnt ?? 0;
+
+      if (nonReceiptLeaks > 0) {
+        auditAlerts.push(`Non-receipt docs in freee: ${nonReceiptLeaks}`);
+      }
+      if (emailVendors > 0) {
+        auditAlerts.push(`Email-like vendor names: ${emailVendors}`);
+      }
+      if (suspiciousAmounts > 0) {
+        auditAlerts.push(`Suspicious amounts (>¥500k): ${suspiciousAmounts}`);
+      }
+      if (staleFailed > 0) {
+        auditAlerts.push(`Stale failed (max retries): ${staleFailed}`);
+      }
+      if (dealLinkGaps > 0) {
+        auditAlerts.push(`Deal created but receipt row unlinked: ${dealLinkGaps}`);
+      }
+
+      if (needsReviewCount > 20) {
+        auditAlerts.push(`Needs-review backlog high: ${needsReviewCount}`);
+      }
+
+      safeLog.info('[Gmail Poller] Audit check completed', {
+        nonReceiptLeaks,
+        emailVendors,
+        suspiciousAmounts,
+        staleFailed,
+        dealBacklog,
+        dealLinkGaps,
+        needsReviewCount,
+        alertCount: auditAlerts.length,
+      });
+    } catch (auditError) {
+      safeLog.warn('[Gmail Poller] Audit check failed', {
+        error: auditError instanceof Error ? auditError.message : String(auditError),
+      });
+    }
+
+    // Alerting: notify on failures or audit issues via Discord webhook (metadata only, no PII)
+    const alertParts: string[] = [];
+    if (metrics.failed > 0) {
+      alertParts.push(
+        `Failed: ${metrics.failed} | Processed: ${metrics.processed} | Deals: ${metrics.dealsCreated}`
+      );
+    }
+    if (auditAlerts.length > 0) {
+      alertParts.push(`Audit: ${auditAlerts.join(', ')}`);
+    }
+
+    if (alertParts.length > 0 && env.DISCORD_WEBHOOK_URL) {
       try {
         await fetch(env.DISCORD_WEBHOOK_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             content: `⚠️ **Receipt Pipeline Alert**\n` +
-              `Failed: ${metrics.failed} | Processed: ${metrics.processed} | Deals: ${metrics.dealsCreated}\n` +
+              alertParts.join('\n') + '\n' +
               `Duration: ${Date.now() - startTime}ms\n` +
               `Check logs for details.`,
           }),

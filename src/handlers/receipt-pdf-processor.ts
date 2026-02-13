@@ -461,6 +461,7 @@ export async function processAttachment(
           file_hash: fileHash,
           vendor_name: classificationResult.vendor_name,
           amount: classificationResult.amount,
+          currency: classificationResult.currency,
           transaction_date: classificationResult.transaction_date,
           account_category: classificationResult.account_category ?? null,
           classification_confidence: classificationResult.confidence ?? null,

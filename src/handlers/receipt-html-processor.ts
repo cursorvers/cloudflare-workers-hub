@@ -305,17 +305,18 @@ export async function processHtmlReceipt(
     // Deal creation (same as PDF path)
     try {
       if (metrics.dealsCreated < MAX_DEALS_PER_RUN) {
-        const receiptInput: ReceiptInput = {
-          id: receiptId,
-          freee_receipt_id: freeeResult.receipt.id,
-          file_hash: fileHash,
-          vendor_name: classificationResult.vendor_name,
-          amount: classificationResult.amount,
-          transaction_date: classificationResult.transaction_date,
-          account_category: classificationResult.account_category ?? null,
-          classification_confidence: classificationResult.confidence ?? null,
-          tenant_id: DEFAULT_TENANT_ID,
-        };
+	        const receiptInput: ReceiptInput = {
+	          id: receiptId,
+	          freee_receipt_id: freeeResult.receipt.id,
+	          file_hash: fileHash,
+	          vendor_name: classificationResult.vendor_name,
+	          amount: classificationResult.amount,
+	          currency: classificationResult.currency,
+	          transaction_date: classificationResult.transaction_date,
+	          account_category: classificationResult.account_category ?? null,
+	          classification_confidence: classificationResult.confidence ?? null,
+	          tenant_id: DEFAULT_TENANT_ID,
+	        };
 
         const dealResult = await createDealFromReceipt(env, receiptInput);
 

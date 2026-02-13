@@ -51,7 +51,7 @@ describe('StepExecutor', () => {
 
       expect(result.status).toBe('succeeded');
       expect(result.cost_usd).toBe(0.002);
-      expect(result.result).toEqual({ text: 'Step result', model: 'claude-sonnet-4-20250514' });
+      expect(result.result).toEqual({ text: 'Step result', model: 'claude-sonnet-4-20250514', provider: 'anthropic' });
       expect(events).toHaveLength(2); // step_started + step_completed
       expect(events[0].event).toBe('run:step_started');
       expect(events[1].event).toBe('run:step_completed');

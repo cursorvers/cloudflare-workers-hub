@@ -28,12 +28,24 @@ export interface DealCreateParams {
   issue_date: string;
   type: 'expense';
   partner_id?: number;
+  receipt_ids?: number[];
   details: Array<{
+    id?: number;
     account_item_id: number;
     tax_code: number;
     amount: number;
+    item_id?: number;
+    section_id?: number;
+    tag_ids?: number[];
+    segment_1_tag_id?: number;
+    segment_2_tag_id?: number;
+    segment_3_tag_id?: number;
     description?: string;
+    vat?: number;
   }>;
+  due_date?: string;
+  partner_code?: string;
+  ref_number?: string;
 }
 
 export interface DealResult {
@@ -50,9 +62,12 @@ export interface DealResult {
 export interface ReceiptInput {
   id: string;
   freee_receipt_id?: string | number | null;
+  // When true and an existing deal is found, retry receipt↔deal linking only.
+  retry_link_if_existing?: boolean;
   file_hash?: string | null;
   vendor_name: string;
   amount: number;
+  currency?: string | null;
   transaction_date: string;
   account_category?: string | null;
   classification_confidence?: number | null;
@@ -63,13 +78,27 @@ export interface ReceiptInput {
 interface DealApiResponse {
   deal: {
     id: number;
-  };
-}
-
-interface ReceiptLinkResponse {
-  receipt: {
-    id: number;
-    deal_id?: number;
+    issue_date?: string;
+    type?: 'income' | 'expense';
+    partner_id?: number;
+    partner_code?: string;
+    ref_number?: string;
+    due_date?: string;
+    details?: Array<{
+      id?: number;
+      account_item_id: number;
+      tax_code: number;
+      amount: number;
+      item_id?: number;
+      section_id?: number;
+      tag_ids?: number[];
+      segment_1_tag_id?: number;
+      segment_2_tag_id?: number;
+      segment_3_tag_id?: number;
+      description?: string;
+      vat?: number;
+    }>;
+    receipts?: Array<{ id: number }>;
   };
 }
 
@@ -130,6 +159,17 @@ function isValidPositiveInt(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
 
+function normalizeFreeeReceiptId(value: string | number | null | undefined): string | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? String(value) : null;
+  }
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function buildIdempotencyKey(receipt: ReceiptInput): string {
   const key = receipt.file_hash ?? receipt.id;
   if (!key) {
@@ -183,7 +223,14 @@ async function recordDealLink(
   await env.DB.prepare(
     `INSERT INTO receipt_deals
       (receipt_id, deal_id, partner_id, mapping_confidence, status, idempotency_key, freee_receipt_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(receipt_id) DO UPDATE SET
+       deal_id = excluded.deal_id,
+       partner_id = excluded.partner_id,
+       mapping_confidence = excluded.mapping_confidence,
+       status = excluded.status,
+       idempotency_key = excluded.idempotency_key,
+       freee_receipt_id = COALESCE(excluded.freee_receipt_id, receipt_deals.freee_receipt_id)`
   )
     .bind(
       insert.receiptId,
@@ -195,6 +242,79 @@ async function recordDealLink(
       insert.freeeReceiptId ?? null
     )
     .run();
+}
+
+async function linkReceiptToDeal(
+  freeeClient: RequestCapableFreeeClient,
+  companyId: number,
+  freeeReceiptId: number,
+  dealId: number,
+  idempotencyKey: string
+): Promise<void> {
+  const existingDeal = await freeeClient.request<DealApiResponse>(
+    'GET',
+    `/deals/${dealId}?company_id=${companyId}`
+  );
+  const deal = existingDeal.deal;
+
+  const existingReceiptIds = Array.isArray(deal.receipts)
+    ? deal.receipts
+      .map((r) => (typeof r?.id === 'number' ? r.id : Number.NaN))
+      .filter((id) => Number.isFinite(id) && id > 0)
+    : [];
+
+  if (existingReceiptIds.includes(freeeReceiptId)) {
+    return;
+  }
+
+  const details = Array.isArray(deal.details) ? deal.details : [];
+  if (details.length === 0) {
+    throw new Error('deal details are required to update receipt links');
+  }
+
+  const updatePayload: DealCreateParams = {
+    company_id: companyId,
+    issue_date: deal.issue_date ?? new Date().toISOString().slice(0, 10),
+    type: deal.type === 'income' ? 'expense' : 'expense',
+    details: details.map((d) => {
+      const out: DealCreateParams['details'][number] = {
+        id: d.id,
+        account_item_id: d.account_item_id,
+        tax_code: d.tax_code,
+        amount: d.amount,
+      };
+      if (typeof d.item_id === 'number') out.item_id = d.item_id;
+      if (typeof d.section_id === 'number') out.section_id = d.section_id;
+      if (Array.isArray(d.tag_ids) && d.tag_ids.length > 0) out.tag_ids = d.tag_ids;
+      if (typeof d.segment_1_tag_id === 'number') out.segment_1_tag_id = d.segment_1_tag_id;
+      if (typeof d.segment_2_tag_id === 'number') out.segment_2_tag_id = d.segment_2_tag_id;
+      if (typeof d.segment_3_tag_id === 'number') out.segment_3_tag_id = d.segment_3_tag_id;
+      if (typeof d.description === 'string') out.description = d.description;
+      if (typeof d.vat === 'number') out.vat = d.vat;
+      return out;
+    }),
+    receipt_ids: Array.from(new Set([...existingReceiptIds, freeeReceiptId])),
+  };
+
+  if (typeof deal.partner_id === 'number') {
+    updatePayload.partner_id = deal.partner_id;
+  }
+  if (typeof deal.partner_code === 'string') {
+    updatePayload.partner_code = deal.partner_code;
+  }
+  if (typeof deal.ref_number === 'string') {
+    updatePayload.ref_number = deal.ref_number;
+  }
+  if (typeof deal.due_date === 'string') {
+    updatePayload.due_date = deal.due_date;
+  }
+
+  await freeeClient.request<DealApiResponse>(
+    'PUT',
+    `/deals/${dealId}`,
+    updatePayload,
+    idempotencyKey
+  );
 }
 
 function decideStatus(confidence: number, amount: number, scoreGap: number): DealStatus {
@@ -236,14 +356,67 @@ export async function createDealFromReceipt(
   receipt: ReceiptInput
 ): Promise<DealResult> {
   const idempotencyKey = buildIdempotencyKey(receipt);
+  const freeeReceiptId = normalizeFreeeReceiptId(receipt.freee_receipt_id);
+  if (!freeeReceiptId) {
+    throw new Error('freee receipt id is required to link deals');
+  }
+  const freeeReceiptIdNum = Number.parseInt(freeeReceiptId, 10);
+  if (!Number.isFinite(freeeReceiptIdNum) || freeeReceiptIdNum <= 0) {
+    throw new Error('freee receipt id must be a positive integer');
+  }
 
-  // Guard: amount must be positive to create a freee deal.
-  // Zero-amount receipts indicate extraction failure (e.g., R2 missing) — skip deal creation.
-  if (receipt.amount <= 0) {
-    safeLog(env, 'warn', '[FreeeDealService] skipping deal: amount <= 0 (extraction failure)', {
+  const existing = await getExistingDeal(env, receipt.id);
+  if (existing) {
+    if (receipt.retry_link_if_existing) {
+      const freeeReceiptId = normalizeFreeeReceiptId(receipt.freee_receipt_id);
+      if (!freeeReceiptId) {
+        throw new Error('freee receipt id is required to retry existing deal link');
+      }
+
+      const retryClient = createFreeeClient(env) as unknown as RequestCapableFreeeClient;
+      const retryCompanyIdStr = await (retryClient as unknown as CompanyIdProvider).getCompanyId();
+      const retryCompanyId = toNumber(retryCompanyIdStr);
+
+      await linkReceiptToDeal(
+        retryClient,
+        retryCompanyId,
+        freeeReceiptIdNum,
+        existing.deal_id,
+        idempotencyKey
+      );
+
+      await recordDealLink(env, {
+        receiptId: receipt.id,
+        dealId: existing.deal_id,
+        partnerId: existing.partner_id ?? null,
+        mappingConfidence: clampConfidence(existing.mapping_confidence),
+        status: existing.status,
+        idempotencyKey,
+        freeeReceiptId,
+      });
+    }
+
+    return {
+      dealId: existing.deal_id,
+      partnerId: existing.partner_id ?? null,
+      mappingConfidence: existing.mapping_confidence,
+      status: existing.status,
+      accountItemId: null,
+      taxCode: null,
+      mappingMethod: null,
+      selectionProvider: null,
+    };
+  }
+
+  const currency = typeof receipt.currency === 'string' && receipt.currency.trim()
+    ? receipt.currency.trim().toUpperCase()
+    : 'JPY';
+  if (currency !== 'JPY') {
+    safeLog(env, 'warn', '[FreeeDealService] non-JPY receipt: skipping deal creation (needs review)', {
       receiptId: receipt.id,
       vendorName: receipt.vendor_name,
       amount: receipt.amount,
+      currency,
     });
     return {
       dealId: null,
@@ -257,13 +430,20 @@ export async function createDealFromReceipt(
     };
   }
 
-  const existing = await getExistingDeal(env, receipt.id);
-  if (existing) {
+  // Amount=0: do NOT create a deal.
+  // freee Deal API rejects 0 amount lines (400). Keep the receipt in File Box and
+  // mark as needs_review so a human can fix the amount/category first.
+  if (receipt.amount <= 0) {
+    safeLog(env, 'warn', '[FreeeDealService] amount <= 0, skipping deal creation (needs review)', {
+      receiptId: receipt.id,
+      vendorName: receipt.vendor_name,
+      amount: receipt.amount,
+    });
     return {
-      dealId: existing.deal_id,
-      partnerId: existing.partner_id ?? null,
-      mappingConfidence: existing.mapping_confidence,
-      status: existing.status,
+      dealId: null,
+      partnerId: null,
+      mappingConfidence: 0,
+      status: 'needs_review',
       accountItemId: null,
       taxCode: null,
       mappingMethod: null,
@@ -377,23 +557,9 @@ export async function createDealFromReceipt(
   );
 
   const dealId = dealResponse.deal.id;
+  let status = decideStatus(overallConfidence, receipt.amount, selection.scoreGap);
 
-  if (!receipt.freee_receipt_id) {
-    throw new Error('freee receipt id is required to link deals');
-  }
-
-  await freeeClient.request<ReceiptLinkResponse>(
-    'PUT',
-    `/receipts/${receipt.freee_receipt_id}`,
-    {
-      company_id: companyId,
-      deal_id: dealId,
-    },
-    idempotencyKey
-  );
-
-  const status = decideStatus(overallConfidence, receipt.amount, selection.scoreGap);
-
+  // Persist deal mapping BEFORE receipt-link API call to avoid duplicate deal creation on retry.
   await recordDealLink(env, {
     receiptId: receipt.id,
     dealId,
@@ -401,8 +567,27 @@ export async function createDealFromReceipt(
     mappingConfidence: clampConfidence(mappingConfidence),
     status,
     idempotencyKey,
-    freeeReceiptId: receipt.freee_receipt_id,
+    freeeReceiptId,
   });
+
+  // Best-effort: attach receipt to deal. If this fails, we still keep the mapping and
+  // return needs_review so a retry job/manual action can fix the linkage.
+  try {
+    await linkReceiptToDeal(
+      freeeClient,
+      companyId,
+      freeeReceiptIdNum,
+      dealId,
+      idempotencyKey
+    );
+  } catch (linkError) {
+    status = 'needs_review';
+    safeLog(env, 'warn', '[FreeeDealService] deal created but receipt link failed (needs review)', {
+      receiptId: receipt.id,
+      dealId,
+      error: linkError instanceof Error ? linkError.message : String(linkError),
+    });
+  }
 
   return {
     dealId,

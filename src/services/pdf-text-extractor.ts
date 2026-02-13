@@ -59,8 +59,11 @@ export async function extractPdfText(
     throw new Error(`PDF has too many pages: ${totalPages} (max ${options.maxPages})`);
   }
 
+  // Some PDFs yield NULs in extracted text; strip them to keep downstream regex/LLM stable.
+  const normalizedText = (typeof text === 'string' ? text : (text as string[]).join('\n')).replace(/\u0000/g, '');
+
   return {
-    text: typeof text === 'string' ? text : (text as string[]).join('\n'),
+    text: normalizedText,
     totalPages,
     byteLength,
   };

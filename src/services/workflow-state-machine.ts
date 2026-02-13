@@ -99,7 +99,7 @@ const VALID_TRANSITIONS: Record<ReceiptStatus, ReceiptStatus[]> = {
   linking_receipt: ['completed', 'failed'],
   // Terminal & recovery states
   completed: [], // Terminal state
-  failed: ['pending_validation', 'freee_uploaded', 'needs_review'], // Can retry from upload or start
+  failed: ['pending_validation', 'freee_uploaded', 'needs_review', 'submitting_freee'], // Can retry from upload or start
   needs_review: [
     'validated',
     'classified',

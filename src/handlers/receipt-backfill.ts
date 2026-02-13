@@ -14,6 +14,7 @@ import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { classifyReceipt } from '../services/ai-receipt-classifier';
 import { createDealFromReceipt, type ReceiptInput } from '../services/freee-deal-service';
+import { extractPdfText } from '../services/pdf-text-extractor';
 
 // =============================================================================
 // Types
@@ -25,6 +26,7 @@ interface BackfillReceipt {
   file_hash: string;
   vendor_name: string;
   amount: number;
+  currency: string;
   transaction_date: string;
   account_category: string | null;
   classification_confidence: number;
@@ -64,7 +66,7 @@ const DEFAULT_TENANT_ID = 'default';
 function buildClassificationTextFromR2(
   receipt: BackfillReceipt,
   metadata: Record<string, string>,
-  blobText: string | null
+  extractedPdfText: string | null
 ): string {
   const parts = [
     `Subject: ${metadata.subject || ''}`,
@@ -73,22 +75,33 @@ function buildClassificationTextFromR2(
     `Attachment: ${receipt.r2_object_key.split('/').pop() || 'receipt.pdf'}`,
   ];
 
-  if (blobText) {
-    const hasReadableText = blobText.includes('Invoice') ||
-      blobText.includes('Receipt') ||
-      blobText.includes('合計') ||
-      blobText.includes('請求') ||
-      blobText.includes('領収') ||
-      blobText.includes('Amount') ||
-      blobText.includes('Total');
-
-    if (hasReadableText) {
-      const truncated = blobText.slice(0, 8000);
-      parts.push('', 'PDF Text (extracted):', '---BEGIN PDF TEXT---', truncated, '---END PDF TEXT---');
-    }
+  if (extractedPdfText && extractedPdfText.trim().length > 0) {
+    const truncated = extractedPdfText.slice(0, 8000);
+    parts.push('', 'PDF Text (extracted):', '---BEGIN PDF TEXT---', truncated, '---END PDF TEXT---');
   }
 
   return parts.join('\n');
+}
+
+async function extractPdfTextForBackfill(
+  env: Env,
+  pdfBytes: ArrayBuffer,
+  context: Record<string, unknown>
+): Promise<string | null> {
+  try {
+    // Use the same unpdf-based extractor as the Gmail PDF path (no sampling).
+    const res = await extractPdfText(pdfBytes, {
+      maxBytes: 10 * 1024 * 1024,
+      maxPages: 50,
+    });
+    return res.text.slice(0, 8000);
+  } catch (error) {
+    safeLog.warn('[Backfill] PDF text extraction failed (continuing without it)', {
+      ...context,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 /**
@@ -136,9 +149,12 @@ async function backfillReceipt(
       if (obj) {
         r2Available = true;
         const metadata = obj.customMetadata || {};
-        const blob = await obj.arrayBuffer();
-        const blobText = new TextDecoder('utf-8', { fatal: false }).decode(blob);
-        classificationText = buildClassificationTextFromR2(receipt, metadata, blobText);
+        const pdfBytes = await obj.arrayBuffer();
+        const extractedPdfText = await extractPdfTextForBackfill(env, pdfBytes, {
+          receiptId: receipt.id,
+          r2Key: receipt.r2_object_key,
+        });
+        classificationText = buildClassificationTextFromR2(receipt, metadata, extractedPdfText);
       } else {
         // R2 object missing — use D1 metadata
         classificationText = buildClassificationTextFromD1(receipt);
@@ -178,18 +194,20 @@ async function backfillReceipt(
   // Step 3: Update D1 with new classification
   const newVendor = classification.vendor_name || receipt.vendor_name;
   const newAmount = classification.amount > 0 ? Math.round(classification.amount) : receipt.amount;
+  const newCurrency = classification.currency || receipt.currency || 'JPY';
   const newCategory = classification.account_category || receipt.account_category;
   const newConfidence = classification.confidence;
 
   await env.DB!.prepare(
     `UPDATE receipts
-     SET vendor_name = ?, amount = ?, account_category = ?,
+     SET vendor_name = ?, amount = ?, currency = ?, account_category = ?,
          classification_confidence = ?, classification_method = ?,
          updated_at = datetime('now')
      WHERE id = ?`
   ).bind(
     newVendor,
     newAmount,
+    newCurrency,
     newCategory,
     newConfidence,
     classification.method,
@@ -209,15 +227,47 @@ async function backfillReceipt(
 
   let newDealsCreated = dealsCreated;
 
+  // If we still don't have a valid amount, do not try to create a freee deal.
+  if (newAmount <= 0) {
+    await env.DB!.prepare(
+      `UPDATE receipts
+       SET status = 'needs_review',
+           error_code = 'AMOUNT_MISSING',
+           error_message = 'Backfill could not extract a positive amount; deal not created',
+           updated_at = datetime('now')
+       WHERE id = ?`
+    ).bind(receipt.id).run();
+    result.status = 'skipped';
+    result.error = 'amount<=0 after backfill: deal not created';
+    return { result, newDealsCreated };
+  }
+
+  // Foreign currency receipts need manual conversion in freee; do not create JPY deals automatically.
+  if (String(newCurrency).toUpperCase() !== 'JPY') {
+    await env.DB!.prepare(
+      `UPDATE receipts
+       SET status = 'needs_review',
+           error_code = 'FOREIGN_CURRENCY',
+           error_message = 'Backfill detected non-JPY currency; deal not created',
+           updated_at = datetime('now')
+       WHERE id = ?`
+    ).bind(receipt.id).run();
+    result.status = 'skipped';
+    result.error = `currency=${newCurrency}: deal not created`;
+    return { result, newDealsCreated };
+  }
+
   // Step 4: Create deal if we have a freee_receipt_id and haven't hit the limit
   if (receipt.freee_receipt_id && newDealsCreated < maxDeals) {
     try {
       const receiptInput: ReceiptInput = {
         id: receipt.id,
         freee_receipt_id: receipt.freee_receipt_id,
+        retry_link_if_existing: true,
         file_hash: receipt.file_hash,
         vendor_name: newVendor,
         amount: newAmount,
+        currency: newCurrency,
         transaction_date: receipt.transaction_date,
         account_category: newCategory,
         classification_confidence: newConfidence,
@@ -259,6 +309,17 @@ async function backfillReceipt(
         receiptId: receipt.id,
         error: dealError instanceof Error ? dealError.message : String(dealError),
       });
+      await env.DB!.prepare(
+        `UPDATE receipts
+         SET status = 'needs_review',
+             error_code = 'DEAL_FAILED',
+             error_message = ?,
+             updated_at = datetime('now')
+         WHERE id = ?`
+      ).bind(
+        result.error,
+        receipt.id
+      ).run();
     }
   }
 
@@ -293,13 +354,13 @@ export async function handleReceiptBackfill(
 
   // Query receipts needing backfill: no deal, has freee_receipt_id
   const query = filterIds
-    ? `SELECT id, r2_object_key, file_hash, vendor_name, amount, transaction_date,
+    ? `SELECT id, r2_object_key, file_hash, vendor_name, amount, currency, transaction_date,
               account_category, classification_confidence, freee_receipt_id, source_type
        FROM receipts
        WHERE freee_deal_id IS NULL AND freee_receipt_id IS NOT NULL
          AND id IN (${filterIds.map(() => '?').join(',')})
        ORDER BY created_at DESC LIMIT ?`
-    : `SELECT id, r2_object_key, file_hash, vendor_name, amount, transaction_date,
+    : `SELECT id, r2_object_key, file_hash, vendor_name, amount, currency, transaction_date,
               account_category, classification_confidence, freee_receipt_id, source_type
        FROM receipts
        WHERE freee_deal_id IS NULL AND freee_receipt_id IS NOT NULL
@@ -391,7 +452,7 @@ export async function handleReceiptBackfillCron(env: Env): Promise<void> {
   }
 
   const { results: receipts } = await env.DB.prepare(
-    `SELECT id, r2_object_key, file_hash, vendor_name, amount, transaction_date,
+    `SELECT id, r2_object_key, file_hash, vendor_name, amount, currency, transaction_date,
             account_category, classification_confidence, freee_receipt_id, source_type
      FROM receipts
      WHERE freee_deal_id IS NULL AND freee_receipt_id IS NOT NULL
