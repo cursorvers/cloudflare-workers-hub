@@ -33,6 +33,10 @@ const CRON_HOURLY = '0 * * * *'; // Hourly: Gmail polling + Limitless sync + tim
 const CRON_DAILY_ACTIONS = '0 21 * * *';   // 21:00 UTC = 06:00 JST
 const CRON_WEEKLY_DIGEST = '0 0 * * SUN';  // Sun 00:00 UTC = Sun 09:00 JST
 
+// Helps confirm which scheduled.ts is running via cron_runs.details.
+// (Cloudflare doesn't expose git SHA directly at runtime.)
+const SCHEDULED_BUILD_TAG = 'scheduled:deal-link-backfill:v1';
+
 // ============================================================================
 // Distributed Lock Helpers
 // ============================================================================
@@ -267,7 +271,7 @@ export async function handleScheduled(
     env,
     `cron:${controller.cron}`,
     hasErrors ? 'error' : 'success',
-    { ...jobResults, durationMs: totalDurationMs },
+    { __buildTag: SCHEDULED_BUILD_TAG, ...jobResults, durationMs: totalDurationMs },
     hasErrors ? Object.entries(jobResults)
       .filter(([, r]) => r.status === 'error')
       .map(([name, r]) => `${name}: ${r.error}`)
