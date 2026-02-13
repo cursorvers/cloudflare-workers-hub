@@ -80,10 +80,10 @@ jobs:
               continue
             fi
 
-            # HEAD check download endpoint (do not download full payload)
-            echo "\n\`file_url\` HEAD:" >> "$GITHUB_STEP_SUMMARY"
-            curl -sSI -H "${auth_header}" "$file_url" \
-              | sed -n '1,12p' \
+            # Lightweight download check: GET 1 byte (Range), so route must support GET.
+            echo "\n\`file_url\` GET (Range: bytes=0-0):" | tee -a "$GITHUB_STEP_SUMMARY"
+            curl -sS -D - -o /dev/null -H "${auth_header}" -H "Range: bytes=0-0" "$file_url" \
+              | sed -n '1,16p' \
               | sed 's/\r$//' \
               | awk '{print "- " $0}' | tee -a "$GITHUB_STEP_SUMMARY"
           done
