@@ -39,6 +39,7 @@ export interface FreeeReceipt {
   id: number;
   company_id: number;
   description: string;
+  deal_id?: number;
   receipt_metadatum: {
     file_name: string;
     file_size: number;
