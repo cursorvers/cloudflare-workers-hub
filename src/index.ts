@@ -885,6 +885,20 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
       return new Response(JSON.stringify({ success: true, retried: results.length, results }), { headers: { 'Content-Type': 'application/json' } });
     }
 
+
+    // Repair freee receipt→deal links (admin only)
+    // Fixes cases where a freee receipt exists but is not linked to the deal, making evidence appear missing on the deal screen.
+    if (path === '/api/receipts/repair-freee-links' && request.method === 'POST') {
+      const { verifyAPIKey } = await import('./utils/api-auth');
+      if (!verifyAPIKey(request, env, 'admin')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const { handleRepairFreeeLinks } = await import('./handlers/receipt-freee-repair');
+      return handleRepairFreeeLinks(request, env);
+    }
     // Backfill receipts - re-classify and create deals (admin only)
     if (path === '/api/receipts/backfill' && request.method === 'POST') {
       const { verifyAPIKey } = await import('./utils/api-auth');

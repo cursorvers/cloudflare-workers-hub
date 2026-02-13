@@ -4,18 +4,27 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Mode: verify or retry_failed'
+        description: 'Mode: verify, retry_failed, or repair_freee_links'
         required: true
         default: 'verify'
         type: choice
         options:
           - verify
           - retry_failed
+          - repair_freee_links
       sample_limit:
-        description: 'How many recent receipts to sample in verify mode'
+        description: 'How many recent receipts to sample (verify) or repair (repair_freee_links)'
         required: true
         default: '3'
         type: string
+      dry_run:
+        description: 'repair_freee_links only: true to simulate without calling freee'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
   run:
@@ -27,6 +36,7 @@ jobs:
           WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
           MODE: ${{ github.event.inputs.mode }}
           SAMPLE_LIMIT: ${{ github.event.inputs.sample_limit }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           set -euo pipefail
 
@@ -45,6 +55,25 @@ jobs:
             resp="$(curl -sS -H "${auth_header}" -X POST "${BASE_URL}/api/receipts/retry")"
             echo "$resp" | jq -r '. as $r | "retried=\($r.retried)"' | tee -a "$GITHUB_STEP_SUMMARY"
             echo "$resp" | jq -r '[.results[] | {id, status, freeeId, error}] | (group_by(.status) | map({status: .[0].status, count: length}))' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+
+          if [ "${MODE}" = "repair_freee_links" ]; then
+            limit="${SAMPLE_LIMIT}"
+            if ! [[ "$limit" =~ ^[0-9]+$ ]]; then
+              echo "::error::sample_limit must be a number"
+              exit 1
+            fi
+            dry="${DRY_RUN}"
+            if [ "$dry" != "true" ] && [ "$dry" != "false" ]; then
+              echo "::error::dry_run must be 'true' or 'false'"
+              exit 1
+            fi
+
+            echo "Running POST /api/receipts/repair-freee-links (limit=${limit}, dry_run=${dry}) ..."
+            resp="$(curl -sS -H "${auth_header}" -X POST "${BASE_URL}/api/receipts/repair-freee-links?limit=${limit}&dry_run=${dry}")"
+            echo "$resp" | jq '{success, dry_run, scanned, ok, repaired, would_repair, conflicts, skipped, errors}' | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -70,7 +99,7 @@ jobs:
             echo "\n=== Receipt ${id} ===" | tee -a "$GITHUB_STEP_SUMMARY"
 
             detail="$(curl -sS -H "${auth_header}" "${BASE_URL}/api/receipts/${id}")"
-            echo "$detail" | jq '{id, status, has_file, file_url, r2_object_key, freee_receipt_id}' | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "$detail" | jq '{id: (.receipt.id // .id), status: (.receipt.status // .status), has_file, file_url, r2_object_key: (.receipt.r2_object_key // .r2_object_key), freee_receipt_id: (.receipt.freee_receipt_id // .freee_receipt_id)}' | tee -a "$GITHUB_STEP_SUMMARY"
 
             file_url="$(echo "$detail" | jq -r '.file_url // empty')"
             has_file="$(echo "$detail" | jq -r '.has_file')"
@@ -79,6 +108,12 @@ jobs:
               echo "- NOTE: missing file_url or has_file=false" >> "$GITHUB_STEP_SUMMARY"
               continue
             fi
+
+            echo "\n`file_url` HEAD:" | tee -a "$GITHUB_STEP_SUMMARY"
+            curl -sS -I -H "${auth_header}" "$file_url" \
+              | sed -n '1,16p' \
+              | sed 's/\r$//' \
+              | awk '{print "- " $0}' | tee -a "$GITHUB_STEP_SUMMARY"
 
             # Lightweight download check: GET 1 byte (Range), so route must support GET.
             echo "\n\`file_url\` GET (Range: bytes=0-0):" | tee -a "$GITHUB_STEP_SUMMARY"
