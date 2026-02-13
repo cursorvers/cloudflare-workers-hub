@@ -45,7 +45,7 @@ import { handleUsageAPI } from './handlers/usage-api';
 import { handleGoalPlannerAPI } from './handlers/goal-planner';
 import { handlePushQueueBatch } from './handlers/push-queue-consumer';
 import { handleReceiptUpload } from './handlers/receipt-upload';
-import { handleReceiptSearch } from './handlers/receipt-search';
+import { handleReceiptDetail, handleReceiptExport, handleReceiptFileDownload, handleReceiptSearch } from './handlers/receipt-search';
 import { handleReceiptSourcesAPI } from './handlers/receipt-sources-api';
 import { handleReceiptList, handleReceiptSummary } from './handlers/receipt-status-api';
 import { handleDLQAPI } from './handlers/dlq-api';
@@ -932,6 +932,45 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
       return handleReceiptSearch(request, env);
     }
 
+    // Receipt Export API endpoint (admin only)
+    if (path === '/api/receipts/export' && request.method === 'GET') {
+      const { verifyAPIKey } = await import('./utils/api-auth');
+      if (!verifyAPIKey(request, env, 'admin')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return handleReceiptExport(request, env);
+    }
+
+    // Receipt Detail + File Download (admin only)
+    if (request.method === 'GET' && path.startsWith('/api/receipts/')) {
+      const mFile = path.match(/^\/api\/receipts\/([A-Za-z0-9_-]+)\/file$/);
+      if (mFile) {
+        const { verifyAPIKey } = await import('./utils/api-auth');
+        if (!verifyAPIKey(request, env, 'admin')) {
+          return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return handleReceiptFileDownload(request, env, mFile[1]);
+      }
+
+      const mDetail = path.match(/^\/api\/receipts\/([A-Za-z0-9_-]+)$/);
+      if (mDetail) {
+        const { verifyAPIKey } = await import('./utils/api-auth');
+        if (!verifyAPIKey(request, env, 'admin')) {
+          return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return handleReceiptDetail(request, env, mDetail[1]);
+      }
+    }
+
     // Receipt Sources API (web receipt scraper orchestration) — admin only
     if (path.startsWith('/api/receipts/sources')) {
       const { verifyAPIKey } = await import('./utils/api-auth');
@@ -958,6 +997,7 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
     if (path.startsWith('/api/admin')) {
       return handleAdminAPI(request, env, path);
     }
+
 
     // Daemon Health API endpoints (for monitoring active daemons)
     if (path.startsWith('/api/daemon')) {

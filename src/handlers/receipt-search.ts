@@ -279,24 +279,75 @@ export async function handleReceiptDetail(
     .bind(receiptId)
     .all();
 
-  // Get R2 signed URL (5-minute expiry for security)
+  // Receipt evidence (R2 object) availability.
+  // Note: R2 ETag is not guaranteed to match our SHA-256 file_hash, so do not use etagMatches here.
   const r2Key = receipt.r2_object_key as string;
   const bucket = env.RECEIPTS ?? env.R2;
   if (!bucket) {
     return new Response('Receipt storage not configured', { status: 500 });
   }
-  const signedUrl = await bucket.get(r2Key, {
-    onlyIf: { etagMatches: receipt.file_hash as string },
-  });
+  const head = await bucket.head(r2Key);
+  const has_file = Boolean(head);
+  const file_url = has_file
+    ? new URL(`/api/receipts/${receiptId}/file`, request.url).toString()
+    : null;
 
   return new Response(
     JSON.stringify({
       receipt,
       audit_trail: auditTrail.results || [],
-      file_url: signedUrl?.httpMetadata ? signedUrl.httpMetadata : null,
+      has_file,
+      file_url,
     }),
     {
       headers: { 'Content-Type': 'application/json' },
     }
   );
+}
+
+
+/**
+ * Download receipt evidence file from R2.
+ * Uses an authenticated API route, instead of relying on R2 signed URLs.
+ */
+export async function handleReceiptFileDownload(
+  request: Request,
+  env: Env,
+  receiptId: string
+): Promise<Response> {
+  if (!env.DB) {
+    return new Response(JSON.stringify({ error: 'DB not configured' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const receipt = (await env.DB.prepare(
+    'SELECT id, r2_object_key FROM receipts WHERE id = ?'
+  )
+    .bind(receiptId)
+    .first()) as { id?: string; r2_object_key?: string } | null;
+
+  if (!receipt?.r2_object_key) {
+    return new Response('Receipt not found', { status: 404 });
+  }
+
+  const bucket = env.RECEIPTS ?? env.R2;
+  if (!bucket) {
+    return new Response('Receipt storage not configured', { status: 500 });
+  }
+
+  const obj = await bucket.get(receipt.r2_object_key);
+  if (!obj) {
+    return new Response('Receipt file not found', { status: 404 });
+  }
+
+  // Best-effort filename from key tail.
+  const fileName = String(receipt.r2_object_key).split('/').pop() || 'receipt.bin';
+  const headers = new Headers();
+  obj.writeHttpMetadata(headers);
+  headers.set('Content-Disposition', `attachment; filename="${fileName.replace(/"/g, '')}"`);
+  headers.set('Cache-Control', 'private, max-age=300');
+
+  return new Response(obj.body, { headers });
 }
