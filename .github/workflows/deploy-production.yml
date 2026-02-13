@@ -21,10 +21,18 @@ on:
           - hub_only
           - always
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-worker-${{ github.event.inputs.target }}
+  cancel-in-progress: false
+
 jobs:
   validate:
     name: Validate Confirmation
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Check confirmation
         if: ${{ github.event.inputs.confirm != 'deploy' }}
@@ -46,6 +54,7 @@ jobs:
     name: Pre-deploy Tests
     needs: validate
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -70,6 +79,7 @@ jobs:
     name: Release
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment: production
 
     steps:

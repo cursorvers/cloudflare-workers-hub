@@ -6,10 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test & Typecheck
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -23,10 +31,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Skip deploy when Cloudflare secrets missing
-        if: env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == ''
-        run: echo "CLOUDFLARE_* secrets not configured; skipping deploy." >> $GITHUB_STEP_SUMMARY
 
       - name: Guardrail (no env.production)
         run: |
@@ -53,22 +57,29 @@ jobs:
           fi
 
       - name: TypeScript typecheck
+        id: typecheck
         run: npm run typecheck
 
       - name: Run tests
+        id: tests
         run: npm test
 
       - name: Test Summary
         if: always()
         run: |
-          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "- TypeCheck: ✅" >> $GITHUB_STEP_SUMMARY
-          echo "- Tests: ✅ (61 tests)" >> $GITHUB_STEP_SUMMARY
+          typecheck_outcome="${{ steps.typecheck.outcome }}"
+          tests_outcome="${{ steps.tests.outcome }}"
+          mark() { [ "$1" = "success" ] && printf '✅' || printf '❌'; }
+
+          echo "## CI Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Typecheck: $(mark "$typecheck_outcome") ($typecheck_outcome)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Tests: $(mark "$tests_outcome") ($tests_outcome)" >> "$GITHUB_STEP_SUMMARY"
 
   deploy-hub:
     name: Deploy hub (envless)
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Skip deploy when Cloudflare secrets are not configured (common in fresh forks / setup).
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     env:
