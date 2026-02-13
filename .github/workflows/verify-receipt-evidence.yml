@@ -109,7 +109,7 @@ jobs:
               continue
             fi
 
-            echo "\n`file_url` HEAD:" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "\n\`file_url\` HEAD:" | tee -a "$GITHUB_STEP_SUMMARY"
             curl -sS -I -H "${auth_header}" "$file_url" \
               | sed -n '1,16p' \
               | sed 's/\r$//' \
