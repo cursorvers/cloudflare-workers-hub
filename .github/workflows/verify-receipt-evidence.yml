@@ -1,0 +1,89 @@
+name: Verify Receipt Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Mode: verify or retry_failed'
+        required: true
+        default: 'verify'
+        type: choice
+        options:
+          - verify
+          - retry_failed
+      sample_limit:
+        description: 'How many recent receipts to sample in verify mode'
+        required: true
+        default: '3'
+        type: string
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify / Retry Receipts Evidence
+        env:
+          BASE_URL: https://orchestrator-hub.masa-stage1.workers.dev
+          WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
+          MODE: ${{ github.event.inputs.mode }}
+          SAMPLE_LIMIT: ${{ github.event.inputs.sample_limit }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${WORKERS_API_KEY}" ]; then
+            echo "::error::WORKERS_API_KEY secret is missing"
+            exit 1
+          fi
+
+          auth_header="Authorization: Bearer ${WORKERS_API_KEY}"
+
+          echo "## Receipt Evidence (${MODE})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Base URL: ${BASE_URL}" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${MODE}" = "retry_failed" ]; then
+            echo "Running POST /api/receipts/retry ..."
+            resp="$(curl -sS -H "${auth_header}" -X POST "${BASE_URL}/api/receipts/retry")"
+            echo "$resp" | jq -r '. as $r | "retried=\($r.retried)"' | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "$resp" | jq -r '[.results[] | {id, status, freeeId, error}] | (group_by(.status) | map({status: .[0].status, count: length}))' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # verify mode
+          limit="${SAMPLE_LIMIT}"
+          if ! [[ "$limit" =~ ^[0-9]+$ ]]; then
+            echo "::error::sample_limit must be a number"
+            exit 1
+          fi
+
+          echo "Fetching latest ${limit} receipts (public search) ..."
+          search="$(curl -sS "${BASE_URL}/api/receipts/search?limit=${limit}&offset=0")"
+          ids=( $(echo "$search" | jq -r '.results[].id') )
+
+          echo "- Sample IDs: ${ids[*]:-none}" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${#ids[@]}" -eq 0 ]; then
+            echo "No receipts found."
+            exit 0
+          fi
+
+          for id in "${ids[@]}"; do
+            echo "\n### Receipt ${id}" >> "$GITHUB_STEP_SUMMARY"
+
+            detail="$(curl -sS -H "${auth_header}" "${BASE_URL}/api/receipts/${id}")"
+            echo "$detail" | jq '{id, status, has_file, file_url, r2_object_key, freee_receipt_id}' >> "$GITHUB_STEP_SUMMARY"
+
+            file_url="$(echo "$detail" | jq -r '.file_url // empty')"
+            has_file="$(echo "$detail" | jq -r '.has_file')"
+
+            if [ "$has_file" != "true" ] || [ -z "$file_url" ]; then
+              echo "- NOTE: missing file_url or has_file=false" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            # HEAD check download endpoint (do not download full payload)
+            echo "\n\`file_url\` HEAD:" >> "$GITHUB_STEP_SUMMARY"
+            curl -sSI -H "${auth_header}" "$file_url" \
+              | sed -n '1,12p' \
+              | sed 's/\r$//' \
+              | awk '{print "- " $0}' >> "$GITHUB_STEP_SUMMARY"
+          done
