@@ -30,6 +30,7 @@ import { backfillReceiptDealLinks } from './receipt-deal-link-backfill';
 // ============================================================================
 
 const CRON_HOURLY = '0 * * * *'; // Hourly: Gmail polling + Limitless sync + time-based sub-jobs
+const CRON_QUICK_DEAL_LINK = '*/5 * * * *'; // Temporary: accelerate deal↔receipt link backfill
 const CRON_DAILY_ACTIONS = '0 21 * * *';   // 21:00 UTC = 06:00 JST
 const CRON_WEEKLY_DIGEST = '0 0 * * SUN';  // Sun 00:00 UTC = Sun 09:00 JST
 
@@ -159,6 +160,17 @@ export async function handleScheduled(
   }
 
   switch (controller.cron) {
+    case CRON_QUICK_DEAL_LINK: {
+      // Keep this narrow: do NOT run Gmail/Limitless here.
+      await runJob('receipt_deal_link_backfill', async () => {
+        const res = await backfillReceiptDealLinks(env, { limit: 2 });
+        if (res.scanned > 0) {
+          safeLog.info('[Scheduled] Quick receipt-deal link backfill summary', res);
+        }
+      });
+      break;
+    }
+
     case CRON_HOURLY: {
       // Gmail-only mode: skip all other jobs
       if (env.SCHEDULED_GMAIL_ONLY === 'true') {

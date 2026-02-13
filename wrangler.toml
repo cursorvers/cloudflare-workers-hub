@@ -112,7 +112,7 @@ index_name = "obsidian-knowledge"
 #   1. 0 * * * *     - Hourly: Gmail polling + Limitless sync + PHI verification (h%6==0) + subscription cleanup (h==2)
 #   2. 0 21 * * *    - Daily action check (6AM JST)
 #   3. 0 0 * * SUN   - Weekly digest (Sun 9AM JST)
-crons = ["0 * * * *", "0 21 * * *", "0 0 * * SUN"]
+crons = ["*/5 * * * *", "0 * * * *", "0 21 * * *", "0 0 * * SUN"]
 
 # Environment variables
 [vars]
