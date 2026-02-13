@@ -562,11 +562,18 @@ export class FreeeClient {
       const response = await fetch(`${this.baseUrl}${path}`, init);
 
       if (!response.ok) {
-        throw new ApiError(
-          `freee API error: ${response.status} ${response.statusText}`,
-          response.status,
-          response.headers
-        );
+        // Best-effort: include response body for easier diagnosis (e.g. 400 validation errors).
+        let detail = `${response.status} ${response.statusText}`;
+        try {
+          const bodyText = await response.text();
+          if (bodyText) {
+            const trimmed = bodyText.length > 800 ? `${bodyText.slice(0, 800)}...` : bodyText;
+            detail = `${detail} - ${trimmed}`;
+          }
+        } catch {
+          // ignore body read errors
+        }
+        throw new ApiError(`freee API error: ${detail}`, response.status, response.headers);
       }
 
       return response.json() as Promise<T>;

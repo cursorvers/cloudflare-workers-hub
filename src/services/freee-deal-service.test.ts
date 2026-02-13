@@ -108,7 +108,7 @@ function setup() {
     }
 
     // PUT /deals/{id}: update receipt_ids
-    if (method === 'PUT' && path === '/deals/101') {
+    if (method === 'PUT' && (path === '/deals/101' || path === '/deals/101?company_id=123')) {
       return { deal: { id: 101 } };
     }
 
@@ -370,7 +370,7 @@ describe('createDealFromReceipt - happy path full flow', () => {
     expect(requestMock.mock.calls[1][1]).toContain('/deals/101?company_id=123');
 
     expect(requestMock.mock.calls[2][0]).toBe('PUT');
-    expect(requestMock.mock.calls[2][1]).toBe('/deals/101');
+    expect(requestMock.mock.calls[2][1]).toBe('/deals/101?company_id=123');
     expect(requestMock.mock.calls[2][2]).toEqual(
       expect.objectContaining({
         company_id: 123,

@@ -311,7 +311,8 @@ async function linkReceiptToDeal(
 
   await freeeClient.request<DealApiResponse>(
     'PUT',
-    `/deals/${dealId}`,
+    // freee API often requires company_id in query for update endpoints (even if included in body).
+    `/deals/${dealId}?company_id=${companyId}`,
     updatePayload,
     idempotencyKey
   );
