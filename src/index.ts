@@ -898,6 +898,38 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
       return handleReceiptBackfill(request, env);
     }
 
+    // Backfill/verify freee receipt↔deal links (admin only)
+    if (path === '/api/receipts/deal-link-backfill' && request.method === 'POST') {
+      const { verifyAPIKey } = await import('./utils/api-auth');
+      if (!verifyAPIKey(request, env, 'admin')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      let limit: number | undefined;
+      try {
+        if (request.headers.get('content-type')?.includes('application/json')) {
+          const body = (await request.json().catch(() => null)) as unknown;
+          if (body && typeof body === 'object' && 'limit' in body) {
+            const v = (body as { limit?: unknown }).limit;
+            if (typeof v === 'number' && Number.isFinite(v)) {
+              limit = v;
+            }
+          }
+        }
+      } catch {
+        // ignore body parse errors (use defaults)
+      }
+
+      const { backfillReceiptDealLinks } = await import('./handlers/receipt-deal-link-backfill');
+      const res = await backfillReceiptDealLinks(env, { limit });
+      return new Response(JSON.stringify({ success: true, ...res }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     // Receipt Upload API endpoint (freee integration)
     if (path === '/api/receipts/upload' && request.method === 'POST') {
       return handleReceiptUpload(request, env);

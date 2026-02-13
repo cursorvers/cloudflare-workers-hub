@@ -23,6 +23,7 @@ import { handleGmailReceiptPolling } from './receipt-gmail-poller';
 import { recordCronRun } from './receipt-backfill';
 import { HEALTH } from '../config/confidence-thresholds';
 import { recoverPdfReceiptsNeedingFreeeUpload } from './receipt-recovery';
+import { backfillReceiptDealLinks } from './receipt-deal-link-backfill';
 
 // ============================================================================
 // Cron Expression Constants
@@ -169,6 +170,14 @@ export async function handleScheduled(
         const res = await recoverPdfReceiptsNeedingFreeeUpload(env);
         if (res.scanned > 0) {
           safeLog.info('[Scheduled] Receipt recovery summary', res);
+        }
+      });
+
+      // Remediation: ensure Deals have receipt evidence linked (legacy missing receipt_ids)
+      await runJob('receipt_deal_link_backfill', async () => {
+        const res = await backfillReceiptDealLinks(env);
+        if (res.scanned > 0) {
+          safeLog.info('[Scheduled] Receipt-deal link backfill summary', res);
         }
       });
 
