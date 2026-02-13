@@ -10,7 +10,7 @@ const MAX_YAML_INPUT_BYTES = 1_048_576;
 function detectForbiddenYamlFeatures(doc: ReturnType<typeof parseDocument>): string | null {
   let violation: string | null = null;
   visit(doc, {
-    Node: (_key, node) => {
+    Node: (_key: unknown, node: any) => {
       if (isAlias(node)) {
         violation = 'YAML aliases are not allowed';
         return visit.BREAK;

@@ -292,7 +292,10 @@ export async function processHtmlReceipt(
       });
     }
 
-    const pdfBlob = new Blob([pdfBytes], { type: 'application/pdf' });
+    // Ensure BlobPart uses a concrete ArrayBuffer (not SharedArrayBuffer) for TS + runtime safety.
+    const pdfBuf = new ArrayBuffer(pdfBytes.byteLength);
+    new Uint8Array(pdfBuf).set(pdfBytes);
+    const pdfBlob = new Blob([pdfBuf], { type: 'application/pdf' });
     const freeeResult = await freeeClient.uploadReceipt(pdfBlob, pdfFileName, idempotencyKey);
 
     safeLog.info('[Gmail Poller] HTML receipt uploaded to freee as PDF', {

@@ -4,7 +4,7 @@ export interface SideEffectHandler {
   onSuccess(result: ToolResult, plan: ExecutionPlan): void;
   onFailure(result: ToolResult, plan: ExecutionPlan): void;
   onTimeout(result: ToolResult, plan: ExecutionPlan): void;
-  onRetry(result: ToolResult, plan: ExecutionPlan): void;
+  onRetry(result: ToolResult, plan: ExecutionPlan, attempt: number): void;
 }
 
 export interface StructuredLogger {
@@ -37,7 +37,10 @@ export class LoggingSideEffectHandler implements SideEffectHandler {
   onSuccess(result: ToolResult, plan: ExecutionPlan): void { runDetached(() => this.logger.info('[Executor] success', logFields(result, plan))); }
   onFailure(result: ToolResult, plan: ExecutionPlan): void { runDetached(() => this.logger.error('[Executor] failure', logFields(result, plan))); }
   onTimeout(result: ToolResult, plan: ExecutionPlan): void { runDetached(() => this.logger.warn('[Executor] timeout', logFields(result, plan))); }
-  onRetry(result: ToolResult, plan: ExecutionPlan): void { runDetached(() => this.logger.warn('[Executor] retry', logFields(result, plan))); }
+  onRetry(result: ToolResult, plan: ExecutionPlan, attempt: number): void {
+    // attempt is included for correlation; not all loggers will use it.
+    runDetached(() => this.logger.warn('[Executor] retry', { ...logFields(result, plan), attempt }));
+  }
 }
 
 export class CompositeSideEffectHandler implements SideEffectHandler {
@@ -46,12 +49,12 @@ export class CompositeSideEffectHandler implements SideEffectHandler {
   onSuccess(result: ToolResult, plan: ExecutionPlan): void { for (const h of this.handlers) runDetached(() => h.onSuccess(result, plan)); }
   onFailure(result: ToolResult, plan: ExecutionPlan): void { for (const h of this.handlers) runDetached(() => h.onFailure(result, plan)); }
   onTimeout(result: ToolResult, plan: ExecutionPlan): void { for (const h of this.handlers) runDetached(() => h.onTimeout(result, plan)); }
-  onRetry(result: ToolResult, plan: ExecutionPlan): void { for (const h of this.handlers) runDetached(() => h.onRetry(result, plan)); }
+  onRetry(result: ToolResult, plan: ExecutionPlan, attempt: number): void { for (const h of this.handlers) runDetached(() => h.onRetry(result, plan, attempt)); }
 }
 
 export const NOOP_SIDE_EFFECT_HANDLER: SideEffectHandler = Object.freeze({
   onSuccess: () => {},
   onFailure: () => {},
   onTimeout: () => {},
-  onRetry: () => {},
+  onRetry: (_result: ToolResult, _plan: ExecutionPlan, _attempt: number) => {},
 });
