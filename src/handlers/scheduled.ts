@@ -20,6 +20,7 @@ import {
 import { handlePhiVerificationCron } from './phi-verification-cron';
 import { handleLimitlessPollerCron } from './limitless-poller';
 import { handleGmailReceiptPolling } from './receipt-gmail-poller';
+import { sendReceiptDailyReport } from './receipt-daily-report';
 import { recordCronRun } from './receipt-backfill';
 import { HEALTH } from '../config/confidence-thresholds';
 import { recoverPdfReceiptsNeedingFreeeUpload } from './receipt-recovery';
@@ -233,6 +234,7 @@ export async function handleScheduled(
 
     case CRON_DAILY_ACTIONS:
       await runJob('daily_actions', () => handleDailyActionCheck(env, withLock));
+      await runJob('receipt_daily_report', () => sendReceiptDailyReport(env));
       break;
 
     case CRON_WEEKLY_DIGEST:

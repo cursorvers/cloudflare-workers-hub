@@ -95,6 +95,17 @@ export interface FreeeDealResult {
   deal: FreeeDeal;
 }
 
+export interface FreeeWalletTxn {
+  id: number;
+  company_id: number;
+  date: string; // YYYY-MM-DD
+  amount: number; // signed (API raw)
+  amount_jpy: number; // normalized to JPY integer (best-effort)
+  description?: string;
+  walletable_type?: string;
+  walletable_id?: number;
+}
+
 // =============================================================================
 // ApiError (typed error with status for retry logic)
 // =============================================================================
@@ -562,8 +573,19 @@ export class FreeeClient {
       const response = await fetch(`${this.baseUrl}${path}`, init);
 
       if (!response.ok) {
+        let detail = `${response.status} ${response.statusText}`;
+        try {
+          const bodyText = await response.text();
+          if (bodyText) {
+            const trimmed = bodyText.replace(/\s+/g, ' ').trim();
+            const truncated = trimmed.length > 1000 ? `${trimmed.slice(0, 1000)}...` : trimmed;
+            detail = `${detail} - ${truncated}`;
+          }
+        } catch {
+          // best-effort body read
+        }
         throw new ApiError(
-          `freee API error: ${response.status} ${response.statusText}`,
+          `freee API error: ${detail}`,
           response.status,
           response.headers
         );
@@ -652,6 +674,46 @@ export class FreeeClient {
       'GET',
       `/receipts?${params}`
     ).then((result) => result.receipts);
+  }
+
+  /**
+   * List wallet transactions (カード/口座明細)
+   *
+   * Used for foreign-currency reconciliation suggestions.
+   */
+  async listWalletTxns(args: {
+    startDate: string;
+    endDate: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<FreeeWalletTxn[]> {
+    const companyId = await this.resolveCompanyId();
+    const params = new URLSearchParams({
+      company_id: companyId,
+      start_date: args.startDate,
+      end_date: args.endDate,
+    });
+    if (typeof args.limit === 'number') params.append('limit', String(args.limit));
+    if (typeof args.offset === 'number') params.append('offset', String(args.offset));
+
+    const payload = await this.request<{ wallet_txns?: any[] }>(
+      'GET',
+      `/wallet_txns?${params.toString()}`
+    );
+
+    const txns = Array.isArray((payload as any).wallet_txns) ? (payload as any).wallet_txns : [];
+    return txns
+      .map((t: any) => ({
+        id: Number(t.id),
+        company_id: Number(t.company_id),
+        date: String(t.date || t.issue_date || ''),
+        amount: Number(t.amount ?? 0),
+        amount_jpy: Number(t.amount ?? 0),
+        description: typeof t.description === 'string' ? t.description : (typeof t.name === 'string' ? t.name : undefined),
+        walletable_type: typeof t.walletable_type === 'string' ? t.walletable_type : undefined,
+        walletable_id: typeof t.walletable_id === 'number' ? t.walletable_id : undefined,
+      }))
+      .filter((t: any) => Number.isFinite(t.id) && t.id > 0 && t.date);
   }
 
   /**

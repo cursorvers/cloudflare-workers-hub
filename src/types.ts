@@ -108,6 +108,11 @@ export interface Env {
   GMAIL_HTML_RECEIPT_SENDERS?: string;   // Comma-separated sender allowlist for HTML receipts
   PDF_CJK_FONT_R2_KEY?: string;   // R2 object key for a CJK-capable font for HTML→PDF evidence (optional)
   RECEIPT_LINK_WATCHDOG_ENABLED?: string; // "false" to disable periodic freee receipt↔deal link repair
+  RECEIPT_DAILY_REPORT_ENABLED?: string; // "true" to send daily email report for foreign-currency/manual backlog
+  RECEIPT_DAILY_REPORT_EMAIL_TO?: string; // Recipient email address for daily receipt reports
+  RECEIPT_DAILY_REPORT_DAYS?: string; // Lookback days (default: 14)
+  RECEIPT_DAILY_REPORT_LIMIT?: string; // Max rows per section (default: 50)
+  RECEIPT_DAILY_REPORT_INCLUDE_FOREX_CANDIDATES?: string; // "true" to include wallet_txn reconciliation suggestions
   // JWT Authentication (Cockpit API)
   JWT_SECRET?: string;             // HS256 secret for development
   JWT_PRIVATE_KEY?: string;        // RS256 private key for production
