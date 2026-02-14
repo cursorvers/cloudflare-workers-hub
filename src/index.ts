@@ -843,6 +843,58 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
 		  return handleGmailOAuthCallback(request, env);
 		}
 
+		// Gmail OAuth status (debug): verify D1 token presence without exposing secrets.
+		if (path === '/api/gmail/status' && request.method === 'GET') {
+		  const accessResult = await authenticateWithAccess(request, env);
+		  const apiKeyHeader = request.headers.get('X-API-Key') || request.headers.get('x-api-key');
+		  const tokenParam = url.searchParams.get('token');
+		  const isApiKeyAuth = env.QUEUE_API_KEY && (apiKeyHeader === env.QUEUE_API_KEY || tokenParam === env.QUEUE_API_KEY);
+
+		  if (!accessResult.verified && !isApiKeyAuth) {
+		    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+		      status: 401,
+		      headers: { 'Content-Type': 'application/json' },
+		    });
+		  }
+
+		  if (!env.DB) {
+		    return new Response(JSON.stringify({ present: false, error: 'DB not configured' }), {
+		      status: 200,
+		      headers: { 'Content-Type': 'application/json' },
+		    });
+		  }
+
+		  try {
+		    const row = await env.DB.prepare(
+		      "SELECT encrypted_refresh_token, updated_at, access_token_expires_at_ms FROM external_oauth_tokens WHERE provider='gmail' LIMIT 1"
+		    ).first() as { encrypted_refresh_token?: string | null; updated_at?: string | number | null; access_token_expires_at_ms?: number | null } | null;
+
+		    const present = Boolean(row?.encrypted_refresh_token);
+		    const updatedAtSec = row?.updated_at != null ? Number(row.updated_at) : null;
+		    const updatedAtIso = updatedAtSec && Number.isFinite(updatedAtSec) && updatedAtSec > 0
+		      ? new Date(updatedAtSec * 1000).toISOString()
+		      : null;
+
+		    return new Response(JSON.stringify({
+		      present,
+		      updated_at_iso: updatedAtIso,
+		      has_access_token_expiry: row?.access_token_expires_at_ms != null,
+		      remediation: present ? null : '/api/gmail/auth',
+		    }), {
+		      status: 200,
+		      headers: { 'Content-Type': 'application/json' },
+		    });
+		  } catch (error) {
+		    return new Response(JSON.stringify({
+		      present: false,
+		      error: error instanceof Error ? error.message : String(error),
+		    }), {
+		      status: 200,
+		      headers: { 'Content-Type': 'application/json' },
+		    });
+		  }
+		}
+
     // Manual Gmail polling trigger (admin only)
     if (path === '/api/receipts/poll' && request.method === 'POST') {
       const { verifyAPIKey } = await import('./utils/api-auth');
