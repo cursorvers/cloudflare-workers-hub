@@ -38,6 +38,14 @@ import {
   hasDuplicateHash,
 } from './receipt-poller-utils';
 
+function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  // Force a real ArrayBuffer for BlobPart (avoid SharedArrayBuffer typing issues in Node/tsc).
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+
 const MAX_TEXT_EVIDENCE_CHARS = 200_000;
 const MAX_PDF_TEXT_CHARS = 120_000;
 
@@ -386,7 +394,7 @@ export async function processHtmlReceipt(
       });
     }
 
-    const pdfBlob = new Blob([pdfBytes], { type: 'application/pdf' });
+    const pdfBlob = new Blob([bytesToArrayBuffer(pdfBytes)], { type: 'application/pdf' });
     const freeeResult = await freeeClient.uploadReceipt(pdfBlob, pdfFileName, idempotencyKey);
 
     safeLog.info('[Gmail Poller] HTML receipt uploaded to freee as PDF', {
@@ -658,7 +666,7 @@ export async function retryFailedHtmlReceipts(
 
       const idempotencyKey = `gmail:html:retry:${r.id}`;
       const pdfFileName = `receipt-${r.id}.pdf`;
-      const pdfBlob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const pdfBlob = new Blob([bytesToArrayBuffer(pdfBytes)], { type: 'application/pdf' });
 
       const freeeResult = await freeeClient.uploadReceipt(pdfBlob, pdfFileName, idempotencyKey);
       await workflow.complete(String(freeeResult.receipt.id));

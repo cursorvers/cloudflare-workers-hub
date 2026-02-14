@@ -22,6 +22,12 @@ function basename(key: string): string {
   return parts.length > 0 ? parts[parts.length - 1] : 'receipt.bin';
 }
 
+function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
 function stripHtmlToText(html: string): string {
   // Best-effort: keep it deterministic and avoid heavy parsing.
   return String(html || '')
@@ -165,7 +171,7 @@ export async function runReceiptLinkWatchdog(
 
           const fileName = /\.pdf$/i.test(key) ? basename(key) : `receipt_${r.id}.pdf`;
           const uploadRes = await freeeClient.uploadReceipt(
-            new Blob([pdfBytes], { type: 'application/pdf' }),
+            new Blob([bytesToArrayBuffer(pdfBytes)], { type: 'application/pdf' }),
             fileName,
             `reupload:${r.id}:${receiptId}`
           );

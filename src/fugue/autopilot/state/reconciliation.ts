@@ -180,32 +180,56 @@ function reconcileHeartbeat(
   inMemory: HeartbeatState,
   persisted: HeartbeatState | undefined,
 ): DriftEntry {
+  const inMem = inMemory.lastHeartbeatMs;
+  const pers = persisted?.lastHeartbeatMs ?? null;
+
   if (!persisted) {
     return Object.freeze({
       field: 'heartbeat' as const,
-      inMemoryValue: inMemory.lastHeartbeat,
+      inMemoryValue: inMem,
       persistedValue: undefined,
       resolution: 'keep_memory' as const,
       reason: 'no persisted heartbeat',
     });
   }
 
-  if (inMemory.lastHeartbeat === persisted.lastHeartbeat) {
+  if (inMem === pers) {
     return Object.freeze({
       field: 'heartbeat' as const,
-      inMemoryValue: inMemory.lastHeartbeat,
-      persistedValue: persisted.lastHeartbeat,
+      inMemoryValue: inMem,
+      persistedValue: pers,
       resolution: 'no_drift' as const,
-      reason: 'lastHeartbeat matches',
+      reason: 'lastHeartbeatMs matches',
     });
   }
 
-  // More recent heartbeat is authoritative
-  if (persisted.lastHeartbeat > inMemory.lastHeartbeat) {
+  // If one side has never recorded a heartbeat, prefer the side that has one.
+  if (inMem === null && pers !== null) {
     return Object.freeze({
       field: 'heartbeat' as const,
-      inMemoryValue: inMemory.lastHeartbeat,
-      persistedValue: persisted.lastHeartbeat,
+      inMemoryValue: inMem,
+      persistedValue: pers,
+      resolution: 'restore_persisted' as const,
+      reason: 'in-memory heartbeat missing; restoring persisted',
+    });
+  }
+
+  if (pers === null && inMem !== null) {
+    return Object.freeze({
+      field: 'heartbeat' as const,
+      inMemoryValue: inMem,
+      persistedValue: pers,
+      resolution: 'keep_memory' as const,
+      reason: 'persisted heartbeat missing; keeping in-memory',
+    });
+  }
+
+  // Both non-null here.
+  if ((pers as number) > (inMem as number)) {
+    return Object.freeze({
+      field: 'heartbeat' as const,
+      inMemoryValue: inMem,
+      persistedValue: pers,
       resolution: 'restore_persisted' as const,
       reason: 'persisted heartbeat is more recent',
     });
@@ -213,13 +237,12 @@ function reconcileHeartbeat(
 
   return Object.freeze({
     field: 'heartbeat' as const,
-    inMemoryValue: inMemory.lastHeartbeat,
-    persistedValue: persisted.lastHeartbeat,
+    inMemoryValue: inMem,
+    persistedValue: pers,
     resolution: 'keep_memory' as const,
     reason: 'in-memory heartbeat is more recent',
   });
 }
-
 function reconcileCircuitBreaker(
   inMemory: CircuitBreakerState,
   _persisted: CircuitBreakerState | undefined,

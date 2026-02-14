@@ -12,6 +12,8 @@ import type { PolicyContext, PolicyDecision } from '../policy/types';
 import { evaluatePolicy } from '../policy/engine';
 import { DEFAULT_RULES } from '../policy/rules';
 import { BUDGET_STATES, ORIGINS, SUBJECT_TYPES, TRUST_ZONES } from '../types';
+import type { TraceContext, TraceId, SpanId } from '../types/trace';
+import { createTraceContext } from '../utils/trace';
 import type { EffectType } from '../types';
 import type { ToolRequest, ToolResult } from '../executor/types';
 import { ToolResultKind } from '../executor/types';
@@ -162,6 +164,22 @@ export async function processExecutionBatch(
 // Helpers
 // =============================================================================
 
+function coerceTraceContext(value: unknown): TraceContext {
+  const v = value as any;
+  if (v && typeof v === 'object') {
+    const traceId = typeof v.traceId === 'string' ? (v.traceId as TraceId) : null;
+    const spanId = typeof v.spanId === 'string' ? (v.spanId as SpanId) : null;
+    const timestamp = typeof v.timestamp === 'string' ? v.timestamp : null;
+    const parentSpanId = typeof v.parentSpanId === 'string' ? (v.parentSpanId as SpanId) : undefined;
+    if (traceId && spanId && timestamp) {
+      return Object.freeze({ traceId, spanId, timestamp, ...(parentSpanId ? { parentSpanId } : {}) });
+    }
+  }
+
+  // Fail-soft: trace context is for correlation only.
+  return createTraceContext();
+}
+
 function buildToolRequest(task: ExecutionTask): ToolRequest {
   return {
     id: task.payload.requestId,
@@ -170,7 +188,7 @@ function buildToolRequest(task: ExecutionTask): ToolRequest {
     params: task.payload.params,
     effects: task.payload.effects,
     riskTier: task.payload.computedRiskTier,
-    traceContext: task.payload.traceContext,
+    traceContext: coerceTraceContext(task.payload.traceContext),
     attempt: task.retryCount + 1,
     maxAttempts: task.maxRetries + 1,
     requestedAt: new Date(task.createdAt).toISOString(),
@@ -195,7 +213,7 @@ function computeDequeuePolicy(
     riskTier: task.payload.computedRiskTier,
     trustZone: TRUST_ZONES.TRUSTED_CONFIG,
     budgetState,
-    traceContext: task.payload.traceContext,
+    traceContext: coerceTraceContext(task.payload.traceContext),
   };
 
   return evaluatePolicy(policyCtx, DEFAULT_RULES, []);

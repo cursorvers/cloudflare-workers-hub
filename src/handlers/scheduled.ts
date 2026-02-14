@@ -234,7 +234,7 @@ export async function handleScheduled(
 
     case CRON_DAILY_ACTIONS:
       await runJob('daily_actions', () => handleDailyActionCheck(env, withLock));
-      await runJob('receipt_daily_report', () => sendReceiptDailyReport(env));
+      await runJob('receipt_daily_report', async () => { await sendReceiptDailyReport(env); });
       break;
 
     case CRON_WEEKLY_DIGEST:

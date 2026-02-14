@@ -102,7 +102,7 @@ export async function sendTextEmailViaGmailOAuth(args: {
     throw new Error(`Gmail send failed: ${response.status} ${errorText}`);
   }
 
-  const data = await response.json().catch(() => ({}));
+  const data = (await response.json().catch(() => null)) as any;
   if (data && typeof data.id === 'string') {
     return { id: data.id };
   }

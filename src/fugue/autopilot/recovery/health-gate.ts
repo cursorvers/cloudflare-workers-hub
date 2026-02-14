@@ -89,6 +89,14 @@ export function checkHeartbeatFreshness(
   nowMs: number,
   config: HealthGateConfig,
 ): HealthGateCheck {
+  if (heartbeatState.lastHeartbeatMs === null) {
+    return Object.freeze({
+      name: 'heartbeat_freshness',
+      passed: false,
+      reason: 'No heartbeat recorded (recovery not eligible)',
+    });
+  }
+
   const age = nowMs - heartbeatState.lastHeartbeatMs;
   const passed = age <= config.heartbeatMaxAgeMs;
   return Object.freeze({

@@ -19,8 +19,8 @@ function makeExtendedState(mode: string, transitionCount: number) {
   };
 }
 
-function makeHeartbeat(lastHeartbeat: number) {
-  return { lastHeartbeat, count: 1 };
+function makeHeartbeat(lastHeartbeatMs: number | null) {
+  return { lastHeartbeatMs, startedAtMs: 0, consecutiveMisses: 0, totalHeartbeats: 1 };
 }
 
 function makeBudget(spent: number, limit: number, updatedAt: number) {
@@ -112,7 +112,7 @@ describe('Phase 5b: state reconciliation', () => {
 
       expect(result.hasDrift).toBe(true);
       expect(result.repairs).toContain('heartbeat');
-      expect(result.repairedState.heartbeat.lastHeartbeat).toBe(2000);
+      expect(result.repairedState.heartbeat.lastHeartbeatMs).toBe(2000);
     });
 
     it('circuit breaker always keeps in-memory (authoritative)', () => {
@@ -163,7 +163,7 @@ describe('Phase 5b: state reconciliation', () => {
 
       // Should keep all in-memory values
       expect(result.repairedState.extendedState.mode).toBe('NORMAL');
-      expect(result.repairedState.heartbeat.lastHeartbeat).toBe(1000);
+      expect(result.repairedState.heartbeat.lastHeartbeatMs).toBe(1000);
       expect(result.repairedState.budget.spent).toBe(50);
     });
 
