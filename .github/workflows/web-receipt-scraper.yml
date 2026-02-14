@@ -22,6 +22,11 @@ jobs:
   fetch-invoices:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # `inputs` only exists for workflow_dispatch. Guard with event_name for other triggers.
+      SOURCE: ${{ github.event_name == 'workflow_dispatch' && inputs.source || 'all' }}
+      HAS_AWS_CREDS: ${{ secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' }}
+      HAS_GCP_CREDS: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON_PATH != '' && secrets.GCP_BILLING_ACCOUNT_ID != '' }}
 
     steps:
       - name: Checkout code
@@ -39,10 +44,7 @@ jobs:
       # Stripe: API-based fetching (avoids CAPTCHA)
       - name: Fetch Stripe invoices
         id: stripe
-        if: >-
-          github.event.inputs.source == 'stripe' ||
-          github.event.inputs.source == 'all' ||
-          github.event.inputs.source == ''
+        if: ${{ env.SOURCE == 'stripe' || env.SOURCE == 'all' }}
         env:
           STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
           WORKERS_API_URL: ${{ secrets.WORKERS_API_URL }}
@@ -52,12 +54,7 @@ jobs:
 
       # AWS: Cost Explorer API (requires IAM credentials)
       - name: Fetch AWS invoices
-        if: >-
-          (github.event.inputs.source == 'aws' ||
-          github.event.inputs.source == 'all' ||
-          github.event.inputs.source == '') &&
-          secrets.AWS_ACCESS_KEY_ID != '' &&
-          secrets.AWS_SECRET_ACCESS_KEY != ''
+        if: ${{ (env.SOURCE == 'aws' || env.SOURCE == 'all') && env.HAS_AWS_CREDS == 'true' }}
         id: aws
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -71,11 +68,7 @@ jobs:
       # GCP: Cloud Billing API (requires service account)
       - name: Prepare GCP credentials
         id: gcp_creds
-        if: >-
-          (github.event.inputs.source == 'gcp' ||
-          github.event.inputs.source == 'all' ||
-          github.event.inputs.source == '') &&
-          secrets.GCP_SERVICE_ACCOUNT_JSON_PATH != ''
+        if: ${{ (env.SOURCE == 'gcp' || env.SOURCE == 'all') && secrets.GCP_SERVICE_ACCOUNT_JSON_PATH != '' }}
         env:
           GCP_SERVICE_ACCOUNT_JSON_PATH: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON_PATH }}
         run: |
@@ -93,12 +86,7 @@ jobs:
           fi
 
       - name: Fetch GCP invoices
-        if: >-
-          (github.event.inputs.source == 'gcp' ||
-          github.event.inputs.source == 'all' ||
-          github.event.inputs.source == '') &&
-          secrets.GCP_BILLING_ACCOUNT_ID != '' &&
-          secrets.GCP_SERVICE_ACCOUNT_JSON_PATH != ''
+        if: ${{ (env.SOURCE == 'gcp' || env.SOURCE == 'all') && env.HAS_GCP_CREDS == 'true' }}
         id: gcp
         env:
           GCP_BILLING_ACCOUNT_ID: ${{ secrets.GCP_BILLING_ACCOUNT_ID }}
@@ -111,7 +99,7 @@ jobs:
         if: always()
         run: |
           echo "## Web Receipt Scraper" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Source: ${{ github.event.inputs.source || 'all' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Source: ${{ env.SOURCE }}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Step Outcomes" >> "$GITHUB_STEP_SUMMARY"
           echo "- Stripe: ${{ steps.stripe.outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
