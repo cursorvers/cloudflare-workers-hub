@@ -38,6 +38,9 @@ import {
   hasDuplicateHash,
 } from './receipt-poller-utils';
 
+const MAX_TEXT_EVIDENCE_CHARS = 200_000;
+const MAX_PDF_TEXT_CHARS = 120_000;
+
 // ── Internal helpers ─────────────────────────────────────────────────
 
 export function htmlProcessedKey(messageId: string): string {
@@ -54,7 +57,19 @@ export async function processHtmlReceipt(
   metrics: { processed: number; skipped: number; failed: number; dealsCreated: number }
 ): Promise<void> {
   const receiptId = crypto.randomUUID().replace(/-/g, '');
-  const textContent = email.htmlBody.plainText || stripHtmlTags(email.htmlBody.html);
+  const rawTextContent = email.htmlBody.plainText || stripHtmlTags(email.htmlBody.html);
+  const textContent = rawTextContent.length > MAX_TEXT_EVIDENCE_CHARS
+    ? rawTextContent.slice(0, MAX_TEXT_EVIDENCE_CHARS) +
+      `
+
+[TRUNCATED: ${rawTextContent.length - MAX_TEXT_EVIDENCE_CHARS} chars omitted]`
+    : rawTextContent;
+  const pdfTextContent = textContent.length > MAX_PDF_TEXT_CHARS
+    ? textContent.slice(0, MAX_PDF_TEXT_CHARS) +
+      `
+
+[TRUNCATED FOR PDF: ${textContent.length - MAX_PDF_TEXT_CHARS} chars omitted]`
+    : textContent;
   const htmlBytes = new TextEncoder().encode(email.htmlBody.html);
   const fileHash = await calculateSha256(htmlBytes);
   const r2Key = `receipts/${DEFAULT_TENANT_ID}/${receiptId}/receipt.html`;
@@ -304,12 +319,12 @@ export async function processHtmlReceipt(
 
     await workflow.transition('submitting_freee', { fileName: pdfFileName, idempotencyKey });
 
-    const hasCjk = /[　-鿿豈-﫿]/.test(textContent);
+    const hasCjk = /[　-鿿豈-﫿]/.test(pdfTextContent);
     const fontBytes = hasCjk ? await loadCjkFontBytes(env) : null;
 
     let pdfBytes: Uint8Array;
     try {
-      pdfBytes = await convertHtmlReceiptToPdf(textContent, {
+      pdfBytes = await convertHtmlReceiptToPdf(pdfTextContent, {
         subject: email.subject,
         from: email.from,
         date: email.date.toISOString(),
@@ -317,20 +332,51 @@ export async function processHtmlReceipt(
         fontBytes,
       });
     } catch (conversionError) {
-      safeLog.error('[Gmail Poller] HTML→PDF conversion failed', {
-        receiptId,
-        messageId: email.messageId,
-        error: conversionError instanceof Error ? conversionError.message : String(conversionError),
-      });
-      await workflow.recordError(
-        conversionError instanceof Error ? conversionError.message : String(conversionError),
-        'HTML_PDF_CONVERSION_FAILED',
-        { messageId: email.messageId }
-      );
-      // Still mark as processed (R2 + D1 have the receipt) but record failure
-      metrics.processed += 1;
-      return;
+      // If the custom font is invalid/corrupt, retry without it (sanitize-to-ASCII mode).
+      if (fontBytes) {
+        safeLog.warn('[Gmail Poller] HTML→PDF conversion failed with CJK font, retrying without font', {
+          receiptId,
+          messageId: email.messageId,
+          error: conversionError instanceof Error ? conversionError.message : String(conversionError),
+        });
+        try {
+          pdfBytes = await convertHtmlReceiptToPdf(pdfTextContent, {
+            subject: email.subject,
+            from: email.from,
+            date: email.date.toISOString(),
+            receiptId,
+            fontBytes: null,
+          });
+        } catch (fallbackError) {
+          safeLog.error('[Gmail Poller] HTML→PDF conversion failed', {
+            receiptId,
+            messageId: email.messageId,
+            error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+          });
+          await workflow.recordError(
+            fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+            'HTML_PDF_CONVERSION_FAILED',
+            { messageId: email.messageId }
+          );
+          metrics.processed += 1;
+          return;
+        }
+      } else {
+        safeLog.error('[Gmail Poller] HTML→PDF conversion failed', {
+          receiptId,
+          messageId: email.messageId,
+          error: conversionError instanceof Error ? conversionError.message : String(conversionError),
+        });
+        await workflow.recordError(
+          conversionError instanceof Error ? conversionError.message : String(conversionError),
+          'HTML_PDF_CONVERSION_FAILED',
+          { messageId: email.messageId }
+        );
+        metrics.processed += 1;
+        return;
+      }
     }
+
 
     if (hasCjk && !fontBytes) {
       safeLog.warn('[Gmail Poller] HTML receipt contains CJK characters but no CJK font is configured', {
@@ -576,13 +622,32 @@ export async function retryFailedHtmlReceipts(
       const hasCjk = /[　-鿿豈-﫿]/.test(textContent);
       const fontBytes = hasCjk ? await loadCjkFontBytes(env) : null;
 
-      const pdfBytes = await convertHtmlReceiptToPdf(textContent, {
-        subject: `Retry: ${r.vendor_name}`,
-        from: 'retry',
-        date: new Date().toISOString(),
-        receiptId: r.id,
-        fontBytes,
-      });
+      let pdfBytes: Uint8Array;
+      try {
+        pdfBytes = await convertHtmlReceiptToPdf(textContent, {
+          subject: `Retry: ${r.vendor_name}`,
+          from: 'retry',
+          date: new Date().toISOString(),
+          receiptId: r.id,
+          fontBytes,
+        });
+      } catch (conversionError) {
+        if (fontBytes) {
+          safeLog.warn('[Gmail Poller] HTML retry conversion failed with CJK font, retrying without font', {
+            receiptId: r.id,
+            error: conversionError instanceof Error ? conversionError.message : String(conversionError),
+          });
+          pdfBytes = await convertHtmlReceiptToPdf(textContent, {
+            subject: `Retry: ${r.vendor_name}`,
+            from: 'retry',
+            date: new Date().toISOString(),
+            receiptId: r.id,
+            fontBytes: null,
+          });
+        } else {
+          throw conversionError;
+        }
+      }
 
       if (hasCjk && !fontBytes) {
         safeLog.warn('[Gmail Poller] HTML retry contains CJK but no CJK font is configured', {
