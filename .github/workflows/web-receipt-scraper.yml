@@ -26,6 +26,7 @@ jobs:
       # `inputs` only exists for workflow_dispatch. Guard with event_name for other triggers.
       SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.source || 'all' }}
       HAS_AWS_CREDS: ${{ secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' }}
+      HAS_GCP_SA_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON_PATH != '' }}
       HAS_GCP_CREDS: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON_PATH != '' && secrets.GCP_BILLING_ACCOUNT_ID != '' }}
 
     steps:
@@ -68,7 +69,7 @@ jobs:
       # GCP: Cloud Billing API (requires service account)
       - name: Prepare GCP credentials
         id: gcp_creds
-        if: ${{ (env.SOURCE == 'gcp' || env.SOURCE == 'all') && secrets.GCP_SERVICE_ACCOUNT_JSON_PATH != '' }}
+        if: ${{ (env.SOURCE == 'gcp' || env.SOURCE == 'all') && env.HAS_GCP_SA_JSON == 'true' }}
         env:
           GCP_SERVICE_ACCOUNT_JSON_PATH: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON_PATH }}
         run: |
