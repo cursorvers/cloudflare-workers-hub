@@ -935,6 +935,12 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
 		  }
 		}
 
+		// Gmail OAuth verification (public): refresh token + tokeninfo scope check.
+		if (path === '/api/gmail/verify-public' && request.method === 'GET') {
+		  const { verifyGmailOAuthPublic } = await import('./handlers/gmail-verify');
+		  return verifyGmailOAuthPublic(env);
+		}
+
 // Manual Gmail polling trigger (admin only)
     if (path === '/api/receipts/poll' && request.method === 'POST') {
       const { verifyAPIKey } = await import('./utils/api-auth');
