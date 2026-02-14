@@ -109,6 +109,8 @@ export interface Env {
   SCHEDULED_GMAIL_ONLY?: string;   // "true" to run only Gmail polling in hourly cron (production-safe)
   GMAIL_HTML_RECEIPTS_ENABLED?: string;  // "true" to also fetch HTML email receipts (no PDF attachment)
   GMAIL_HTML_RECEIPT_SENDERS?: string;   // Comma-separated sender allowlist for HTML receipts
+  GMAIL_RECEIPT_KEYWORD_SCOPE?: string; // 'subject' (default) | 'full_text'
+  GMAIL_HTML_RECEIPT_KEYWORD_SCOPE?: string; // 'subject' (default) | 'full_text'
   PDF_CJK_FONT_R2_KEY?: string;   // R2 object key for a CJK-capable font for HTML→PDF evidence (optional)
   RECEIPT_LINK_WATCHDOG_ENABLED?: string; // "false" to disable periodic freee receipt↔deal link repair
   RECEIPT_DAILY_REPORT_ENABLED?: string; // "true" to send daily email report for foreign-currency/manual backlog

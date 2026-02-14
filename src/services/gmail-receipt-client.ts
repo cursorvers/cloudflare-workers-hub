@@ -514,17 +514,17 @@ export async function fetchReceiptEmails(
     maxResults?: number;
     newerThan?: string; // e.g., "1d", "2h"
     shouldDownloadAttachment?: ShouldDownloadAttachment;
+    keywordScope?: 'subject' | 'full_text';
   } = {}
 ): Promise<GmailReceiptEmail[]> {
   const { clientId, clientSecret, refreshToken } = config;
-  const { query: customQuery, maxResults = 10, newerThan = '2h', shouldDownloadAttachment } = options;
+  const { query: customQuery, maxResults = 10, newerThan = '2h', shouldDownloadAttachment, keywordScope = 'subject' } = options;
 
   // Refresh access token
   const accessToken = await refreshAccessToken(clientId, clientSecret, refreshToken);
 
   // Build search queries
-  // Goal: pick up receipts when related JP/EN keywords appear anywhere (subject/body),
-  // not only in the subject line. Prefer false positives over false negatives.
+  // Default is subject-only (higher precision). full_text also searches body (higher recall).
   const senderFilter = '(from:billing@cloudflare.com OR from:noreply@github.com OR from:receipts@stripe.com OR from:invoices@stripe.com OR from:noreply@google.com OR from:noreply@anthropic.com OR from:noreply@x.ai OR from:noreply@vercel.com OR from:billing@heroku.com OR from:aws-billing@amazon.com OR from:cloud-noreply@google.com)';
   const negativeFilter = '-in:spam -in:trash';
 
@@ -532,7 +532,8 @@ export async function fetchReceiptEmails(
     const t = String(kw || '').trim();
     const stripped = t.replace(/"/g, '');
     const needsQuote = stripped.includes(' ') || /[^a-zA-Z0-9_-]/.test(stripped);
-    return needsQuote ? `"${stripped}"` : stripped;
+    const term = needsQuote ? `"${stripped}"` : stripped;
+    return keywordScope === 'subject' ? `subject:${term}` : term;
   };
 
   let messageRefs: Array<{ id: string; threadId: string }> = [];
@@ -655,7 +656,7 @@ const RECEIPT_SUBJECT_KEYWORDS = [
 
 /**
  * Fetch recent HTML receipt emails (no PDF attachment required).
- * Uses broad keyword matching across subject/body — prefers over-capture.
+ * Uses broad keyword matching (configurable: subject-only by default).
  * Excludes emails that already have PDF attachments (handled by fetchReceiptEmails).
  *
  * @param config - OAuth credentials
@@ -672,10 +673,11 @@ export async function fetchHtmlReceiptEmails(
     senderAllowlist?: string[];   // Optional: if provided, also match these senders
     maxResults?: number;
     newerThan?: string;
+    keywordScope?: 'subject' | 'full_text';
   } = {}
 ): Promise<GmailHtmlReceiptEmail[]> {
   const { clientId, clientSecret, refreshToken } = config;
-  const { senderAllowlist = [], maxResults = 10, newerThan = '2h' } = options;
+  const { senderAllowlist = [], maxResults = 10, newerThan = '2h', keywordScope = 'subject' } = options;
 
   const accessToken = await refreshAccessToken(clientId, clientSecret, refreshToken);
 
@@ -689,7 +691,8 @@ export async function fetchHtmlReceiptEmails(
     const t = String(kw || '').trim();
     const stripped = t.replace(/"/g, '');
     const needsQuote = stripped.includes(' ') || /[^a-zA-Z0-9_-]/.test(stripped);
-    return needsQuote ? `"${stripped}"` : stripped;
+    const term = needsQuote ? `"${stripped}"` : stripped;
+    return keywordScope === 'subject' ? `subject:${term}` : term;
   };
 
   const keywordClauses = RECEIPT_SUBJECT_KEYWORDS.map(buildKeywordClause);

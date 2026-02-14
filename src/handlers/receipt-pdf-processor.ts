@@ -104,6 +104,7 @@ export async function fetchReceiptEmailsWithRetry(
     newerThan?: string;
     shouldDownloadAttachment?: ShouldDownloadAttachment;
     refreshToken?: string;
+    keywordScope?: 'subject' | 'full_text';
   } = {}
 ): Promise<GmailReceiptEmail[]> {
   const refreshToken = options.refreshToken || env.GMAIL_REFRESH_TOKEN;

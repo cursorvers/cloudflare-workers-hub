@@ -141,6 +141,7 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
     try {
       emails = await fetchReceiptEmailsWithRetry(env, {
         maxResults: MAX_RESULTS,
+        keywordScope: env.GMAIL_RECEIPT_KEYWORD_SCOPE === 'full_text' ? 'full_text' : 'subject',
         newerThan: '24h',
         refreshToken: gmailRefreshToken,
         ...buildShouldDownload(),
@@ -153,6 +154,7 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
       try {
         emails = await fetchReceiptEmailsWithRetry(env, {
           maxResults: MAX_RESULTS,
+          keywordScope: env.GMAIL_RECEIPT_KEYWORD_SCOPE === 'full_text' ? 'full_text' : 'subject',
           newerThan: '24h',
           ...buildShouldDownload(),
         });
@@ -186,7 +188,7 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
       }
     }
 
-    // Phase 2: HTML receipt polling (feature-flagged, subject-keyword matching)
+    // Phase 2: HTML receipt polling (feature-flagged, keyword matching)
     let htmlMetrics = { processed: 0, skipped: 0, failed: 0 };
     if (env.GMAIL_HTML_RECEIPTS_ENABLED === 'true') {
       // Optional sender allowlist (additive, not restrictive)
@@ -207,6 +209,7 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
             senderAllowlist: senderAllowlist.length > 0 ? senderAllowlist : undefined,
             maxResults: 10,
             newerThan: '24h',
+            keywordScope: env.GMAIL_HTML_RECEIPT_KEYWORD_SCOPE === 'full_text' ? 'full_text' : 'subject',
           }
         );
         safeLog.info('[Gmail Poller] HTML emails found', {
