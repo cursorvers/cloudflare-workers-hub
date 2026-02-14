@@ -23,6 +23,7 @@ import type { ReceiptInput } from '../services/freee-deal-service';
 import { createStateMachine } from '../services/workflow-state-machine';
 import { CONFIDENCE } from '../config/confidence-thresholds';
 import { convertHtmlReceiptToPdf } from '../services/html-to-pdf-converter';
+import { loadCjkFontBytes } from '../services/pdf-font-loader';
 import { backupToGoogleDrive, type FreeeReceiptBackup } from '../services/google-drive-backup';
 
 import {
@@ -57,6 +58,8 @@ export async function processHtmlReceipt(
   const htmlBytes = new TextEncoder().encode(email.htmlBody.html);
   const fileHash = await calculateSha256(htmlBytes);
   const r2Key = `receipts/${DEFAULT_TENANT_ID}/${receiptId}/receipt.html`;
+  const r2KeyTxt = `receipts/${DEFAULT_TENANT_ID}/${receiptId}/receipt.txt`;
+  const txtBytes = new TextEncoder().encode(textContent);
   const retentionUntil = addYears(new Date(), RETENTION_YEARS);
 
   // Dedup by content hash
@@ -236,27 +239,63 @@ export async function processHtmlReceipt(
 
     await workflow.transition('uploaded_r2', { r2Key, size: htmlBytes.byteLength });
 
-    // External references → needs_review (skip freee upload for MVP)
+    // Also store a plain-text variant for human review (Obsidian-friendly).
+    try {
+      await bucket.put(r2KeyTxt, txtBytes, {
+        httpMetadata: {
+          contentType: 'text/plain; charset=utf-8',
+          contentDisposition: 'attachment; filename="receipt.txt"',
+        },
+        customMetadata: {
+          fileHash,
+          messageId: email.messageId,
+          retentionUntil,
+          tenantId: DEFAULT_TENANT_ID,
+          worm: 'true',
+          derivedFrom: 'receipt.html',
+        },
+        onlyIf: { etagDoesNotMatch: '*' },
+      });
+    } catch (txtError) {
+      safeLog.warn('[Gmail Poller] Failed to store receipt.txt (continuing)', {
+        receiptId,
+        messageId: email.messageId,
+        error: txtError instanceof Error ? txtError.message : String(txtError),
+      });
+    }
+
+    // External references: keep processing (text-PDF evidence), but mark needs_review for manual verification.
     if (email.htmlBody.hasExternalReferences) {
-      safeLog.info('[Gmail Poller] HTML receipt has external references, marking needs_review', {
+      safeLog.info('[Gmail Poller] HTML receipt has external references (continuing, needs_review)', {
         receiptId,
         externalRefTypes: email.htmlBody.externalRefTypes,
       });
+
+      // Mark review-needed without bumping retry_count.
       try {
-        await workflow.recordError(
-          'HTML has external references - needs manual review',
-          'HTML_EXTERNAL_REFERENCES',
-          { externalRefTypes: email.htmlBody.externalRefTypes }
-        );
+        await env.DB!.prepare(
+          `UPDATE receipts
+           SET status = 'needs_review',
+               error_code = 'HTML_EXTERNAL_REFERENCES',
+               error_message = ?,
+               updated_at = datetime('now')
+           WHERE id = ?`
+        ).bind(
+          `HTML has external references (${(email.htmlBody.externalRefTypes || []).join(',')})`,
+          receiptId
+        ).run();
       } catch {
         // best-effort
       }
-      await workflow.transition('needs_review', {
-        reason: 'HTML has external references - needs manual review',
-        externalRefTypes: email.htmlBody.externalRefTypes,
-      });
-      metrics.processed += 1;
-      return;
+
+      try {
+        await workflow.transition('needs_review', {
+          reason: 'HTML has external references - needs manual verification',
+          externalRefTypes: email.htmlBody.externalRefTypes,
+        });
+      } catch {
+        // best-effort
+      }
     }
 
     // Convert HTML → PDF for freee File Box upload (freee only accepts PDF/image/Excel/Word/CSV)
@@ -265,6 +304,9 @@ export async function processHtmlReceipt(
 
     await workflow.transition('submitting_freee', { fileName: pdfFileName, idempotencyKey });
 
+    const hasCjk = /[　-鿿豈-﫿]/.test(textContent);
+    const fontBytes = hasCjk ? await loadCjkFontBytes(env) : null;
+
     let pdfBytes: Uint8Array;
     try {
       pdfBytes = await convertHtmlReceiptToPdf(textContent, {
@@ -272,6 +314,7 @@ export async function processHtmlReceipt(
         from: email.from,
         date: email.date.toISOString(),
         receiptId,
+        fontBytes,
       });
     } catch (conversionError) {
       safeLog.error('[Gmail Poller] HTML→PDF conversion failed', {
@@ -289,15 +332,11 @@ export async function processHtmlReceipt(
       return;
     }
 
-    // CJK limitation: pdf-lib standard fonts cannot render Japanese/Chinese/Korean.
-    // Non-WinAnsi characters are replaced with '?'. Amount/date/English vendor names are preserved.
-    // TODO: Embed NotoSansJP subset font for full CJK support.
-    const hasCjk = /[\u3000-\u9FFF\uF900-\uFAFF]/.test(textContent);
-    if (hasCjk) {
-      safeLog.warn('[Gmail Poller] HTML receipt contains CJK characters (rendered as ? in PDF)', {
+    if (hasCjk && !fontBytes) {
+      safeLog.warn('[Gmail Poller] HTML receipt contains CJK characters but no CJK font is configured', {
         receiptId,
         messageId: email.messageId,
-        note: 'PDF uses standard fonts only. CJK text is replaced with ?. Metadata in D1 retains original text.',
+        note: 'Set PDF_CJK_FONT_R2_KEY to render Japanese correctly in generated PDFs. Evidence text is still stored as receipt.txt in R2.',
       });
     }
 
@@ -534,12 +573,23 @@ export async function retryFailedHtmlReceipts(
         // best-effort
       }
 
+      const hasCjk = /[　-鿿豈-﫿]/.test(textContent);
+      const fontBytes = hasCjk ? await loadCjkFontBytes(env) : null;
+
       const pdfBytes = await convertHtmlReceiptToPdf(textContent, {
         subject: `Retry: ${r.vendor_name}`,
         from: 'retry',
         date: new Date().toISOString(),
         receiptId: r.id,
+        fontBytes,
       });
+
+      if (hasCjk && !fontBytes) {
+        safeLog.warn('[Gmail Poller] HTML retry contains CJK but no CJK font is configured', {
+          receiptId: r.id,
+          note: 'Set PDF_CJK_FONT_R2_KEY to render Japanese correctly in generated PDFs.',
+        });
+      }
 
       const idempotencyKey = `gmail:html:retry:${r.id}`;
       const pdfFileName = `receipt-${r.id}.pdf`;

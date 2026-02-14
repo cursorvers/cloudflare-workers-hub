@@ -66,10 +66,37 @@ const baseReceipt = {
 };
 
 function setup() {
-  const requestMock = vi
-    .fn()
-    .mockResolvedValueOnce({ deal: { id: 101 } })
-    .mockResolvedValueOnce({ receipt: { id: 555 } });
+  let createdDealPayload: any = null;
+  const requestMock = vi.fn(async (method: string, path: string, body?: any) => {
+    if (method === 'POST' && path === '/deals') {
+      createdDealPayload = body;
+      return { deal: { id: 101 } };
+    }
+    if (method === 'GET' && path === '/deals/101?company_id=123') {
+      return {
+        deal: {
+          id: 101,
+          issue_date: createdDealPayload?.issue_date ?? '2024-01-01',
+          type: createdDealPayload?.type ?? 'expense',
+          partner_id: createdDealPayload?.partner_id ?? 10,
+          partner_code: createdDealPayload?.partner_code,
+          ref_number: createdDealPayload?.ref_number,
+          due_date: createdDealPayload?.due_date,
+          details: Array.isArray(createdDealPayload?.details)
+            ? createdDealPayload.details.map((d: any, i: number) => ({
+                id: 5000 + i + 1,
+                ...d,
+              }))
+            : [],
+          receipts: [],
+        },
+      };
+    }
+    if (method === 'PUT' && path === '/deals/101?company_id=123') {
+      return { deal: { id: 101, receipts: [{ id: 555 }] } };
+    }
+    throw new Error(`Unexpected freee request in test: ${method} ${path}`);
+  });
 
   vi.mocked(createFreeeClient).mockReturnValue({
     request: requestMock,
@@ -113,7 +140,6 @@ describe('buildIdempotencyKey (via createDealFromReceipt)', () => {
 
     expect(requestMock).toHaveBeenCalled();
     expect(requestMock.mock.calls[0][3]).toBe('tenant-abc:hash-123');
-    expect(requestMock.mock.calls[1][3]).toBe('tenant-abc:hash-123');
   });
 
   it('defaults tenant_id to "default" when absent', async () => {
@@ -125,7 +151,6 @@ describe('buildIdempotencyKey (via createDealFromReceipt)', () => {
     } as any);
 
     expect(requestMock.mock.calls[0][3]).toBe('default:hash-123');
-    expect(requestMock.mock.calls[1][3]).toBe('default:hash-123');
   });
 
   it('falls back to receipt id when file_hash is absent', async () => {
@@ -138,7 +163,6 @@ describe('buildIdempotencyKey (via createDealFromReceipt)', () => {
     } as any);
 
     expect(requestMock.mock.calls[0][3]).toBe('tenant-xyz:receipt-1');
-    expect(requestMock.mock.calls[1][3]).toBe('tenant-xyz:receipt-1');
   });
 
   it('throws when both file_hash and receipt id are absent', async () => {
@@ -303,7 +327,7 @@ describe('createDealFromReceipt - happy path full flow', () => {
       })
     );
 
-    expect(requestMock).toHaveBeenCalledTimes(2);
+    expect(requestMock).toHaveBeenCalledTimes(3);
     expect(requestMock.mock.calls[0][0]).toBe('POST');
     expect(requestMock.mock.calls[0][1]).toBe('/deals');
     expect(requestMock.mock.calls[0][2]).toEqual({
@@ -320,13 +344,13 @@ describe('createDealFromReceipt - happy path full flow', () => {
         },
       ],
     });
-
-    expect(requestMock.mock.calls[1][0]).toBe('PUT');
-    expect(requestMock.mock.calls[1][1]).toBe('/receipts/555');
-    expect(requestMock.mock.calls[1][2]).toEqual({
-      company_id: 123,
-      deal_id: 101,
-    });
+    expect(requestMock.mock.calls[1][0]).toBe('GET');
+    expect(requestMock.mock.calls[1][1]).toBe('/deals/101?company_id=123');
+    expect(requestMock.mock.calls[2][0]).toBe('PUT');
+    expect(requestMock.mock.calls[2][1]).toBe('/deals/101?company_id=123');
+    expect(requestMock.mock.calls[2][2]).toEqual(
+      expect.objectContaining({ company_id: 123, receipt_ids: [555] })
+    );
 
     expect(env.DB.prepare).toHaveBeenCalledTimes(2);
     expect(env.DB.prepare.mock.calls[0][0]).toContain(
@@ -342,7 +366,7 @@ describe('createDealFromReceipt - happy path full flow', () => {
       1,
       'created',
       'default:hash-123',
-      555
+      '555'
     );
     expect(insertStmt.run).toHaveBeenCalled();
   });
@@ -380,7 +404,7 @@ describe('createDealFromReceipt - happy path full flow', () => {
 });
 
 describe('createDealFromReceipt - error handling and edge cases', () => {
-  it('throws when freee_receipt_id is missing (after deal creation)', async () => {
+  it('throws when freee_receipt_id is missing (before deal creation)', async () => {
     const { env, requestMock } = setup();
 
     await expect(
@@ -390,8 +414,102 @@ describe('createDealFromReceipt - error handling and edge cases', () => {
       } as any)
     ).rejects.toThrow('freee receipt id is required to link deals');
 
-    expect(requestMock).toHaveBeenCalledTimes(1);
-    expect(requestMock.mock.calls[0][1]).toBe('/deals');
+    expect(requestMock).toHaveBeenCalledTimes(0);
+    expect(env.DB.prepare).toHaveBeenCalledTimes(0);
+  });
+
+  it('re-links existing deal when retry_link_if_existing is true', async () => {
+    const selectStmt: MockDbStatement = {
+      bind: vi.fn().mockReturnThis(),
+      first: vi.fn().mockResolvedValue({
+        deal_id: 9002,
+        partner_id: 77,
+        mapping_confidence: 0.9,
+        status: 'needs_review',
+      }),
+      run: vi.fn(),
+    } as any;
+    const upsertStmt: MockDbStatement = {
+      bind: vi.fn().mockReturnThis(),
+      first: vi.fn(),
+      run: vi.fn().mockResolvedValue({}),
+    } as any;
+
+    const env = {
+      DB: {
+        prepare: vi.fn((sql: string) => {
+          if (sql.startsWith('SELECT deal_id')) return selectStmt;
+          if (sql.includes('INSERT INTO receipt_deals')) return upsertStmt;
+          throw new Error(`Unexpected SQL in test: ${sql}`);
+        }),
+      },
+    } as any;
+
+    const requestMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        deal: {
+          id: 9002,
+          issue_date: '2024-01-01',
+          type: 'expense',
+          partner_id: 77,
+          details: [
+            {
+              id: 5001,
+              account_item_id: 1,
+              tax_code: 2,
+              amount: 1200,
+            },
+          ],
+          receipts: [],
+        },
+      })
+      .mockResolvedValueOnce({
+        deal: {
+          id: 9002,
+          receipts: [{ id: 555 }],
+        },
+      });
+    vi.mocked(createFreeeClient).mockReturnValue({
+      request: requestMock,
+      getCompanyId: vi.fn().mockResolvedValue('123'),
+    } as any);
+
+    const result = await createDealFromReceipt(env, {
+      ...baseReceipt,
+      retry_link_if_existing: true,
+    } as any);
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        dealId: 9002,
+        partnerId: 77,
+        mappingConfidence: 0.9,
+        status: 'needs_review',
+      })
+    );
+    expect(requestMock).toHaveBeenCalledTimes(2);
+    expect(requestMock.mock.calls[0][0]).toBe('GET');
+    expect(requestMock.mock.calls[0][1]).toBe('/deals/9002?company_id=123');
+    expect(requestMock.mock.calls[1][0]).toBe('PUT');
+    expect(requestMock.mock.calls[1][1]).toBe('/deals/9002?company_id=123');
+    expect(requestMock.mock.calls[1][2]).toEqual(
+      expect.objectContaining({ company_id: 123, receipt_ids: [555] })
+    );
+    expect(upsertStmt.run).toHaveBeenCalled();
+    expect(vi.mocked(getAccountItems)).not.toHaveBeenCalled();
+    expect(vi.mocked(selectAccountItemForReceipt)).not.toHaveBeenCalled();
+  });
+
+  it('throws when freee_receipt_id is not a positive integer', async () => {
+    const { env } = setup();
+
+    await expect(
+      createDealFromReceipt(env, {
+        ...baseReceipt,
+        freee_receipt_id: 'abc',
+      } as any)
+    ).rejects.toThrow('freee receipt id must be a positive integer');
   });
 
   it('does not require FREEE_COMPANY_ID env var when getCompanyId is available', async () => {

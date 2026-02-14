@@ -708,7 +708,7 @@ export class FreeeClient {
 
     await this.request<FreeeDealResult>(
       'PUT',
-      `/deals/${dealId}`,
+      `/deals/${dealId}?company_id=${companyId}`,
       payload
     );
 

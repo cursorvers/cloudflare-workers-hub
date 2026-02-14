@@ -30,6 +30,7 @@ import {
   type PdfTextMetrics,
 } from './receipt-pdf-processor';
 import { processHtmlReceipt, htmlProcessedKey, retryFailedHtmlReceipts } from './receipt-html-processor';
+import { runReceiptLinkWatchdog } from './receipt-link-watchdog';
 
 // Re-export for backward compatibility (tests import from this module)
 export { buildClassificationText } from './receipt-pdf-processor';
@@ -361,6 +362,20 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
       }
     }
 
+
+    // Best-effort: ensure evidence is actually attached on freee deals (idempotent).
+    if (env.RECEIPT_LINK_WATCHDOG_ENABLED !== 'false') {
+      try {
+        const res = await runReceiptLinkWatchdog(env, { limit: 12, days: 7 });
+        if (res.scanned > 0) {
+          safeLog.info('[Gmail Poller] Receipt link watchdog completed', res);
+        }
+      } catch (watchError) {
+        safeLog.warn('[Gmail Poller] Receipt link watchdog failed (continuing)', {
+          error: watchError instanceof Error ? watchError.message : String(watchError),
+        });
+      }
+    }
     // ── Periodic audit: detect non-receipt leaks & data quality issues ──
     const auditAlerts: string[] = [];
     try {

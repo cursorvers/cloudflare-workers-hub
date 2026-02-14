@@ -311,7 +311,7 @@ async function linkReceiptToDeal(
 
   await freeeClient.request<DealApiResponse>(
     'PUT',
-    `/deals/${dealId}`,
+    `/deals/${dealId}?company_id=${companyId}`,
     updatePayload,
     idempotencyKey
   );
@@ -518,18 +518,7 @@ export async function createDealFromReceipt(
   // - MIN_AUTO_HIGH_AMOUNT (0.70): high-value safety gate
   const dealDecision = decideDealStatus(overallConfidence, receipt.amount, selection.scoreGap);
 
-  if (dealDecision === 'skip') {
-    return {
-      dealId: null,
-      partnerId: null,
-      mappingConfidence,
-      status: 'needs_review',
-      accountItemId: selection.accountItemId,
-      taxCode: selection.taxCode,
-      mappingMethod: selection.mappingMethod,
-      selectionProvider: selection.provider,
-    };
-  }
+  const forceNeedsReview = dealDecision === 'skip';
 
   const partnerName = receipt.vendor_name.trim() || 'Unknown';
   const partner = await resolvePartner(env, accessToken, partnerName);
@@ -557,7 +546,9 @@ export async function createDealFromReceipt(
   );
 
   const dealId = dealResponse.deal.id;
-  let status = decideStatus(overallConfidence, receipt.amount, selection.scoreGap);
+  let status = forceNeedsReview
+    ? 'needs_review'
+    : decideStatus(overallConfidence, receipt.amount, selection.scoreGap);
 
   // Persist deal mapping BEFORE receipt-link API call to avoid duplicate deal creation on retry.
   await recordDealLink(env, {

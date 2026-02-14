@@ -2,13 +2,15 @@
  * HTML to PDF Converter
  *
  * Converts HTML receipt text content to a PDF file using pdf-lib.
- * Designed for Cloudflare Workers (pure JS, no native deps).
+ * Designed for Cloudflare Workers (pure JS, no headless browser).
  *
- * The PDF is a text-based document (not a visual HTML render),
- * sufficient for freee File Box which accepts PDF uploads.
+ * The PDF is text-based (not a visual HTML render). This is sufficient as
+ * an evidence attachment for freee File Box when the original receipt is an
+ * HTML email body.
  */
 
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
 
 // ── Configuration ────────────────────────────────────────────────────
 
@@ -28,6 +30,11 @@ export interface HtmlToPdfOptions {
   readonly from?: string;
   readonly date?: string;
   readonly receiptId?: string;
+  /**
+   * Optional font bytes for CJK (Japanese) support.
+   * If provided, text is NOT sanitized and the font is embedded (subset).
+   */
+  readonly fontBytes?: Uint8Array | null;
 }
 
 // ── Main conversion function ─────────────────────────────────────────
@@ -37,31 +44,36 @@ export async function convertHtmlReceiptToPdf(
   options: HtmlToPdfOptions = {}
 ): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
-  const font = await doc.embedFont(StandardFonts.Helvetica);
-  const boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
+
+  const useCustomFont = options.fontBytes && options.fontBytes.byteLength > 0;
+  if (useCustomFont) {
+    // Enables embedding and subsetting for custom fonts.
+    doc.registerFontkit(fontkit);
+  }
+
+  const font = useCustomFont
+    ? await doc.embedFont(options.fontBytes!, { subset: true })
+    : await doc.embedFont(StandardFonts.Helvetica);
+
+  // We don't have a bold variant for arbitrary custom fonts; keep header readable via size.
+  const headerFont = useCustomFont
+    ? font
+    : await doc.embedFont(StandardFonts.HelveticaBold);
 
   // Build header lines
   const headerLines: string[] = [];
-  if (options.subject) {
-    headerLines.push(`Subject: ${options.subject}`);
-  }
-  if (options.from) {
-    headerLines.push(`From: ${options.from}`);
-  }
-  if (options.date) {
-    headerLines.push(`Date: ${options.date}`);
-  }
-  if (headerLines.length > 0) {
-    headerLines.push(''); // blank separator
-  }
+  if (options.subject) headerLines.push(`Subject: ${options.subject}`);
+  if (options.from) headerLines.push(`From: ${options.from}`);
+  if (options.date) headerLines.push(`Date: ${options.date}`);
+  if (headerLines.length > 0) headerLines.push('');
 
-  // Wrap text into lines that fit within page width
-  const bodyLines = wrapText(textContent, font, FONT_SIZE, MAX_LINE_WIDTH);
+  const sanitize = !useCustomFont;
+  const bodyLines = wrapText(textContent, font, FONT_SIZE, MAX_LINE_WIDTH, sanitize);
   const allLines = [...headerLines, ...bodyLines];
 
   // Paginate
   const usableHeight = PAGE_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM;
-  const linesPerPage = Math.floor(usableHeight / LINE_HEIGHT);
+  const linesPerPage = Math.max(1, Math.floor(usableHeight / LINE_HEIGHT));
 
   for (let offset = 0; offset < allLines.length; offset += linesPerPage) {
     const pageLines = allLines.slice(offset, offset + linesPerPage);
@@ -74,11 +86,11 @@ export async function convertHtmlReceiptToPdf(
       const lineIndex = offset + i;
       const isHeader = lineIndex < headerLines.length && line.length > 0;
 
-      page.drawText(sanitizeForPdf(line), {
+      page.drawText(sanitizeForPdf(line, sanitize), {
         x: MARGIN_LEFT,
         y,
         size: isHeader ? HEADER_FONT_SIZE : FONT_SIZE,
-        font: isHeader ? boldFont : font,
+        font: isHeader ? headerFont : font,
         color: rgb(0, 0, 0),
         maxWidth: MAX_LINE_WIDTH,
       });
@@ -93,16 +105,15 @@ export async function convertHtmlReceiptToPdf(
       ? `Receipt: ${options.receiptId} | Page ${pageNum}/${totalPages}`
       : `Page ${pageNum}/${totalPages}`;
 
-    page.drawText(footer, {
+    page.drawText(sanitizeForPdf(footer, true), {
       x: MARGIN_LEFT,
       y: MARGIN_BOTTOM - 20,
       size: 8,
-      font,
+      font: useCustomFont ? font : (font as any),
       color: rgb(0.5, 0.5, 0.5),
     });
   }
 
-  // If no content at all, add one blank page with a note
   if (allLines.length === 0) {
     const page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
     page.drawText('(Empty receipt)', {
@@ -127,7 +138,8 @@ function wrapText(
   text: string,
   font: FontLike,
   fontSize: number,
-  maxWidth: number
+  maxWidth: number,
+  sanitize: boolean
 ): string[] {
   const result: string[] = [];
   const paragraphs = text.split('\n');
@@ -138,12 +150,29 @@ function wrapText(
       continue;
     }
 
+    const hasWhitespace = /\s/.test(paragraph);
+    if (!hasWhitespace) {
+      // CJK/long tokens: break by character.
+      let line = '';
+      for (const ch of Array.from(paragraph)) {
+        const testLine = line + ch;
+        if (measureWidth(font, testLine, fontSize, sanitize) > maxWidth && line.length > 0) {
+          result.push(line);
+          line = ch;
+        } else {
+          line = testLine;
+        }
+      }
+      if (line.length > 0) result.push(line);
+      continue;
+    }
+
     const words = paragraph.split(/\s+/);
     let currentLine = '';
 
     for (const word of words) {
       const testLine = currentLine.length > 0 ? `${currentLine} ${word}` : word;
-      const width = measureWidth(font, testLine, fontSize);
+      const width = measureWidth(font, testLine, fontSize, sanitize);
 
       if (width > maxWidth && currentLine.length > 0) {
         result.push(currentLine);
@@ -161,23 +190,21 @@ function wrapText(
   return result;
 }
 
-function measureWidth(font: FontLike, text: string, fontSize: number): number {
+function measureWidth(font: FontLike, text: string, fontSize: number, sanitize: boolean): number {
   try {
-    return font.widthOfTextAtSize(sanitizeForPdf(text), fontSize);
+    return font.widthOfTextAtSize(sanitizeForPdf(text, sanitize), fontSize);
   } catch {
-    // Fallback: estimate width for characters pdf-lib can't measure
-    return text.length * fontSize * 0.5;
+    // Fallback: conservative estimate
+    return text.length * fontSize * 0.6;
   }
 }
 
 /**
- * Remove characters that pdf-lib's standard fonts cannot encode.
  * Standard PDF fonts (Helvetica etc.) only support WinAnsi (Latin-1).
- * CJK and other non-Latin characters are replaced with a placeholder
- * to prevent encoding errors while keeping the document readable.
+ * When a custom font is NOT provided, replace non-WinAnsi chars with '?'
+ * so pdf-lib won't throw encoding errors.
  */
-function sanitizeForPdf(text: string): string {
-  // Replace characters outside WinAnsi range with '?'
-  // WinAnsi covers: ASCII 0x20-0x7E + Latin-1 Supplement 0xA0-0xFF
+function sanitizeForPdf(text: string, sanitize: boolean): string {
+  if (!sanitize) return text;
   return text.replace(/[^\x20-\x7E\xA0-\xFF]/g, '?');
 }

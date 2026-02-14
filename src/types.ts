@@ -106,6 +106,8 @@ export interface Env {
   SCHEDULED_GMAIL_ONLY?: string;   // "true" to run only Gmail polling in hourly cron (production-safe)
   GMAIL_HTML_RECEIPTS_ENABLED?: string;  // "true" to also fetch HTML email receipts (no PDF attachment)
   GMAIL_HTML_RECEIPT_SENDERS?: string;   // Comma-separated sender allowlist for HTML receipts
+  PDF_CJK_FONT_R2_KEY?: string;   // R2 object key for a CJK-capable font for HTML→PDF evidence (optional)
+  RECEIPT_LINK_WATCHDOG_ENABLED?: string; // "false" to disable periodic freee receipt↔deal link repair
   // JWT Authentication (Cockpit API)
   JWT_SECRET?: string;             // HS256 secret for development
   JWT_PRIVATE_KEY?: string;        // RS256 private key for production
