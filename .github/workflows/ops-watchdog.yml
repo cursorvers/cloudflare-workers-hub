@@ -1,0 +1,53 @@
+name: Ops Watchdog
+
+on:
+  schedule:
+    - cron: '7 * * * *' # hourly, minute=07 to avoid top-of-hour pileups
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ops-watchdog
+  cancel-in-progress: true
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check worker health
+        env:
+          WORKERS_API_URL: ${{ secrets.WORKERS_API_URL }}
+          WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          base_url="${WORKERS_API_URL:-https://orchestrator-hub.masa-stage1.workers.dev}"
+
+          if [ -z "${WORKERS_API_KEY:-}" ]; then
+            echo "## Ops Watchdog" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Base URL: $base_url" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Status: skipped (WORKERS_API_KEY not configured)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          resp="$(curl -fsS -H "X-API-Key: $WORKERS_API_KEY" "$base_url/health?detailed=true")"
+          status="$(echo "$resp" | jq -r '.status // "unknown"')"
+          envName="$(echo "$resp" | jq -r '.environment // "unknown"')"
+
+          echo "## Ops Watchdog" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Base URL: $base_url" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Env: $envName" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Status: $status" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$status" != "healthy" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Response:" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            echo "$resp" | jq '.' >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+

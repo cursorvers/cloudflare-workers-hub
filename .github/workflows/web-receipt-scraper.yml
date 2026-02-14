@@ -11,6 +11,13 @@ on:
         required: false
         default: 'all'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: web-receipt-scraper-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   fetch-invoices:
     runs-on: ubuntu-latest
@@ -31,6 +38,7 @@ jobs:
 
       # Stripe: API-based fetching (avoids CAPTCHA)
       - name: Fetch Stripe invoices
+        id: stripe
         if: >-
           github.event.inputs.source == 'stripe' ||
           github.event.inputs.source == 'all' ||
@@ -48,7 +56,9 @@ jobs:
           (github.event.inputs.source == 'aws' ||
           github.event.inputs.source == 'all' ||
           github.event.inputs.source == '') &&
-          env.AWS_ACCESS_KEY_ID != ''
+          secrets.AWS_ACCESS_KEY_ID != '' &&
+          secrets.AWS_SECRET_ACCESS_KEY != ''
+        id: aws
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -59,14 +69,38 @@ jobs:
         continue-on-error: true
 
       # GCP: Cloud Billing API (requires service account)
+      - name: Prepare GCP credentials
+        id: gcp_creds
+        if: >-
+          (github.event.inputs.source == 'gcp' ||
+          github.event.inputs.source == 'all' ||
+          github.event.inputs.source == '') &&
+          secrets.GCP_SERVICE_ACCOUNT_JSON_PATH != ''
+        env:
+          GCP_SERVICE_ACCOUNT_JSON_PATH: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON_PATH }}
+        run: |
+          set -euo pipefail
+          # Support either:
+          # 1) secret contains JSON content (most common), or
+          # 2) secret contains a runner path to a JSON file (legacy).
+          if [[ "$GCP_SERVICE_ACCOUNT_JSON_PATH" == \{* ]]; then
+            cred_file="$PWD/gcp-service-account.json"
+            printf '%s' "$GCP_SERVICE_ACCOUNT_JSON_PATH" > "$cred_file"
+            chmod 600 "$cred_file"
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$cred_file" >> "$GITHUB_ENV"
+          else
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$GCP_SERVICE_ACCOUNT_JSON_PATH" >> "$GITHUB_ENV"
+          fi
+
       - name: Fetch GCP invoices
         if: >-
           (github.event.inputs.source == 'gcp' ||
           github.event.inputs.source == 'all' ||
           github.event.inputs.source == '') &&
-          env.GCP_BILLING_ACCOUNT_ID != ''
+          secrets.GCP_BILLING_ACCOUNT_ID != '' &&
+          secrets.GCP_SERVICE_ACCOUNT_JSON_PATH != ''
+        id: gcp
         env:
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON_PATH }}
           GCP_BILLING_ACCOUNT_ID: ${{ secrets.GCP_BILLING_ACCOUNT_ID }}
           WORKERS_API_URL: ${{ secrets.WORKERS_API_URL }}
           WORKERS_API_KEY: ${{ secrets.WORKERS_API_KEY }}
@@ -74,4 +108,13 @@ jobs:
         continue-on-error: true
 
       - name: Summary
-        run: echo "Invoice fetching complete. Check individual step logs for results."
+        if: always()
+        run: |
+          echo "## Web Receipt Scraper" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Source: ${{ github.event.inputs.source || 'all' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Step Outcomes" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Stripe: ${{ steps.stripe.outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- AWS: ${{ steps.aws.outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- GCP creds: ${{ steps.gcp_creds.outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- GCP: ${{ steps.gcp.outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
