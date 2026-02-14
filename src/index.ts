@@ -830,6 +830,19 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
       }
     }
 
+
+		// Gmail OAuth (manual start): redirects to Google authorize page.
+		if (path === '/api/gmail/auth') {
+		  const { handleGmailOAuthStart } = await import('./handlers/gmail-oauth');
+		  return handleGmailOAuthStart(request, env);
+		}
+
+		// Gmail OAuth Callback endpoint
+		if (path === '/api/gmail/callback') {
+		  const { handleGmailOAuthCallback } = await import('./handlers/gmail-oauth');
+		  return handleGmailOAuthCallback(request, env);
+		}
+
     // Manual Gmail polling trigger (admin only)
     if (path === '/api/receipts/poll' && request.method === 'POST') {
       const { verifyAPIKey } = await import('./utils/api-auth');

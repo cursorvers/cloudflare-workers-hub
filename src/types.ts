@@ -103,6 +103,9 @@ export interface Env {
   GMAIL_CLIENT_ID?: string;        // Gmail OAuth client ID
   GMAIL_CLIENT_SECRET?: string;    // Gmail OAuth client secret
   GMAIL_REFRESH_TOKEN?: string;    // Gmail OAuth refresh token
+	GMAIL_REDIRECT_URI?: string;     // Gmail OAuth redirect URI (defaults to {origin}/api/gmail/callback)
+	GMAIL_OAUTH_SCOPES?: string;     // Space-separated OAuth scopes for /api/gmail/auth
+	GMAIL_ENCRYPTION_KEY?: string;   // AES-GCM encryption key for Gmail refresh token (optional; falls back to FREEE_ENCRYPTION_KEY)
   SCHEDULED_GMAIL_ONLY?: string;   // "true" to run only Gmail polling in hourly cron (production-safe)
   GMAIL_HTML_RECEIPTS_ENABLED?: string;  // "true" to also fetch HTML email receipts (no PDF attachment)
   GMAIL_HTML_RECEIPT_SENDERS?: string;   // Comma-separated sender allowlist for HTML receipts

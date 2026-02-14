@@ -1,6 +1,7 @@
 import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { sendTextEmailViaGmailOAuth } from '../services/gmail-sender';
+import { resolveGmailRefreshToken } from '../services/gmail-oauth-token-store';
 import { createFreeeClient, type FreeeWalletTxn } from '../services/freee-client';
 import { isFreeeIntegrationEnabled } from '../utils/freee-integration';
 
@@ -111,8 +112,16 @@ export async function sendReceiptDailyReport(env: Env, options?: {
     return { sent: false, foreign: 0, needsReview: 0 };
   }
 
-  if (!env.GMAIL_CLIENT_ID || !env.GMAIL_CLIENT_SECRET || !env.GMAIL_REFRESH_TOKEN) {
+  if (!env.GMAIL_CLIENT_ID || !env.GMAIL_CLIENT_SECRET) {
     safeLog.warn('[ReceiptDailyReport] Gmail credentials not configured, skipping');
+    return { sent: false, foreign: 0, needsReview: 0 };
+  }
+
+  const gmailRefreshToken = await resolveGmailRefreshToken(env);
+  if (!gmailRefreshToken) {
+    safeLog.warn('[ReceiptDailyReport] Gmail refresh token not found (env or D1), skipping', {
+      remediation: '/api/gmail/auth',
+    });
     return { sent: false, foreign: 0, needsReview: 0 };
   }
 
@@ -235,14 +244,47 @@ export async function sendReceiptDailyReport(env: Env, options?: {
   const subject = `freee×Gmail レシート日次レポート (${foreign.length} foreign / ${needsReview.length} review)`;
   const bodyText = lines.join('\n');
 
-  await sendTextEmailViaGmailOAuth({
-    clientId: env.GMAIL_CLIENT_ID,
-    clientSecret: env.GMAIL_CLIENT_SECRET,
-    refreshToken: env.GMAIL_REFRESH_TOKEN,
-    to,
-    subject,
-    bodyText,
-  });
+  // Fail-soft: do not break the pipeline if Gmail send fails (missing scope, quota, etc.).
+  try {
+    await sendTextEmailViaGmailOAuth({
+      clientId: env.GMAIL_CLIENT_ID,
+      clientSecret: env.GMAIL_CLIENT_SECRET,
+      refreshToken: gmailRefreshToken,
+      to,
+      subject,
+      bodyText,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const insufficientScope = /\b403\b/.test(message) && /insufficient|permission|scope/i.test(message);
+    safeLog.warn('[ReceiptDailyReport] Gmail send failed (continuing)', {
+      insufficientScope,
+      error: message.substring(0, 400),
+      remediation: insufficientScope ? '/api/gmail/auth' : undefined,
+    });
+
+    // Optional: Discord alert (throttled) so you notice the broken daily report.
+    if (insufficientScope && env.DISCORD_WEBHOOK_URL && env.CACHE) {
+      try {
+        const key = 'alerts:gmail_send_scope_missing';
+        const already = await env.CACHE.get(key);
+        if (!already) {
+          await fetch(env.DISCORD_WEBHOOK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              content: '[freee×Gmail] Gmail送信スコープ不足で日次レポート送信に失敗しました。対処: /api/gmail/auth',
+            }),
+          });
+          await env.CACHE.put(key, '1', { expirationTtl: 60 * 60 * 6 });
+        }
+      } catch {
+        // best-effort
+      }
+    }
+
+    return { sent: false, foreign: foreign.length, needsReview: needsReview.length };
+  }
 
   safeLog.info('[ReceiptDailyReport] Sent daily report email', {
     foreign: foreign.length,

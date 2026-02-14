@@ -103,12 +103,17 @@ export async function fetchReceiptEmailsWithRetry(
     maxResults?: number;
     newerThan?: string;
     shouldDownloadAttachment?: ShouldDownloadAttachment;
+    refreshToken?: string;
   } = {}
 ): Promise<GmailReceiptEmail[]> {
+  const refreshToken = options.refreshToken || env.GMAIL_REFRESH_TOKEN;
+  if (!refreshToken) {
+    throw new Error('Gmail refresh token not configured');
+  }
   const config = {
     clientId: env.GMAIL_CLIENT_ID!,
     clientSecret: env.GMAIL_CLIENT_SECRET!,
-    refreshToken: env.GMAIL_REFRESH_TOKEN!,
+    refreshToken,
   };
 
   let attempt = 0;

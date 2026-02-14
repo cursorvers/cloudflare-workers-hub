@@ -10,6 +10,7 @@
 
 import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
+import { resolveGmailRefreshToken } from '../services/gmail-oauth-token-store';
 import {
   fetchHtmlReceiptEmails,
   type GmailReceiptEmail,
@@ -83,8 +84,16 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
     return;
   }
 
-  if (!env.GMAIL_CLIENT_ID || !env.GMAIL_CLIENT_SECRET || !env.GMAIL_REFRESH_TOKEN) {
-    safeLog.warn('[Gmail Poller] Gmail credentials not configured, skipping');
+  if (!env.GMAIL_CLIENT_ID || !env.GMAIL_CLIENT_SECRET) {
+    safeLog.warn('[Gmail Poller] Gmail client credentials not configured, skipping');
+    return;
+  }
+
+  const gmailRefreshToken = await resolveGmailRefreshToken(env);
+  if (!gmailRefreshToken) {
+    safeLog.warn('[Gmail Poller] Gmail refresh token not found (env or D1), skipping', {
+      remediation: '/api/gmail/auth',
+    });
     return;
   }
 
@@ -133,6 +142,7 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
       emails = await fetchReceiptEmailsWithRetry(env, {
         maxResults: MAX_RESULTS,
         newerThan: '24h',
+        refreshToken: gmailRefreshToken,
         ...buildShouldDownload(),
       });
     } catch (error) {
@@ -191,7 +201,7 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
           {
             clientId: env.GMAIL_CLIENT_ID!,
             clientSecret: env.GMAIL_CLIENT_SECRET!,
-            refreshToken: env.GMAIL_REFRESH_TOKEN!,
+            refreshToken: gmailRefreshToken,
           },
           {
             senderAllowlist: senderAllowlist.length > 0 ? senderAllowlist : undefined,

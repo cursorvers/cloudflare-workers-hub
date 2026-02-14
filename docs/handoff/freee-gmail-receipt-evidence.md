@@ -54,6 +54,22 @@ WHERE freee_receipt_id IS NOT NULL
 ### 2) 外貨/金額0/分類品質低
 誤爆しやすいので、原則 `needs_review` に倒す。
 
+
+### 3) Gmail送信スコープ不足 (403)
+症状:
+- 日次レポート送信が `Gmail send failed: 403 ...` で失敗する
+- 典型: `GMAIL_REFRESH_TOKEN` が `gmail.send` スコープ無しで発行されている
+
+対処:
+- WorkerのOAuth再認可エンドポイントを踏んで refresh token を取り直す
+  - `GET /api/gmail/auth` → Google同意画面へ
+  - 完了後、refresh token は **D1 (external_oauth_tokens provider='gmail')** に保存され、以後は **D1優先** で利用される
+- 送信が失敗してもパイプライン自体は落とさずログに残してスキップする(フェイルソフト)
+
+注意:
+- Driveバックアップも同じrefresh tokenを使用するため、OAuth同意では `drive.file` も要求する(権限を狭めるとバックアップだけ失敗する可能性あり)
+
+
 ## 運用: 自動回復を止めたい場合
 以下のfeature flagで停止できるようにする(実装側の env var 名はソース参照)。
 

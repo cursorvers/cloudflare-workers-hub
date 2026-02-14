@@ -7,6 +7,7 @@
 
 import { z } from 'zod';
 import type { Env } from '../types';
+import { resolveGmailRefreshToken } from './gmail-oauth-token-store';
 
 // ============================================================================
 // Schemas
@@ -70,6 +71,11 @@ export interface FreeeReceiptBackup {
  * Refresh access token using Gmail OAuth credentials.
  */
 async function refreshAccessToken(env: Env): Promise<string> {
+  const refreshToken = await resolveGmailRefreshToken(env);
+  if (!refreshToken) {
+    throw new Error('Gmail refresh token not configured');
+  }
+
   const response = await fetch(GOOGLE_TOKEN_ENDPOINT, {
     method: 'POST',
     headers: {
@@ -78,7 +84,7 @@ async function refreshAccessToken(env: Env): Promise<string> {
     body: new URLSearchParams({
       client_id: env.GMAIL_CLIENT_ID!,
       client_secret: env.GMAIL_CLIENT_SECRET!,
-      refresh_token: env.GMAIL_REFRESH_TOKEN!,
+      refresh_token: refreshToken,
       grant_type: 'refresh_token',
       scope: DRIVE_SCOPES,
     }).toString(),
@@ -240,7 +246,7 @@ export async function backupToGoogleDrive(
   backup: FreeeReceiptBackup
 ): Promise<{ fileId: string; webViewLink?: string }> {
   // Validate credentials
-  if (!env.GMAIL_CLIENT_ID || !env.GMAIL_CLIENT_SECRET || !env.GMAIL_REFRESH_TOKEN) {
+  if (!env.GMAIL_CLIENT_ID || !env.GMAIL_CLIENT_SECRET) {
     throw new Error('Gmail OAuth credentials not configured');
   }
 
@@ -302,7 +308,7 @@ export async function listRecentBackups(
   env: Env,
   limit: number = 10
 ): Promise<Array<{ id: string; name: string; webViewLink?: string }>> {
-  if (!env.GMAIL_CLIENT_ID || !env.GMAIL_CLIENT_SECRET || !env.GMAIL_REFRESH_TOKEN) {
+  if (!env.GMAIL_CLIENT_ID || !env.GMAIL_CLIENT_SECRET) {
     throw new Error('Gmail OAuth credentials not configured');
   }
 
