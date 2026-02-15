@@ -94,6 +94,13 @@ const SENSITIVE_PATTERNS: Array<{
     description: 'Discord Bot Token',
   },
 
+  // Google API keys (AIza... prefix)
+  {
+    pattern: /\bAIza[0-9A-Za-z\-_]{20,}\b/g,
+    replacement: 'AIza***REDACTED***',
+    description: 'Google API Key',
+  },
+
   // Cloudflare API tokens
   {
     pattern: /\b(CF_[a-zA-Z0-9_]{32,})\b/g,

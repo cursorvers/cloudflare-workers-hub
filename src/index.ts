@@ -1038,8 +1038,15 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
       return handleReceiptList(request, env);
     }
 
-    // Receipt Search API endpoint (Electronic Bookkeeping Law compliant)
+    // Receipt Search API endpoint (Electronic Bookkeeping Law compliant) — admin only
     if (path === '/api/receipts/search' && request.method === 'GET') {
+      const { verifyAPIKey } = await import('./utils/api-auth');
+      if (!verifyAPIKey(request, env, 'admin')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
       return handleReceiptSearch(request, env);
     }
 
@@ -1094,8 +1101,15 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
       return handleReceiptSourcesAPI(request, env, path);
     }
 
-    // Dead Letter Queue API (Failed receipt processing management)
+    // Dead Letter Queue API (Failed receipt processing management) — admin only
     if (path.startsWith('/api/receipts/dlq')) {
+      const { verifyAPIKey } = await import('./utils/api-auth');
+      if (!verifyAPIKey(request, env, 'admin')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
       return handleDLQAPI(request, env, path);
     }
 

@@ -15,6 +15,7 @@
 
 import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
+import { CONFIDENCE } from '../config/confidence-thresholds';
 
 // =============================================================================
 // Types
@@ -63,11 +64,17 @@ function extractAmount(text: string): { amount: number; extracted: boolean } {
     /\$\s*([\d,.]+)/,
   ];
 
+  const detectedCurrency = detectCurrency(text);
+
   for (const pattern of patterns) {
     const match = text.match(pattern);
     if (match) {
       const raw = match[1].replace(/,/g, '');
-      const amount = Math.round(Number.parseFloat(raw));
+      const parsed = Number.parseFloat(raw);
+      // Preserve decimal precision for non-JPY currencies (e.g. $12.34)
+      const amount = detectedCurrency === 'JPY'
+        ? Math.round(parsed)
+        : Math.round(parsed * 100) / 100;
       if (Number.isFinite(amount) && amount > 0) {
         return { amount, extracted: true };
       }
@@ -289,9 +296,14 @@ ${JSON.stringify(promptMetadata, null, 2)}
   // Parse AI response
   let aiResult: any;
   try {
-    // Extract JSON from markdown code blocks if present
-    const jsonMatch = response.response?.match(/```json\n([\s\S]*?)\n```/);
-    const jsonStr = jsonMatch ? jsonMatch[1] : response.response;
+    // Extract JSON from markdown code blocks if present (tolerant: case-insensitive, optional newlines, CRLF)
+    const jsonMatch = response.response?.match(/```(?:json|JSON)?\s*([\s\S]*?)\s*```/);
+    let jsonStr = jsonMatch ? jsonMatch[1] : response.response;
+    // Fallback: extract first { ... } block if no code block matched
+    if (!jsonStr || jsonStr.trim()[0] !== '{') {
+      const braceMatch = response.response?.match(/\{[\s\S]*\}/);
+      if (braceMatch) jsonStr = braceMatch[0];
+    }
     aiResult = JSON.parse(jsonStr || '{}');
   } catch (error) {
     safeLog(env, 'error', 'AI response parsing failed', {
@@ -305,18 +317,169 @@ ${JSON.stringify(promptMetadata, null, 2)}
   const currencyFromText = detectCurrency(text);
   const currencyRaw = typeof aiResult.currency === 'string' ? aiResult.currency.trim().toUpperCase() : '';
   const currency = currencyRaw === 'JPY' || currencyRaw === 'USD' ? currencyRaw : currencyFromText;
+
+  // Validate document_type against whitelist (fallback to 'other')
+  const VALID_DOC_TYPES = ['invoice', 'receipt', 'expense_report', 'other'] as const;
+  const rawDocType = typeof aiResult.document_type === 'string' ? aiResult.document_type.toLowerCase() : 'other';
+  const document_type = (VALID_DOC_TYPES as readonly string[]).includes(rawDocType)
+    ? rawDocType as ClassificationResult['document_type']
+    : 'other';
+
+  // Fix: confidence 0.0 is valid — use typeof check instead of falsy || operator
+  const confidence = typeof aiResult.confidence === 'number'
+    ? Math.max(0, Math.min(1, aiResult.confidence))
+    : 0.5;
+
   return {
-    document_type: aiResult.document_type || 'other',
+    document_type,
     vendor_name: aiResult.vendor_name || 'Unknown',
     amount: aiAmount,
     currency,
     transaction_date: aiResult.transaction_date || new Date().toISOString().split('T')[0],
     account_category: aiResult.account_category,
     tax_type: aiResult.tax_type,
-    confidence: aiResult.confidence || 0.5,
+    confidence,
     method: 'ai_assisted',
     cache_hit: false,
     amount_extracted: aiAmount > 0,
+  };
+}
+
+// =============================================================================
+// Gemini API Classification (Escalation Fallback)
+// =============================================================================
+
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+
+/**
+ * Determine if Workers AI result should escalate to Gemini.
+ * Triggers: amount=0, low confidence, parse failure.
+ */
+function shouldEscalateToGemini(
+  result: ClassificationResult,
+  env: Env,
+): boolean {
+  if (!env.GEMINI_API_KEY) return false;
+  if (!result.amount_extracted) return true; // amount=0 → most critical
+  if (result.confidence < CONFIDENCE.WORKERS_ESCALATE) return true;
+  if (result.vendor_name === 'Unknown') return true;
+  return false;
+}
+
+/**
+ * Call Gemini API for higher-quality receipt classification.
+ * Uses text-only mode (multimodal PDF support in Phase 3).
+ */
+async function classifyWithGemini(
+  env: Env,
+  text: string,
+  metadata: Record<string, any>,
+  previousResult?: ClassificationResult,
+): Promise<ClassificationResult> {
+  const apiKey = env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
+
+  const promptMetadata = normalizeClassificationMetadataForPrompt(metadata);
+  const previousHint = previousResult
+    ? `\nPrevious extraction attempt returned amount=0. Please re-analyze carefully.`
+    : '';
+
+  const prompt = `You are a Japanese accounting receipt analyzer. Extract structured data from this receipt/invoice.${previousHint}
+
+Receipt Text:
+${text}
+
+Metadata:
+${JSON.stringify(promptMetadata, null, 2)}
+
+IMPORTANT:
+- Extract the GRAND TOTAL amount (not subtotals or line items)
+- For USD amounts, keep the original USD value (do NOT convert to JPY)
+- If amount is genuinely 0 or free, set amount to 0 and amount_extracted to true
+- If you cannot determine the amount, set amount to 0 and amount_extracted to false
+
+Return ONLY a valid JSON object:
+{
+  "document_type": "invoice" | "receipt" | "expense_report" | "other",
+  "vendor_name": "exact vendor name",
+  "amount": number,
+  "currency": "JPY" | "USD",
+  "transaction_date": "YYYY-MM-DD",
+  "account_category": "勘定科目 (e.g., 消耗品費, 通信費)",
+  "tax_type": "課税区分 (e.g., 課税10%, 非課税)",
+  "confidence": 0.0-1.0,
+  "amount_extracted": true | false
+}`;
+
+  const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 500,
+      },
+    }),
+    signal: AbortSignal.timeout(15_000), // 15s timeout
+  });
+
+  if (!response.ok) {
+    const status = response.status;
+    safeLog(env, 'warn', 'Gemini API error', { status });
+    throw new Error(`Gemini API returned ${status}`);
+  }
+
+  const body = await response.json() as any;
+  const responseText = body?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+
+  // Parse JSON from Gemini response
+  let geminiResult: any;
+  try {
+    const jsonMatch = responseText.match(/```(?:json|JSON)?\s*([\s\S]*?)\s*```/);
+    let jsonStr = jsonMatch ? jsonMatch[1] : responseText;
+    if (!jsonStr || jsonStr.trim()[0] !== '{') {
+      const braceMatch = responseText.match(/\{[\s\S]*\}/);
+      if (braceMatch) jsonStr = braceMatch[0];
+    }
+    geminiResult = JSON.parse(jsonStr || '{}');
+  } catch {
+    safeLog(env, 'warn', 'Gemini response parsing failed', {});
+    throw new Error('Gemini response parsing failed');
+  }
+
+  const geminiAmount = typeof geminiResult.amount === 'number' ? geminiResult.amount : 0;
+  const currencyFromText = detectCurrency(text);
+  const currencyRaw = typeof geminiResult.currency === 'string' ? geminiResult.currency.trim().toUpperCase() : '';
+  const currency = currencyRaw === 'JPY' || currencyRaw === 'USD' ? currencyRaw : currencyFromText;
+
+  const VALID_DOC_TYPES = ['invoice', 'receipt', 'expense_report', 'other'] as const;
+  const rawDocType = typeof geminiResult.document_type === 'string' ? geminiResult.document_type.toLowerCase() : 'other';
+  const document_type = (VALID_DOC_TYPES as readonly string[]).includes(rawDocType)
+    ? rawDocType as ClassificationResult['document_type']
+    : 'other';
+
+  const confidence = typeof geminiResult.confidence === 'number'
+    ? Math.max(0, Math.min(1, geminiResult.confidence))
+    : 0.7;
+
+  // Respect explicit amount_extracted flag from Gemini (distinguishes "free" from "unreadable")
+  const amountExtracted = typeof geminiResult.amount_extracted === 'boolean'
+    ? geminiResult.amount_extracted
+    : geminiAmount > 0;
+
+  return {
+    document_type,
+    vendor_name: geminiResult.vendor_name || 'Unknown',
+    amount: geminiAmount,
+    currency,
+    transaction_date: geminiResult.transaction_date || new Date().toISOString().split('T')[0],
+    account_category: geminiResult.account_category,
+    tax_type: geminiResult.tax_type,
+    confidence,
+    method: 'ai_assisted',
+    cache_hit: false,
+    amount_extracted: amountExtracted,
   };
 }
 
@@ -376,16 +539,61 @@ export async function classifyReceipt(
     });
   }
   if (cached) {
-    safeLog(env, 'info', 'Cache hit for classification', { cacheKey });
-    const result = JSON.parse(cached);
-    return { ...result, cache_hit: true };
+    try {
+      const result = JSON.parse(cached);
+      safeLog(env, 'info', 'Cache hit for classification', { cacheKey });
+      return { ...result, cache_hit: true };
+    } catch (parseError) {
+      // Corrupted cache entry — treat as cache miss and continue to AI classification
+      safeLog(env, 'warn', 'Classification cache corrupted, treating as miss', {
+        cacheKey,
+        error: parseError instanceof Error ? parseError.message : String(parseError),
+      });
+    }
   }
 
-  // Fallback to AI classification
+  // Stage 1: Workers AI classification
   safeLog(env, 'info', 'Calling Workers AI for classification', {});
-  const result = await classifyWithAI(env, text, metadata);
+  let result: ClassificationResult;
+  try {
+    result = await classifyWithAI(env, text, metadata);
+  } catch (workersError) {
+    safeLog(env, 'warn', 'Workers AI classification failed', {
+      error: workersError instanceof Error ? workersError.message : String(workersError),
+    });
+    // Workers AI failed — skip to Gemini if available
+    result = {
+      document_type: 'other', vendor_name: 'Unknown', amount: 0, currency: 'JPY',
+      transaction_date: new Date().toISOString().split('T')[0],
+      confidence: 0, method: 'ai_assisted', cache_hit: false, amount_extracted: false,
+    };
+  }
 
-  // Cache result for 30 days
+  // Stage 2: Gemini escalation (if Workers AI result is low quality)
+  if (shouldEscalateToGemini(result, env)) {
+    safeLog(env, 'info', 'Escalating to Gemini API', {
+      reason: !result.amount_extracted ? 'amount_missing' : 'low_confidence',
+      workers_confidence: result.confidence,
+      workers_amount: result.amount,
+    });
+    try {
+      const geminiResult = await classifyWithGemini(env, text, metadata, result);
+      // Merge: prefer Gemini result but keep Workers AI vendor if Gemini returned Unknown
+      result = {
+        ...geminiResult,
+        vendor_name: geminiResult.vendor_name !== 'Unknown'
+          ? geminiResult.vendor_name
+          : result.vendor_name,
+      };
+    } catch (geminiError) {
+      // Gemini failed — use best-effort Workers AI result
+      safeLog(env, 'warn', 'Gemini escalation failed, using Workers AI result', {
+        error: geminiError instanceof Error ? geminiError.message : String(geminiError),
+      });
+    }
+  }
+
+  // Cache final result for 30 days
   try {
     await env.KV.put(`classification:v2:${cacheKey}`, JSON.stringify(result), {
       expirationTtl: 30 * 24 * 60 * 60, // 30 days
@@ -419,8 +627,6 @@ export async function classifyBatch(
 // =============================================================================
 // Confidence Thresholds
 // =============================================================================
-
-import { CONFIDENCE } from '../config/confidence-thresholds';
 
 /**
  * Check if confidence is sufficient for auto-submission
