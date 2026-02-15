@@ -16,6 +16,8 @@ import {
 } from './freee-master-cache';
 import { selectAccountItemForReceipt } from './freee-account-selector';
 import { CONFIDENCE, AMOUNT, decideDealStatus } from '../config/confidence-thresholds';
+import { convertReceiptToJpy } from './fx-rate-service';
+import type { FxConversionResult } from './fx-rate-service';
 
 // =============================================================================
 // Types
@@ -57,6 +59,7 @@ export interface DealResult {
   taxCode?: number | null;
   mappingMethod?: string | null;
   selectionProvider?: string | null;
+  fxConversion?: FxConversionResult | null;
 }
 
 export interface ReceiptInput {
@@ -408,11 +411,20 @@ export async function createDealFromReceipt(
     };
   }
 
+  // FX conversion: normalize all amounts to JPY (freee API accepts JPY integers only)
   const currency = typeof receipt.currency === 'string' && receipt.currency.trim()
     ? receipt.currency.trim().toUpperCase()
     : 'JPY';
-  if (currency !== 'JPY') {
-    safeLog(env, 'warn', '[FreeeDealService] non-JPY receipt: skipping deal creation (needs review)', {
+
+  const fxResult = await convertReceiptToJpy(
+    env,
+    receipt.amount,
+    currency,
+    receipt.transaction_date,
+  );
+
+  if (!fxResult) {
+    safeLog(env, 'warn', '[FreeeDealService] FX conversion failed, needs review', {
       receiptId: receipt.id,
       vendorName: receipt.vendor_name,
       amount: receipt.amount,
@@ -427,17 +439,22 @@ export async function createDealFromReceipt(
       taxCode: null,
       mappingMethod: null,
       selectionProvider: null,
+      fxConversion: null,
     };
   }
+
+  const amountJpy = fxResult.amountJpy;
 
   // Amount=0: do NOT create a deal.
   // freee Deal API rejects 0 amount lines (400). Keep the receipt in File Box and
   // mark as needs_review so a human can fix the amount/category first.
-  if (receipt.amount <= 0) {
-    safeLog(env, 'warn', '[FreeeDealService] amount <= 0, skipping deal creation (needs review)', {
+  if (amountJpy <= 0) {
+    safeLog(env, 'warn', '[FreeeDealService] amount <= 0 after FX conversion, skipping deal creation (needs review)', {
       receiptId: receipt.id,
       vendorName: receipt.vendor_name,
-      amount: receipt.amount,
+      originalAmount: receipt.amount,
+      currency,
+      amountJpy,
     });
     return {
       dealId: null,
@@ -448,6 +465,7 @@ export async function createDealFromReceipt(
       taxCode: null,
       mappingMethod: null,
       selectionProvider: null,
+      fxConversion: fxResult,
     };
   }
 
@@ -466,7 +484,7 @@ export async function createDealFromReceipt(
     env,
     {
       vendor_name: receipt.vendor_name,
-      amount: receipt.amount,
+      amount: amountJpy, // Always JPY after FX conversion (CRITICAL: was receipt.amount)
       transaction_date: receipt.transaction_date,
       account_category: receipt.account_category ?? null,
       tenant_id: receipt.tenant_id,
@@ -516,7 +534,7 @@ export async function createDealFromReceipt(
   // - MIN_CREATE (0.25): create deal as needs_review
   // - MIN_AUTO (0.50): auto-confirm deal as created
   // - MIN_AUTO_HIGH_AMOUNT (0.70): high-value safety gate
-  const dealDecision = decideDealStatus(overallConfidence, receipt.amount, selection.scoreGap);
+  const dealDecision = decideDealStatus(overallConfidence, amountJpy, selection.scoreGap);
 
   const forceNeedsReview = dealDecision === 'skip';
 
@@ -532,7 +550,7 @@ export async function createDealFromReceipt(
       {
         account_item_id: selectedAccountItemId,
         tax_code: selectedTaxCode,
-        amount: receipt.amount,
+        amount: amountJpy, // Always JPY integer (CRITICAL: was receipt.amount)
         description: partner.name,
       },
     ],
@@ -548,7 +566,7 @@ export async function createDealFromReceipt(
   const dealId = dealResponse.deal.id;
   let status = forceNeedsReview
     ? 'needs_review'
-    : decideStatus(overallConfidence, receipt.amount, selection.scoreGap);
+    : decideStatus(overallConfidence, amountJpy, selection.scoreGap);
 
   // Persist deal mapping BEFORE receipt-link API call to avoid duplicate deal creation on retry.
   await recordDealLink(env, {
@@ -589,5 +607,6 @@ export async function createDealFromReceipt(
     taxCode: selectedTaxCode,
     mappingMethod: selection.mappingMethod,
     selectionProvider: selection.provider,
+    fxConversion: fxResult,
   };
 }
