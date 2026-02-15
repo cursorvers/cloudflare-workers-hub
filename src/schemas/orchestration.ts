@@ -163,7 +163,7 @@ export type CostEvent = z.infer<typeof CostEventSchema>;
 
 export const CreateRunRequestSchema = z.object({
   instruction: z.string().min(1).max(10000),
-  budget_usd: z.number().min(1).max(100).default(10),
+  budget_usd: z.number().min(1).max(10).default(10),
   max_steps: z.number().int().min(1).max(50).default(20),
 });
 export type CreateRunRequest = z.infer<typeof CreateRunRequestSchema>;
@@ -191,4 +191,3 @@ export const ApprovalDecisionSchema = z.object({
   reason: z.string().min(1).max(10000).optional(),
 });
 export type ApprovalDecision = z.infer<typeof ApprovalDecisionSchema>;
-

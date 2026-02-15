@@ -49,8 +49,8 @@ describe('TaskPackGenerator', () => {
       const result = await generator.generate({ instruction: 'Build a feature' });
 
       expect(result.steps).toHaveLength(2);
-      expect(result.steps[0].agent).toBe('codex'); // code → codex
-      expect(result.steps[1].agent).toBe('glm'); // review → glm
+      expect(result.steps[0].agent).toBe('sonnet'); // MVP: Sonnet-only
+      expect(result.steps[1].agent).toBe('sonnet'); // MVP: Sonnet-only
       expect(result.rationale).toBe('Two-step workflow');
       expect(result.costEvent.usd).toBe(0.001);
     });
@@ -88,7 +88,7 @@ describe('TaskPackGenerator', () => {
 
       const result = await generator.generate({ instruction: 'Find files' });
 
-      expect(result.steps[0].agent).toBe('haiku');
+      expect(result.steps[0].agent).toBe('sonnet');
     });
 
     it('should re-number seq starting from 1', async () => {
@@ -194,28 +194,28 @@ describe('TaskPackGenerator', () => {
   describe('createDefaultDelegationMatrix', () => {
     const matrix = createDefaultDelegationMatrix();
 
-    it('should map code/low to codex', () => {
-      expect(matrix.pickAgent({ capability: 'code', risk: 'low' })).toBe('codex');
+    it('should map code/low to sonnet', () => {
+      expect(matrix.pickAgent({ capability: 'code', risk: 'low' })).toBe('sonnet');
     });
 
     it('should map code/high to sonnet', () => {
       expect(matrix.pickAgent({ capability: 'code', risk: 'high' })).toBe('sonnet');
     });
 
-    it('should map review/low to glm', () => {
-      expect(matrix.pickAgent({ capability: 'review', risk: 'low' })).toBe('glm');
+    it('should map review/low to sonnet', () => {
+      expect(matrix.pickAgent({ capability: 'review', risk: 'low' })).toBe('sonnet');
     });
 
-    it('should map search/low to haiku', () => {
-      expect(matrix.pickAgent({ capability: 'search' })).toBe('haiku');
+    it('should map search/low to sonnet', () => {
+      expect(matrix.pickAgent({ capability: 'search' })).toBe('sonnet');
     });
 
-    it('should map ui/low to gemini', () => {
-      expect(matrix.pickAgent({ capability: 'ui' })).toBe('gemini');
+    it('should map ui/low to sonnet', () => {
+      expect(matrix.pickAgent({ capability: 'ui' })).toBe('sonnet');
     });
 
-    it('should map unknown capability to codex (default)', () => {
-      expect(matrix.pickAgent({ capability: 'unknown' })).toBe('codex');
+    it('should map unknown capability to sonnet (default)', () => {
+      expect(matrix.pickAgent({ capability: 'unknown' })).toBe('sonnet');
     });
 
     it('should map unknown/high to sonnet', () => {

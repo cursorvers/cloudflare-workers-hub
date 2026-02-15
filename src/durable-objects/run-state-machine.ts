@@ -72,6 +72,13 @@ export const CancelRequestSchema = z.object({
 });
 export type CancelRequest = z.infer<typeof CancelRequestSchema>;
 
+export const ResumeRequestSchema = z.object({
+  // Optional: retry a specific step sequence.
+  seq: z.number().int().positive().optional(),
+  reason: z.string().min(1).max(10_000).optional(),
+});
+export type ResumeRequest = z.infer<typeof ResumeRequestSchema>;
+
 // =============================================================================
 // State Machine
 // =============================================================================
@@ -244,8 +251,57 @@ export class RunStateMachine {
   async handleGetState(): Promise<{ run: RunState | null; steps: StepState[] }> {
     const run = await this.store.getRun();
     const steps = await this.store.listSteps();
-    steps.sort((a, b) => a.seq - b.seq);
-    return { run, steps };
+    const sorted = [...steps].sort((a, b) => a.seq - b.seq);
+    return { run, steps: sorted };
+  }
+
+  // ---------------------------------------------------------------------------
+  // handleResume
+  // ---------------------------------------------------------------------------
+
+  async handleResume(req: ResumeRequest): Promise<{ run: RunState; action: DriveAction; idempotency_hits: IdempotencyHit[] }> {
+    const run = await this.store.getRun();
+    if (!run) {
+      return {
+        run: syntheticMissingRun(req.seq ?? 1),
+        action: { action: 'run_blocked', status: 'failed', reason: 'Run not initialized' },
+        idempotency_hits: [],
+      };
+    }
+
+    const now = nowIso();
+    if (run.status === 'blocked_error' || run.status === 'failed') {
+      const updatedRun: RunState = {
+        ...run,
+        status: 'running',
+        blocked_reason: undefined,
+        current_seq: undefined,
+        updated_at: now,
+      };
+      await this.store.putRun(updatedRun);
+    }
+
+    if (req.seq) {
+      const steps = await this.store.listSteps();
+      const target = steps.find((s) => s.seq === req.seq);
+      if (target && target.status !== 'succeeded') {
+        const reset: StepState = {
+          ...target,
+          status: 'pending',
+          attempts: 0,
+          result: undefined,
+          error: undefined,
+          started_at: undefined,
+          completed_at: undefined,
+          updated_at: nowIso(),
+        };
+        await this.store.putStep(reset);
+      }
+    }
+
+    const { action, idempotency_hits } = await this.driveRunCollectingIdempotencyHits();
+    const latestRun = (await this.store.getRun()) ?? run;
+    return { run: latestRun, action, idempotency_hits };
   }
 
   // ---------------------------------------------------------------------------
@@ -375,8 +431,7 @@ export class RunStateMachine {
       if (run.status === 'cancelled') return { action: { action: 'run_cancelled', status: run.status, reason: run.cancelled_reason }, idempotency_hits };
       if (run.status === 'blocked_error') return { action: { action: 'run_blocked', status: run.status, reason: run.blocked_reason }, idempotency_hits };
 
-      const steps = await this.store.listSteps();
-      steps.sort((a, b) => a.seq - b.seq);
+      const steps = [...(await this.store.listSteps())].sort((a, b) => a.seq - b.seq);
 
       const running = steps.find((s) => s.status === 'running');
       if (running) {
@@ -507,14 +562,14 @@ export class RunStateMachine {
     }
 
     const steps = Array.from(bySeq.values());
-    steps.sort((a, b) => a.seq - b.seq);
+    const sortedSteps = [...steps].sort((a, b) => a.seq - b.seq);
 
-    if (run.step_count !== steps.length) {
-      run = { ...run, step_count: steps.length, updated_at: nowIso() };
+    if (run.step_count !== sortedSteps.length) {
+      run = { ...run, step_count: sortedSteps.length, updated_at: nowIso() };
       await this.store.putRun(run);
     }
 
-    return { run, steps };
+    return { run, steps: sortedSteps };
   }
 }
 

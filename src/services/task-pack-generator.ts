@@ -31,8 +31,9 @@ import { safeLog } from '../utils/log-sanitizer';
 const DEFAULT_MAX_STEPS = 20;
 const MAX_STEPS_LIMIT = 50;
 
-const DEFAULT_DECOMPOSE_MODEL = 'gpt-5.2';
-const DEFAULT_DECOMPOSE_PROVIDER = 'openai' as const;
+// MVP policy: Sonnet-only decomposition (single-model to simplify ops/quality).
+const DEFAULT_DECOMPOSE_MODEL = 'claude-sonnet-4-20250514';
+const DEFAULT_DECOMPOSE_PROVIDER = 'anthropic' as const;
 
 // =============================================================================
 // Public Types
@@ -112,18 +113,18 @@ type RawTaskPack = z.infer<typeof RawTaskPackSchema>;
 const AGENT_MAP: Readonly<
   Record<string, Readonly<{ normal: AgentType; high: AgentType }>>
 > = {
-  code: { normal: 'codex', high: 'sonnet' },
-  review: { normal: 'glm', high: 'codex' },
-  search: { normal: 'haiku', high: 'codex' },
-  summarize: { normal: 'glm', high: 'sonnet' },
-  classify: { normal: 'glm', high: 'codex' },
-  security: { normal: 'codex', high: 'sonnet' },
-  ui: { normal: 'gemini', high: 'sonnet' },
-  design: { normal: 'codex', high: 'sonnet' },
+  code: { normal: 'sonnet', high: 'sonnet' },
+  review: { normal: 'sonnet', high: 'sonnet' },
+  search: { normal: 'sonnet', high: 'sonnet' },
+  summarize: { normal: 'sonnet', high: 'sonnet' },
+  classify: { normal: 'sonnet', high: 'sonnet' },
+  security: { normal: 'sonnet', high: 'sonnet' },
+  ui: { normal: 'sonnet', high: 'sonnet' },
+  design: { normal: 'sonnet', high: 'sonnet' },
 };
 
 const DEFAULT_AGENT: Readonly<{ normal: AgentType; high: AgentType }> = {
-  normal: 'codex',
+  normal: 'sonnet',
   high: 'sonnet',
 };
 
@@ -261,12 +262,12 @@ export class TaskPackGenerator {
       throw new TaskPackError('EMPTY_STEPS', 'LLM returned zero steps');
     }
 
-    const warnings: string[] = [...(raw.warnings ?? [])];
+    let warnings: ReadonlyArray<string> = [...(raw.warnings ?? [])];
 
     // Truncate to maxSteps if needed
     let truncatedSteps = raw.steps;
     if (raw.steps.length > maxSteps) {
-      warnings.push(`Truncated from ${raw.steps.length} to ${maxSteps} steps`);
+      warnings = [...warnings, `Truncated from ${raw.steps.length} to ${maxSteps} steps`];
       truncatedSteps = raw.steps.slice(0, maxSteps);
     }
 

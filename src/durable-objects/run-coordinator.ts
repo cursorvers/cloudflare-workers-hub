@@ -17,6 +17,7 @@ import {
   StartRequestSchema,
   StepCompleteRequestSchema,
   CancelRequestSchema,
+  ResumeRequestSchema,
   type DriveAction,
 } from './run-state-machine';
 import { StepExecutor, type StepResult } from '../services/step-executor';
@@ -110,6 +111,16 @@ export class RunCoordinator extends DurableObject<Env> {
         const parsed = CancelRequestSchema.safeParse(body);
         if (!parsed.success) return errorResponse(parsed.error.message, 400, 'VALIDATION_ERROR');
         const res = await this.sm.handleCancel(parsed.data);
+        return jsonResponse({ success: true, data: res }, 200);
+      }
+
+      if (path === '/resume' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const parsed = ResumeRequestSchema.safeParse(body);
+        if (!parsed.success) return errorResponse(parsed.error.message, 400, 'VALIDATION_ERROR');
+        const res = await this.sm.handleResume(parsed.data);
+        // Nudge the alarm loop to pick up pending work immediately.
+        await this.ctx.storage.setAlarm(Date.now());
         return jsonResponse({ success: true, data: res }, 200);
       }
 

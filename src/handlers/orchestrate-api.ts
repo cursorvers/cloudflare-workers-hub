@@ -127,7 +127,7 @@ export async function handleOrchestrateAPI(
   // POST /api/runs/:run_id/resume
   const resumeMatch = path.match(/^\/api\/runs\/([^/]+)\/resume$/);
   if (resumeMatch && method === 'POST') {
-    return handleResumeRun(request, db, ownerId, resumeMatch[1]);
+    return handleResumeRun(request, env, db, ownerId, resumeMatch[1]);
   }
 
   // GET /api/runs/:run_id
@@ -231,33 +231,122 @@ async function decomposeAndStart(
 
     const taskPack = await generator.generate({ instruction, requestId: runId });
 
-    // Record decomposition cost in D1 (CostEvent)
     const ce = taskPack.costEvent;
+    await recordCostEvent(db, runId, ce);
+    await updateRunStepCount(db, runId, taskPack.steps.length);
+    await insertStepsToD1(db, runId, taskPack.steps);
+
+    const { stub, bearerToken } = await startRunCoordinator(env, runId, budgetUsd, taskPack.steps);
+    await markRunRunning(db, runId);
+
+    safeLog.info('[Orchestrate] Decomposition complete, DO started', {
+      runId,
+      stepCount: taskPack.steps.length,
+      costUsd: ce.usd,
+    });
+
+    emitRunEvent(env, {
+      event: 'run:created',
+      run_id: runId,
+      ts: new Date().toISOString(),
+      data: { step_count: taskPack.steps.length, budget_usd: budgetUsd },
+    });
+
+    await syncRunStatusToD1(stub, bearerToken, db, runId);
+  } catch (err) {
+    safeLog.error('[Orchestrate] Decomposition failed', {
+      runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    await markRunBlockedError(db, runId, err);
+  }
+}
+
+function getDoBearerToken(env: Env): string {
+  return env.WORKERS_API_KEY ?? env.ASSISTANT_API_KEY ?? env.QUEUE_API_KEY ?? '';
+}
+
+async function markRunBlockedError(db: D1Database, runId: string, err: unknown): Promise<void> {
+  try {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    await db
+      .prepare("UPDATE runs SET status = 'blocked_error', memory_json = ?, updated_at = ? WHERE run_id = ?")
+      .bind(JSON.stringify({ error: errMsg.slice(0, 500) }), new Date().toISOString(), runId)
+      .run();
+  } catch (dbErr: unknown) {
+    safeLog.error('[Orchestrate] Failed to update run status', { runId, dbErr: String(dbErr) });
+  }
+}
+
+async function recordCostEvent(
+  db: D1Database,
+  runId: string,
+  ce: Readonly<{ provider: string; model: string; tokens_in: number; tokens_out: number; usd: number }>,
+): Promise<void> {
+  try {
     await db
       .prepare(
         `INSERT INTO cost_events (run_id, provider, model, tokens_in, tokens_out, usd, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(runId, ce.provider, ce.model, ce.tokens_in, ce.tokens_out, ce.usd, new Date().toISOString())
-      .run()
-      .catch((err: unknown) => safeLog.warn('[Orchestrate] Failed to record cost event', { err: String(err) }));
+      .run();
+  } catch (err: unknown) {
+    safeLog.warn('[Orchestrate] Failed to record cost event', { runId, err: String(err) });
+  }
+}
 
-    // Update D1 step_count
+async function updateRunStepCount(db: D1Database, runId: string, stepCount: number): Promise<void> {
+  try {
     await db
       .prepare('UPDATE runs SET step_count = ?, updated_at = ? WHERE run_id = ?')
-      .bind(taskPack.steps.length, new Date().toISOString(), runId)
+      .bind(stepCount, new Date().toISOString(), runId)
       .run();
+  } catch (err: unknown) {
+    safeLog.warn('[Orchestrate] Failed to update step_count', { runId, err: String(err) });
+  }
+}
 
-    // Initialize RunCoordinator DO with steps
-    const doId = env.RUN_COORDINATOR!.idFromName(runId);
-    const stub = env.RUN_COORDINATOR!.get(doId);
+async function insertStepsToD1(
+  db: D1Database,
+  runId: string,
+  steps: ReadonlyArray<Readonly<{ seq: number; agent: string; max_attempts?: number }>>,
+): Promise<void> {
+  const createdAt = new Date().toISOString();
+  const promises = steps.map((s) =>
+    db
+      .prepare(
+        `INSERT INTO steps (step_id, run_id, seq, status, agent, attempts, max_attempts, idempotency_key, cost_usd, created_at)
+         VALUES (?, ?, ?, 'pending', ?, 0, ?, ?, 0.0, ?)`,
+      )
+      .bind(
+        crypto.randomUUID(),
+        runId,
+        s.seq,
+        s.agent,
+        s.max_attempts ?? 3,
+        `${runId}:${s.seq}`,
+        createdAt,
+      )
+      .run(),
+  );
+  await Promise.all(promises);
+}
 
-    const bearerToken = env.WORKERS_API_KEY ?? env.ASSISTANT_API_KEY ?? env.QUEUE_API_KEY ?? '';
-    if (!bearerToken) {
-      safeLog.warn('[Orchestrate] No API key available for DO auth', { runId });
-    }
+async function startRunCoordinator(
+  env: Env,
+  runId: string,
+  budgetUsd: number,
+  steps: ReadonlyArray<Readonly<{ seq: number; agent: string; input: unknown; max_attempts?: number }>>,
+): Promise<{ stub: DurableObjectStub; bearerToken: string }> {
+  const doId = env.RUN_COORDINATOR!.idFromName(runId);
+  const stub = env.RUN_COORDINATOR!.get(doId);
+  const bearerToken = getDoBearerToken(env);
 
-    const startRes = await stub.fetch(new Request('https://do/start', {
+  if (!bearerToken) safeLog.warn('[Orchestrate] No API key available for DO auth', { runId });
+
+  const startRes = await stub.fetch(
+    new Request('https://do/start', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -266,59 +355,29 @@ async function decomposeAndStart(
       body: JSON.stringify({
         run_id: runId,
         budget_usd: budgetUsd,
-        steps: taskPack.steps.map((s) => ({
+        steps: steps.map((s) => ({
           seq: s.seq,
           agent: s.agent,
           input: s.input,
-          max_attempts: s.max_attempts,
+          max_attempts: s.max_attempts ?? 3,
         })),
       }),
-    }));
+    }),
+  );
 
-    if (!startRes.ok) {
-      const errText = await startRes.text().catch(() => 'unknown');
-      throw new Error(`DO /start failed: ${startRes.status} ${errText.slice(0, 500)}`);
-    }
-
-    const startBody = (await startRes.json()) as DOResponse;
-    const firstAction = startBody.data?.action as DriveAction | undefined;
-
-    // Update D1 status to running
-    await db
-      .prepare("UPDATE runs SET status = 'running', updated_at = ? WHERE run_id = ?")
-      .bind(new Date().toISOString(), runId)
-      .run();
-
-    safeLog.info('[Orchestrate] Decomposition complete, DO started', {
-      runId,
-      stepCount: taskPack.steps.length,
-      costUsd: ce.usd,
-    });
-
-    // Emit run:created event
-    emitRunEvent(env, { event: 'run:created', run_id: runId, ts: new Date().toISOString(), data: { step_count: taskPack.steps.length, budget_usd: budgetUsd } });
-
-    // Step execution is now alarm-driven inside RunCoordinator DO.
-    // No waitUntil driveLoop needed — DO alarm picks up pending steps automatically.
-
-    // Sync initial status from DO to D1
-    await syncRunStatusToD1(stub, bearerToken, db, runId);
-  } catch (err) {
-    safeLog.error('[Orchestrate] Decomposition failed', {
-      runId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-
-    // Mark run as blocked_error with error detail so user can diagnose
-    const errMsg = err instanceof Error ? err.message : String(err);
-    await db
-      .prepare(
-        "UPDATE runs SET status = 'blocked_error', memory_json = ?, updated_at = ? WHERE run_id = ?",
-      )
-      .bind(JSON.stringify({ error: errMsg.slice(0, 500) }), new Date().toISOString(), runId)
-      .run()
-      .catch((dbErr: unknown) => safeLog.error('[Orchestrate] Failed to update run status', { dbErr: String(dbErr) }));
+  if (!startRes.ok) {
+    const errText = await startRes.text().catch(() => 'unknown');
+    throw new Error(`DO /start failed: ${startRes.status} ${errText.slice(0, 500)}`);
   }
+
+  return { stub, bearerToken };
+}
+
+async function markRunRunning(db: D1Database, runId: string): Promise<void> {
+  await db
+    .prepare("UPDATE runs SET status = 'running', updated_at = ? WHERE run_id = ?")
+    .bind(new Date().toISOString(), runId)
+    .run();
 }
 
 // =============================================================================
@@ -459,6 +518,7 @@ async function handleGetSteps(
  */
 async function handleResumeRun(
   request: Request,
+  env: Env,
   db: D1Database,
   ownerId: string,
   runId: string,
@@ -468,6 +528,8 @@ async function handleResumeRun(
   if (!parsed.success) {
     return errorResponse('VALIDATION_ERROR', parsed.error.message, 400);
   }
+
+  const { step_id: stepId, override_instruction: overrideInstruction } = parsed.data;
 
   // Atomic: UPDATE with status condition to prevent race conditions
   const now = new Date().toISOString();
@@ -497,7 +559,79 @@ async function handleResumeRun(
 
   safeLog.info('[Orchestrate] Run resumed', { runId, ownerId });
 
+  try {
+    await resumeRunCoordinator(env, db, runId, ownerId, stepId, overrideInstruction);
+  } catch (err: unknown) {
+    safeLog.error('[Orchestrate] DO resume failed', { runId, err: String(err) });
+    await rollbackResumeFailure(db, runId, ownerId, err);
+    return errorResponse('RESUME_FAILED', 'Failed to resume run coordinator', 502);
+  }
+
   return jsonResponse({ success: true, data: { run_id: runId, status: 'running' } });
+}
+
+async function resolveSeqForStepId(
+  db: D1Database,
+  runId: string,
+  ownerId: string,
+  stepId: string,
+): Promise<number | undefined> {
+  const row = await db
+    .prepare(
+      `SELECT s.seq AS seq FROM steps s
+       JOIN runs r ON s.run_id = r.run_id
+       WHERE s.step_id = ? AND r.run_id = ? AND r.owner_id = ?`,
+    )
+    .bind(stepId, runId, ownerId)
+    .first<{ seq: number }>();
+  return row?.seq;
+}
+
+async function resumeRunCoordinator(
+  env: Env,
+  db: D1Database,
+  runId: string,
+  ownerId: string,
+  stepId?: string,
+  overrideInstruction?: string,
+): Promise<void> {
+  if (!env.RUN_COORDINATOR) throw new Error('RUN_COORDINATOR binding missing');
+
+  const seq = stepId ? await resolveSeqForStepId(db, runId, ownerId, stepId) : undefined;
+  const bearerToken = getDoBearerToken(env);
+  const stub = env.RUN_COORDINATOR.get(env.RUN_COORDINATOR.idFromName(runId));
+
+  const resp = await stub.fetch(
+    new Request('https://do/resume', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+      },
+      body: JSON.stringify({
+        ...(seq ? { seq } : {}),
+        ...(overrideInstruction ? { reason: 'override_instruction_provided' } : {}),
+      }),
+    }),
+  );
+
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => 'unknown');
+    throw new Error(`DO /resume failed: ${resp.status} ${errText.slice(0, 500)}`);
+  }
+
+  await syncRunStatusToD1(stub, bearerToken, db, runId);
+}
+
+async function rollbackResumeFailure(db: D1Database, runId: string, ownerId: string, err: unknown): Promise<void> {
+  try {
+    await db
+      .prepare("UPDATE runs SET status = 'blocked_error', memory_json = ?, updated_at = ? WHERE run_id = ? AND owner_id = ?")
+      .bind(JSON.stringify({ error: `do_resume_failed: ${String(err).slice(0, 500)}` }), new Date().toISOString(), runId, ownerId)
+      .run();
+  } catch (dbErr: unknown) {
+    safeLog.error('[Orchestrate] Failed to rollback run status', { runId, dbErr: String(dbErr) });
+  }
 }
 
 /**

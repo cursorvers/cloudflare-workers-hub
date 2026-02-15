@@ -125,6 +125,15 @@ function getCurrentWindow(): string {
   return windowStart.toString();
 }
 
+const UUID_V4_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function normalizePathname(pathname: string): string {
+  // Endpoint-level aggregation: collapse UUID segments to a stable token.
+  const parts = pathname.split('/').map((seg) => (UUID_V4_RE.test(seg) ? ':id' : seg));
+  return parts.join('/');
+}
+
 /**
  * Check rate limit for a request
  *
@@ -137,7 +146,8 @@ async function checkHttpRateLimit(
   userId?: string
 ): Promise<RateLimitResult> {
   // In Workers, request.url is absolute. In tests it may be relative.
-  const pathname = new URL(request.url, 'http://localhost').pathname;
+  const rawPathname = new URL(request.url, 'http://localhost').pathname;
+  const pathname = normalizePathname(rawPathname);
   const config = getRateLimitConfig(pathname);
   const clientId = getClientIdentifier(request, userId);
   const isUser = clientId.startsWith('user:');
