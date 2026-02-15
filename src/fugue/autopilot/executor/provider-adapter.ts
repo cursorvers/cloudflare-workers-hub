@@ -22,7 +22,7 @@ export interface SpecialistEndpointConfig {
 export const DEFAULT_ENDPOINTS: Record<string, SpecialistEndpointConfig> = Object.freeze({
   codex: Object.freeze({ baseUrl: 'https://api.openai.com/v1/responses', apiKeyEnvVar: 'OPENAI_API_KEY', timeoutMs: 30_000, headers: Object.freeze({ 'x-specialist': 'codex' }) }),
   glm: Object.freeze({ baseUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', apiKeyEnvVar: 'ZAI_API_KEY', timeoutMs: 30_000, headers: Object.freeze({ 'x-specialist': 'glm' }) }),
-  gemini: Object.freeze({ baseUrl: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent', apiKeyEnvVar: 'GEMINI_API_KEY', timeoutMs: 30_000, headers: Object.freeze({ 'x-specialist': 'gemini' }) }),
+  gemini: Object.freeze({ baseUrl: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent', apiKeyEnvVar: 'GEMINI_API_KEY', timeoutMs: 30_000, headers: Object.freeze({ 'x-specialist': 'gemini' }) }),
 });
 
 interface HttpProviderAdapterOptions {
