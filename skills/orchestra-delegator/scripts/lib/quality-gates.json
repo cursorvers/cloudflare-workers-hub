@@ -1,0 +1,53 @@
+{
+  "codex": {
+    "timeout": 300000,
+    "maxRetries": 1,
+    "retryDelay": 3000,
+    "fullAuto": true,
+    "sandbox": "read-only"
+  },
+  "review": {
+    "glm": {
+      "maxScore": 7,
+      "passThreshold": 5
+    }
+  },
+  "glm": {
+    "stream": true,
+    "temperatureByAgent": {
+      "math-reasoning": 0.1,
+      "code-reviewer": 0.3,
+      "general-reviewer": 0.5,
+      "refactor-advisor": 0.3
+    }
+  },
+  "consensus": {
+    "timeouts": {
+      "voter": 120000
+    },
+    "thresholds": {
+      "approved": 5,
+      "conditional": 4,
+      "rejected": 3
+    }
+  },
+  "parallel": {
+    "glm": {
+      "maxConcurrent": 7
+    }
+  },
+  "adaptiveTimeout": {
+    "min": 30000,
+    "max": 600000,
+    "default": 180000
+  },
+  "forte": {
+    "maxContextChars": 8192
+  },
+  "idempotency": {
+    "ttlMs": 300000
+  },
+  "evaluation": {
+    "timeout": 120000
+  }
+}
