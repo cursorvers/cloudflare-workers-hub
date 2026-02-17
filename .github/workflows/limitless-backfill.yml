@@ -1,0 +1,114 @@
+name: Limitless Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: 'Start date (YYYY-MM-DD JST)'
+        required: true
+        default: '2026-01-30'
+      end_date:
+        description: 'End date (YYYY-MM-DD JST)'
+        required: true
+        default: '2026-02-17'
+      page_size:
+        description: 'Items per page (1-10)'
+        required: false
+        default: '3'
+      max_pages:
+        description: 'Max pages per request (1-20)'
+        required: false
+        default: '3'
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Run backfill
+        env:
+          BACKFILL_KEY: ${{ secrets.BACKFILL_API_KEY }}
+          BASE_URL: https://limitless-sync.masa-stage1.workers.dev/api/limitless/backfill
+          PAGE_SIZE: ${{ inputs.page_size }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+        run: |
+          set -euo pipefail
+
+          START_DATE="${{ inputs.start_date }}"
+          END_DATE="${{ inputs.end_date }}"
+          SLEEP_BETWEEN_REQUESTS=5
+          SLEEP_BETWEEN_DAYS=2
+          TOTAL_SYNCED=0
+          TOTAL_SKIPPED=0
+          TOTAL_ERRORS=0
+
+          echo "=== Limitless Backfill (GHA) ==="
+          echo "Range: $START_DATE to $END_DATE (JST)"
+          echo "Batch: pageSize=$PAGE_SIZE, maxPages=$MAX_PAGES"
+          echo ""
+
+          current="$START_DATE"
+          while [[ "$current" < "$END_DATE" ]]; do
+            # JST midnight = UTC previous day 15:00
+            start_utc=$(date -u -d "$current - 1 day" "+%Y-%m-%dT15:00:00Z")
+            end_utc="${current}T15:00:00Z"
+
+            echo "--- $current (JST) ---"
+            echo "  API range: $start_utc .. $end_utc"
+
+            cursor=""
+            day_synced=0
+
+            while true; do
+              if [[ -n "$cursor" ]]; then
+                body=$(printf '{"startTime":"%s","endTime":"%s","pageSize":%s,"maxPages":%s,"cursor":"%s"}' \
+                  "$start_utc" "$end_utc" "$PAGE_SIZE" "$MAX_PAGES" "$cursor")
+              else
+                body=$(printf '{"startTime":"%s","endTime":"%s","pageSize":%s,"maxPages":%s}' \
+                  "$start_utc" "$end_utc" "$PAGE_SIZE" "$MAX_PAGES")
+              fi
+
+              for attempt in 1 2 3; do
+                response=$(curl -sS --max-time 120 -X POST "$BASE_URL" \
+                  -H "Authorization: Bearer $BACKFILL_KEY" \
+                  -H "Content-Type: application/json" \
+                  -d "$body" 2>&1) && break || {
+                  echo "  WARN: attempt $attempt failed, retrying in 30s..."
+                  sleep 30
+                }
+              done
+
+              synced=$(echo "$response" | jq -r '.synced // 0') || { echo "  ERROR: parse failed"; break; }
+              skipped=$(echo "$response" | jq -r '.skipped // 0')
+              errors=$(echo "$response" | jq -r '.errors | length // 0')
+              done_flag=$(echo "$response" | jq -r '.done // true')
+              next_cursor=$(echo "$response" | jq -r '.nextCursor // empty')
+              pages=$(echo "$response" | jq -r '.pagesProcessed // 0')
+              duration=$(echo "$response" | jq -r '.durationMs // 0')
+
+              day_synced=$((day_synced + synced))
+              TOTAL_SYNCED=$((TOTAL_SYNCED + synced))
+              TOTAL_SKIPPED=$((TOTAL_SKIPPED + skipped))
+              TOTAL_ERRORS=$((TOTAL_ERRORS + errors))
+
+              echo "  synced=$synced skipped=$skipped errors=$errors pages=$pages ${duration}ms (day: $day_synced)"
+
+              if [[ "$done_flag" == "true" ]] || [[ -z "$next_cursor" ]]; then
+                break
+              fi
+
+              cursor="$next_cursor"
+              sleep "$SLEEP_BETWEEN_REQUESTS"
+            done
+
+            echo "  Day total: $day_synced synced"
+            echo ""
+
+            current=$(date -u -d "$current + 1 day" "+%Y-%m-%d")
+            sleep "$SLEEP_BETWEEN_DAYS"
+          done
+
+          echo "=== Backfill Complete ==="
+          echo "Total synced: $TOTAL_SYNCED"
+          echo "Total skipped: $TOTAL_SKIPPED"
+          echo "Total errors: $TOTAL_ERRORS"
