@@ -11,7 +11,8 @@
  *
  * Design goal:
  * - Keep Limitless ingestion resilient and isolated from other subsystems.
- * - No KV bindings; no distributed locking; rely on Supabase upsert idempotency.
+ * - No KV bindings; rely on Supabase upsert idempotency + sync_cursor for state.
+ * - Optimistic locking on sync_cursor prevents duplicate processing across Workers.
  */
 
 import { Env } from './types';
@@ -19,6 +20,8 @@ import { safeLog, maskUserId } from './utils/log-sanitizer';
 import { handleLimitlessWebhookSimple } from './handlers/limitless-webhook-simple';
 import { handleLimitlessBackfill } from './handlers/limitless-backfill';
 import { syncToSupabase } from './services/limitless';
+import { getCursor, updateCursor } from './services/sync-cursor';
+import { SupabaseConfig } from './services/supabase-client';
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -50,12 +53,28 @@ async function handleScheduled(controller: ScheduledController, env: Env): Promi
     return;
   }
 
-  const syncIntervalHours = parseInt(env.LIMITLESS_SYNC_INTERVAL_HOURS || '1', 10);
-  const maxAgeHours = 24; // 24h window to tolerate missed runs (Phase 1 fix, Issue #36/#38)
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    safeLog.warn('[Scheduled] Supabase not configured, skipping');
+    return;
+  }
 
-  safeLog.info('[Scheduled] Starting Limitless scheduled sync (limitless-only)', {
+  const supabaseConfig: SupabaseConfig = {
+    url: env.SUPABASE_URL,
+    serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+  };
+
+  // Phase 2: Read persistent cursor (fallback to 24h window)
+  const cursor = await getCursor(supabaseConfig, 'limitless');
+  const endTime = new Date();
+  const maxAgeHours = Math.ceil(
+    (endTime.getTime() - cursor.startTime.getTime()) / (60 * 60 * 1000)
+  );
+
+  safeLog.info('[Scheduled] Starting Limitless scheduled sync (cursor-based)', {
     userId: maskUserId(userId),
-    syncIntervalHours,
+    startTime: cursor.startTime.toISOString(),
+    usedFallback: cursor.usedFallback,
+    fallbackReason: cursor.reason,
     maxAgeHours,
   });
 
@@ -66,19 +85,42 @@ async function handleScheduled(controller: ScheduledController, env: Env): Promi
       maxAgeHours,
       includeAudio: false,
       maxItems: 50,
-      // Supabase check constraint currently permits only 'webhook' for processed_lifelogs.sync_source.
-      // Keep cron ingestion compatible (provenance can be inferred from logs/metrics if needed).
       syncSource: 'webhook',
     });
-    safeLog.info('[Scheduled] Limitless scheduled sync completed (limitless-only)', {
+
+    // Determine new cursor value: latest lifelog endTime, or now() if no data
+    const newCursorValue = endTime;
+
+    // Update cursor (optimistic lock; safe to skip on conflict)
+    const updated = await updateCursor(
+      supabaseConfig,
+      'limitless',
+      newCursorValue,
+      cursor.updatedAt,
+      result.synced,
+      result.errors.length > 0 ? result.errors[0] : null
+    );
+
+    safeLog.info('[Scheduled] Limitless scheduled sync completed (cursor-based)', {
       userId: maskUserId(userId),
       synced: result.synced,
       skipped: result.skipped,
       errors: result.errors.length,
+      cursorUpdated: updated,
       durationMs: Date.now() - startedAt,
     });
   } catch (error) {
-    safeLog.error('[Scheduled] Limitless scheduled sync failed (limitless-only)', {
+    // Record error in cursor but don't advance it
+    await updateCursor(
+      supabaseConfig,
+      'limitless',
+      cursor.startTime,
+      cursor.updatedAt,
+      0,
+      error instanceof Error ? error.message : String(error)
+    ).catch(() => {});
+
+    safeLog.error('[Scheduled] Limitless scheduled sync failed (cursor-based)', {
       userId: maskUserId(userId),
       error: error instanceof Error ? error.message : String(error),
       durationMs: Date.now() - startedAt,
