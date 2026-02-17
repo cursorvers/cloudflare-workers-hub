@@ -71,6 +71,8 @@ const GetLifelogsOptionsSchema = z.object({
   cursor: z.string().optional(),
   startTime: z.string().optional(),
   endTime: z.string().optional(),
+  direction: z.enum(['asc', 'desc']).optional(),
+  timezone: z.string().optional(),
 });
 
 export type GetLifelogsOptions = z.infer<typeof GetLifelogsOptionsSchema>;
@@ -170,10 +172,16 @@ export async function getRecentLifelogs(
       params.append('cursor', validatedOptions.cursor);
     }
     if (validatedOptions.startTime) {
-      params.append('start_time', validatedOptions.startTime);
+      params.append('start', validatedOptions.startTime);
     }
     if (validatedOptions.endTime) {
-      params.append('end_time', validatedOptions.endTime);
+      params.append('end', validatedOptions.endTime);
+    }
+    if (validatedOptions.direction) {
+      params.append('direction', validatedOptions.direction);
+    }
+    if (validatedOptions.timezone) {
+      params.append('timezone', validatedOptions.timezone);
     }
 
     // Make API request with retry logic
@@ -693,6 +701,8 @@ export async function syncRangeToSupabase(
       cursor,
       startTime: validatedOptions.startTime,
       endTime: validatedOptions.endTime,
+      direction: 'asc',
+      timezone: 'Asia/Tokyo',
     });
 
     if (result.lifelogs.length === 0) {
