@@ -27,11 +27,13 @@ function isAuthorized(req: Request, env: Env): boolean {
   const m = auth.match(/^Bearer\s+(.+)$/i);
   if (!m) return false;
   const token = m[1].trim();
-  if (env.LIMITLESS_SYNC_WEBHOOK_KEY) return token === env.LIMITLESS_SYNC_WEBHOOK_KEY;
-  if (env.MONITORING_API_KEY && token === env.MONITORING_API_KEY) return true;
-  if (env.ADMIN_API_KEY && token === env.ADMIN_API_KEY) return true;
-  if (env.WORKERS_API_KEY && token === env.WORKERS_API_KEY) return true;
-  return false;
+  const validKeys = [
+    env.LIMITLESS_SYNC_WEBHOOK_KEY,
+    env.MONITORING_API_KEY,
+    env.ADMIN_API_KEY,
+    env.WORKERS_API_KEY,
+  ].filter(Boolean);
+  return validKeys.some(key => key === token);
 }
 
 function json(data: unknown, status = 200): Response {
