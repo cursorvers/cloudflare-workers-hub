@@ -8,6 +8,10 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: tutti-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
   tutti-review:
     name: Tutti 6-Parallel Review
