@@ -50,6 +50,21 @@ jobs:
           npm install openai 2>/dev/null || true
           npm install -g @openai/codex 2>/dev/null || true
 
+      - name: Setup Codex CLI auth (Pro subscription)
+        if: matrix.provider == 'codex'
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          mkdir -p ~/.codex
+          echo "$CODEX_AUTH_JSON" > ~/.codex/auth.json
+          chmod 600 ~/.codex/auth.json
+          cat > ~/.codex/config.toml << 'TOML'
+          approval_policy = "never"
+          sandbox_mode = "read-only"
+          model = "gpt-5.2-codex"
+          model_reasoning_effort = "medium"
+          TOML
+
       - name: Extract task from issue
         id: extract
         env:
@@ -63,8 +78,6 @@ jobs:
 
       - name: Run ${{ matrix.provider }} ${{ matrix.agent }}
         env:
-          CI: 'true'
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
         run: |

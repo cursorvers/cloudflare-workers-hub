@@ -385,11 +385,9 @@ async function main() {
   const startTime = Date.now();
 
   const safeEnv = { ...process.env };
-  // In CI/GHA, keep OPENAI_API_KEY for codex auth; locally use Pro subscription
-  if (!process.env.CI) {
-    delete safeEnv.OPENAI_API_KEY;
-    delete safeEnv.OPENAI_ORG_ID;
-  }
+  // Pro subscription auth via ~/.codex/auth.json (both local and CI)
+  delete safeEnv.OPENAI_API_KEY;
+  delete safeEnv.OPENAI_ORG_ID;
   safeEnv.CC_SKIP_HOOKS = 'true';
 
   const reasoningEffort = (agent === 'security-analyst') ? 'high' : 'medium';
