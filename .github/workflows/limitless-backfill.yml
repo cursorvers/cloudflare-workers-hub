@@ -81,7 +81,7 @@ jobs:
               synced=$(echo "$response" | jq -r '.synced // 0') || { echo "  ERROR: parse failed"; break; }
               skipped=$(echo "$response" | jq -r '.skipped // 0')
               errors=$(echo "$response" | jq -r '.errors | length // 0')
-              done_flag=$(echo "$response" | jq -r '.done // true')
+              done_flag=$(echo "$response" | jq -r 'if .done then "true" else "false" end')
               next_cursor=$(echo "$response" | jq -r '.nextCursor // empty')
               pages=$(echo "$response" | jq -r '.pagesProcessed // 0')
               duration=$(echo "$response" | jq -r '.durationMs // 0')
