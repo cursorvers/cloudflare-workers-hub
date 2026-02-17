@@ -21,7 +21,7 @@ import { handleLimitlessWebhookSimple } from './handlers/limitless-webhook-simpl
 import { handleLimitlessBackfill } from './handlers/limitless-backfill';
 import { syncToSupabase } from './services/limitless';
 import { getCursor, updateCursor } from './services/sync-cursor';
-import { SupabaseConfig } from './services/supabase-client';
+import { SupabaseConfig, supabaseSelect } from './services/supabase-client';
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -134,12 +134,41 @@ export default {
     const path = url.pathname;
 
     if (path === '/health') {
-      // Intentionally minimal and safe to expose.
-      return json({
+      const health: Record<string, unknown> = {
         status: 'ok',
         worker: 'limitless-only',
         time: new Date().toISOString(),
-      });
+      };
+
+      // Phase 3: Include cursor state and recent sync count for monitoring
+      if (env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY) {
+        const sbConfig: SupabaseConfig = {
+          url: env.SUPABASE_URL,
+          serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+        };
+        try {
+          const cursorResult = await getCursor(sbConfig, 'limitless');
+          health.cursor = {
+            value: cursorResult.startTime.toISOString(),
+            usedFallback: cursorResult.usedFallback,
+            reason: cursorResult.reason,
+          };
+
+          const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+          const countResult = await supabaseSelect<{ id: string }>(
+            sbConfig,
+            'processed_lifelogs',
+            `start_time=gte.${yesterday}&select=id&limit=200`
+          );
+          health.last24h = {
+            count: Array.isArray(countResult.data) ? countResult.data.length : 0,
+          };
+        } catch {
+          health.cursor = { error: 'failed to read' };
+        }
+      }
+
+      return json(health);
     }
 
     if (path === '/api/limitless/webhook-sync') {
