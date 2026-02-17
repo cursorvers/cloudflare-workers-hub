@@ -4,6 +4,7 @@
  * Exposes:
  * - GET  /health
  * - POST /api/limitless/webhook-sync  (auth required; KV-free)
+ * - POST /api/limitless/backfill      (auth required; day-by-day range sync)
  *
  * Scheduled:
  * - cron: `0 * * * *` (hourly) performs scheduled sync using env.LIMITLESS_USER_ID
@@ -16,6 +17,7 @@
 import { Env } from './types';
 import { safeLog, maskUserId } from './utils/log-sanitizer';
 import { handleLimitlessWebhookSimple } from './handlers/limitless-webhook-simple';
+import { handleLimitlessBackfill } from './handlers/limitless-backfill';
 import { syncToSupabase } from './services/limitless';
 
 function json(data: unknown, status = 200): Response {
@@ -49,7 +51,7 @@ async function handleScheduled(controller: ScheduledController, env: Env): Promi
   }
 
   const syncIntervalHours = parseInt(env.LIMITLESS_SYNC_INTERVAL_HOURS || '1', 10);
-  const maxAgeHours = Math.max(1, syncIntervalHours + 2); // tolerate missed runs without exploding cost
+  const maxAgeHours = 24; // 24h window to tolerate missed runs (Phase 1 fix, Issue #36/#38)
 
   safeLog.info('[Scheduled] Starting Limitless scheduled sync (limitless-only)', {
     userId: maskUserId(userId),
@@ -63,7 +65,7 @@ async function handleScheduled(controller: ScheduledController, env: Env): Promi
       userId,
       maxAgeHours,
       includeAudio: false,
-      maxItems: 5,
+      maxItems: 50,
       // Supabase check constraint currently permits only 'webhook' for processed_lifelogs.sync_source.
       // Keep cron ingestion compatible (provenance can be inferred from logs/metrics if needed).
       syncSource: 'webhook',
@@ -100,6 +102,10 @@ export default {
 
     if (path === '/api/limitless/webhook-sync') {
       return handleLimitlessWebhookSimple(request, env);
+    }
+
+    if (path === '/api/limitless/backfill') {
+      return handleLimitlessBackfill(request, env);
     }
 
     return json({ error: 'Not Found' }, 404);
