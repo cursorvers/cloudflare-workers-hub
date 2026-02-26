@@ -91,7 +91,7 @@ jobs:
             2>&1 | tee "/tmp/${{ matrix.provider }}-${{ matrix.agent }}.log" || true
 
       - name: Upload result
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: tutti-${{ matrix.provider }}-${{ matrix.agent }}
