@@ -17,6 +17,7 @@ import { authenticateWithAccess, mapAccessUserToInternal } from './utils/cloudfl
 import { isFreeeIntegrationEnabled } from './utils/freee-integration';
 import { createSentryConfig } from './utils/sentry';
 import { doFetch } from './utils/do-fetch';
+import { buildCorsHeaders, isOriginAllowed } from './utils/cors';
 
 // Durable Objects — wrapped with Sentry for error monitoring
 import { TaskCoordinator as _TaskCoordinator } from './durable-objects/task-coordinator';
@@ -870,7 +871,7 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
         });
       } catch (error) {
         safeLog.error('[freee OAuth] Error', { error: String(error) });
-        return new Response(`OAuth error: ${error}`, { status: 500 });
+        return new Response('OAuth processing failed. Check server logs for details.', { status: 500 });
       }
     }
 
@@ -1105,32 +1106,14 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
 
     // Strategic Advisor API endpoints (for FUGUE insights) - with CORS
 	    if (path.startsWith('/api/advisor')) {
-	      // CSRF protection: restrict CORS to same origin or trusted domains
 	      const origin = request.headers.get('Origin') || '';
-	      const allowedOrigins = [
-	        workerOrigin,
-	        'https://orchestrator-hub.masa-stage1.workers.dev',
-	        'https://orchestrator-hub-production.masa-stage1.workers.dev',
-	        'https://orchestrator-hub-canary.masa-stage1.workers.dev',
-	        'https://cockpit-pwa.vercel.app',
-	        'http://localhost:3000',
-	        'http://localhost:8787',
-	      ];
-      const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
-      const corsHeaders = {
-        'Access-Control-Allow-Origin': allowOrigin,
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-        'Access-Control-Allow-Credentials': 'true',
-      };
+      const corsHeaders = buildCorsHeaders(origin, workerOrigin);
 
-      // Handle CORS preflight
       if (request.method === 'OPTIONS') {
         return new Response(null, { status: 204, headers: corsHeaders });
       }
 
-      // CSRF protection: Reject cross-origin POST requests without valid origin
-      if (request.method === 'POST' && origin && !allowedOrigins.includes(origin)) {
+      if (request.method === 'POST' && origin && !isOriginAllowed(origin, workerOrigin)) {
         safeLog.warn('[Advisor API] CSRF: rejected cross-origin POST', { origin });
         return new Response(JSON.stringify({ error: 'Forbidden: Invalid origin' }), {
           status: 403, headers: { 'Content-Type': 'application/json' },
@@ -1138,8 +1121,6 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
       }
 
       const response = await handleAdvisorAPI(request, env, path);
-
-      // Add CORS headers to response
       const newResponse = new Response(response.body, response);
       Object.entries(corsHeaders).forEach(([key, value]) => {
         newResponse.headers.set(key, value);
@@ -1159,33 +1140,14 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
 
     // Cockpit API endpoints (for FUGUE monitoring) - with CORS
 	    if (path.startsWith('/api/cockpit')) {
-	      // CSRF protection: restrict CORS to same origin or trusted domains
 	      const origin = request.headers.get('Origin') || '';
-	      const allowedOrigins = [
-	        workerOrigin,
-	        'https://orchestrator-hub.masa-stage1.workers.dev',
-	        'https://orchestrator-hub-production.masa-stage1.workers.dev',
-	        'https://orchestrator-hub-canary.masa-stage1.workers.dev',
-	        'https://cockpit-pwa.vercel.app',
-	        'https://fugue-system-ui.vercel.app',
-	        'http://localhost:3000',
-	        'http://localhost:8787',
-      ];
-      const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
-      const corsHeaders = {
-        'Access-Control-Allow-Origin': allowOrigin,
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-        'Access-Control-Allow-Credentials': 'true',
-      };
+      const corsHeaders = buildCorsHeaders(origin, workerOrigin, 'GET, POST, PUT, DELETE, OPTIONS');
 
-      // Handle CORS preflight
       if (request.method === 'OPTIONS') {
         return new Response(null, { status: 204, headers: corsHeaders });
       }
 
-      // CSRF protection: Reject cross-origin POST requests without valid origin
-      if (request.method === 'POST' && origin && !allowedOrigins.includes(origin)) {
+      if (request.method === 'POST' && origin && !isOriginAllowed(origin, workerOrigin)) {
         safeLog.warn('[Cockpit API] CSRF: rejected cross-origin POST', { origin });
         return new Response(JSON.stringify({ error: 'Forbidden: Invalid origin' }), {
           status: 403, headers: { 'Content-Type': 'application/json' },
@@ -1193,8 +1155,6 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
       }
 
       const response = await handleCockpitAPI(request, env, path);
-
-      // Add CORS headers to response
       const newResponse = new Response(response.body, response);
       Object.entries(corsHeaders).forEach(([key, value]) => {
         newResponse.headers.set(key, value);
@@ -1210,25 +1170,13 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
         });
       }
 
-	      // CORS support for PWA
 	      const origin = request.headers.get('Origin') || '';
-	      const allowedOrigins = [
-	        workerOrigin,
-	        'https://orchestrator-hub.masa-stage1.workers.dev',
-	        'https://orchestrator-hub-production.masa-stage1.workers.dev',
-	        'https://orchestrator-hub-canary.masa-stage1.workers.dev',
-	        'https://cockpit-pwa.vercel.app',
-	        'https://fugue-system-ui.vercel.app',
-	        'http://localhost:3000',
-	        'http://localhost:8787',
-	      ];
-      const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
-      const corsHeaders = {
-        'Access-Control-Allow-Origin': allowOrigin,
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Device-Id, X-API-Key',
-        'Access-Control-Allow-Credentials': 'true',
-      };
+      const corsHeaders = buildCorsHeaders(
+        origin,
+        workerOrigin,
+        'GET, POST, OPTIONS',
+        'Content-Type, Authorization, X-Device-Id, X-API-Key',
+      );
 
       if (request.method === 'OPTIONS') {
         return new Response(null, { status: 204, headers: corsHeaders });

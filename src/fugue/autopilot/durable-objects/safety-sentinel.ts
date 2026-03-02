@@ -140,6 +140,20 @@ export class SafetySentinel extends DurableObject<Env> {
   // ===========================================================================
 
   async fetch(request: Request): Promise<Response> {
+    // Verify internal bearer token (defense-in-depth)
+    const expectedKey =
+      this.env.AUTOPILOT_API_KEY ??
+      this.env.WORKERS_API_KEY ??
+      this.env.ASSISTANT_API_KEY;
+
+    if (expectedKey) {
+      const authHeader = request.headers.get('Authorization');
+      const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+      if (token !== expectedKey) {
+        return errorResponse('Unauthorized', 401, 'UNAUTHORIZED');
+      }
+    }
+
     await this.ensureInitialized();
 
     const url = new URL(request.url);

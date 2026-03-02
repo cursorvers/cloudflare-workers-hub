@@ -57,7 +57,13 @@ export class RunCoordinator extends DurableObject<Env> {
     super(ctx, env);
     this.store = new DORunStorage(ctx.storage);
     this.sm = new RunStateMachine(this.store);
-    this.ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
+    // Schedule alarm only if none exists (avoid resetting on every instantiation)
+    this.ctx.blockConcurrencyWhile(async () => {
+      const existing = await this.ctx.storage.getAlarm();
+      if (!existing) {
+        await this.ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
+      }
+    });
   }
 
   /**

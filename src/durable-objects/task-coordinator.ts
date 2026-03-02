@@ -74,8 +74,13 @@ export class TaskCoordinator extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
-    // Set up periodic cleanup alarm (every 60 seconds)
-    this.ctx.storage.setAlarm(Date.now() + 60000);
+    // Schedule alarm only if none exists (avoid resetting on every instantiation)
+    this.ctx.blockConcurrencyWhile(async () => {
+      const existing = await this.ctx.storage.getAlarm();
+      if (!existing) {
+        await this.ctx.storage.setAlarm(Date.now() + 60_000);
+      }
+    });
   }
 
   /**

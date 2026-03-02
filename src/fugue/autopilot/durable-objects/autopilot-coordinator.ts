@@ -80,6 +80,7 @@ import {
 } from '../queue/execution-queue';
 import { processExecutionBatch } from '../queue/execution-consumer';
 import { safeLog } from '../../../utils/log-sanitizer';
+import { z } from 'zod';
 
 // =============================================================================
 // Constants
@@ -131,10 +132,12 @@ export interface BudgetSnapshot {
   readonly updatedAt: number;
 }
 
-export interface TransitionRequest {
-  readonly targetMode: RuntimeMode;
-  readonly reason: string;
-}
+const TransitionRequestSchema = z.object({
+  targetMode: z.enum(['NORMAL', 'STOPPED']),
+  reason: z.string().min(1),
+});
+
+export type TransitionRequest = z.infer<typeof TransitionRequestSchema>;
 
 /** Hysteresis state for flap suppression (stored in memory, reset on DO restart) */
 interface HysteresisState {
@@ -364,13 +367,11 @@ export class AutopilotCoordinator extends DurableObject<Env> {
     const body = await request.json().catch(() => null);
     if (!body) return errorResponse('Request body must be valid JSON', 400, 'INVALID_BODY');
 
-    const { targetMode, reason } = body as TransitionRequest;
-    if (!targetMode || !reason) {
-      return errorResponse('targetMode and reason are required', 400, 'VALIDATION_ERROR');
+    const parsed = TransitionRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      return errorResponse(parsed.error.message, 400, 'VALIDATION_ERROR');
     }
-    if (targetMode !== 'NORMAL' && targetMode !== 'STOPPED') {
-      return errorResponse('targetMode must be NORMAL or STOPPED', 400, 'VALIDATION_ERROR');
-    }
+    const { targetMode, reason } = parsed.data;
 
     const now = Date.now();
 
