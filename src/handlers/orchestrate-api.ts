@@ -375,10 +375,10 @@ async function syncRunStatusToD1(
   runId: string,
 ): Promise<void> {
   try {
-    const stateRes = await stub.fetch(new Request('https://do/state', {
+    const stateRes = await doFetch(stub, 'https://do/state', {
       method: 'GET',
       headers: bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {},
-    }));
+    }, { retries: 1 });
 
     if (!stateRes.ok) return;
 

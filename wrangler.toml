@@ -115,6 +115,7 @@ index_name = "obsidian-knowledge"
 crons = ["0 * * * *", "0 21 * * *", "0 0 * * SUN"]
 
 # Environment variables
+# NOTE: SENTRY_DSN must be set via `wrangler secret put SENTRY_DSN` for each environment
 [vars]
 ENVIRONMENT = "production"
 DEPLOY_TARGET = "hub"

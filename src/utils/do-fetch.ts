@@ -88,20 +88,45 @@ export async function doFetch(
   const cbName = circuitName ?? deriveCBName(url);
   const cb = getCircuitBreaker(cbName);
 
-  let lastError: Error | undefined;
+  // C-3: Guard against retrying non-idempotent operations
+  const method = (
+    init?.method ?? (input instanceof Request ? input.method : 'GET')
+  ).toUpperCase();
+  const effectiveRetries = retries > 0 && method !== 'GET' && method !== 'HEAD'
+    ? 0 // Non-idempotent: silently disable retries to prevent duplicate writes
+    : retries;
 
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  if (retries > 0 && effectiveRetries === 0) {
+    safeLog.warn(`[doFetch] Retries disabled for non-idempotent ${method} ${sanitizeUrl(url)}`);
+  }
+
+  let lastError: Error | undefined;
+  let lastResponse: Response | undefined;
+
+  for (let attempt = 0; attempt <= effectiveRetries; attempt++) {
     try {
       const response = await cb.execute(() => fetchWithTimeout(stub, input, init, timeoutMs));
 
-      if (!response.ok && response.status >= 500) {
-        // Server error — treat as failure for circuit breaker tracking
-        // but still return the response (caller decides what to do)
+      // C-1: Track 5xx as circuit breaker failure (undo the success recorded by execute)
+      if (response.status >= 500) {
+        cb.recordFailure();
         addBreadcrumb('do-fetch', `DO ${cbName} returned ${response.status}`, {
           url: sanitizeUrl(url),
           status: response.status,
           attempt,
         });
+        lastResponse = response;
+        lastError = new Error(`DO ${cbName} returned ${response.status}`);
+
+        // Retry 5xx for idempotent operations
+        if (attempt < effectiveRetries) {
+          const jitter = Math.random() * 0.3 * retryDelayMs;
+          const delay = Math.min(retryDelayMs * Math.pow(2, attempt) + jitter, 10_000);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+        // Last attempt — return the 5xx response (caller decides)
+        return response;
       }
 
       return response;
@@ -115,13 +140,12 @@ export async function doFetch(
         throw error; // Don't retry when circuit is open
       }
 
-      safeLog.warn(`[doFetch] ${cbName} attempt ${attempt + 1}/${retries + 1} failed`, {
+      safeLog.warn(`[doFetch] ${cbName} attempt ${attempt + 1}/${effectiveRetries + 1} failed`, {
         error: (error as Error).message,
         url: sanitizeUrl(url),
       });
 
-      if (attempt < retries) {
-        // Exponential backoff with jitter
+      if (attempt < effectiveRetries) {
         const jitter = Math.random() * 0.3 * retryDelayMs;
         const delay = Math.min(retryDelayMs * Math.pow(2, attempt) + jitter, 10_000);
         await new Promise((resolve) => setTimeout(resolve, delay));
@@ -129,6 +153,8 @@ export async function doFetch(
     }
   }
 
+  // Return last 5xx response if available, otherwise throw
+  if (lastResponse) return lastResponse;
   throw lastError!;
 }
 

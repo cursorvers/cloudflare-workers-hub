@@ -15,6 +15,7 @@ import {
   setUser as sentrySetUser,
   withScope,
 } from '@sentry/cloudflare';
+import { safeLog } from './log-sanitizer';
 
 export interface SentryEnv {
   SENTRY_DSN?: string;
@@ -93,6 +94,9 @@ function scrubPii(event: ErrorEvent): ErrorEvent | null {
  * Used by index.ts to initialize Sentry per-request.
  */
 export function createSentryConfig(env: SentryEnv) {
+  if (!env.SENTRY_DSN) {
+    safeLog.warn('[Sentry] SENTRY_DSN not configured — error monitoring is disabled');
+  }
   const environment = resolveEnvironment(env);
   return {
     dsn: env.SENTRY_DSN,
