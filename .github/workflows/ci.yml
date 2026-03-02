@@ -108,6 +108,12 @@ jobs:
         # IMPORTANT: Without --remote this applies to a local DB (no-op for production).
         run: npx wrangler d1 migrations apply DB --env= --remote
 
+      - name: Inject SENTRY_RELEASE from git SHA
+        if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
+        run: |
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          sed -i "s/SENTRY_RELEASE = \"orchestrator-hub@local\"/SENTRY_RELEASE = \"orchestrator-hub@${SHORT_SHA}\"/" wrangler.toml
+
       - name: Deploy to Cloudflare Workers
         if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
         uses: cloudflare/wrangler-action@v3
