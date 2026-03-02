@@ -1,4 +1,5 @@
 import type { Env } from '../../../types';
+import { doFetch } from '../../../utils/do-fetch';
 import {
   authenticateBearer,
   verifyWebhookSignature,
@@ -158,13 +159,11 @@ async function proxyToCoordinator(
     headers.set('Authorization', `Bearer ${env.AUTOPILOT_API_KEY}`);
   }
 
-  const doRequest = new Request(`https://autopilot-do${doPath}`, {
+  return doFetch(stub, `https://autopilot-do${doPath}`, {
     method: request.method,
     headers,
     body: body ?? undefined,
   });
-
-  return stub.fetch(doRequest);
 }
 
 export async function handleAutopilotAPI(

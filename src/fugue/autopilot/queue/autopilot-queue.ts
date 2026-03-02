@@ -11,6 +11,7 @@
 import { z } from 'zod';
 import type { Env } from '../../../types';
 import { safeLog } from '../../../utils/log-sanitizer';
+import { doFetch } from '../../../utils/do-fetch';
 
 // =============================================================================
 // Task Types & Validation
@@ -243,13 +244,11 @@ export async function dispatchToDO(
     }
 
     const method = task.type === 'GUARD_CHECK' ? 'POST' : 'POST';
-    const response = await stub.fetch(
-      new Request(`https://autopilot-do${doPath}`, {
-        method,
-        headers,
-        body: JSON.stringify(task.payload),
-      }),
-    );
+    const response = await doFetch(stub, `https://autopilot-do${doPath}`, {
+      method,
+      headers,
+      body: JSON.stringify(task.payload),
+    });
 
     const data = await response.json().catch(() => null);
     const endMs = Date.now();

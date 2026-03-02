@@ -21,6 +21,7 @@
 
 import type { Env } from '../types';
 import { safeLog } from './log-sanitizer';
+import { doFetch } from './do-fetch';
 
 // =============================================================================
 // Types
@@ -157,7 +158,7 @@ async function checkHttpRateLimit(
       const shard = fnv1a32(clientId) & 255; // 256 shards
       const id = env.RATE_LIMITER.idFromName(`rl:${shard}`);
       const stub = env.RATE_LIMITER.get(id);
-      const resp = await stub.fetch('https://rate-limiter/check', {
+      const resp = await doFetch(stub, 'https://rate-limiter/check', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
