@@ -118,6 +118,8 @@ crons = ["0 * * * *", "0 21 * * *", "0 0 * * SUN"]
 [vars]
 ENVIRONMENT = "production"
 DEPLOY_TARGET = "hub"
+# Sentry release identifier (update on deploy or set via CI/CD)
+SENTRY_RELEASE = "orchestrator-hub@2026.03.02"
 ALLOW_DEV_ORIGINS = "fugue-system-ui.vercel.app"
 LIMITLESS_AUTO_SYNC_ENABLED = "true"
 LIMITLESS_USER_ID = "masayuki"
@@ -159,6 +161,7 @@ local_protocol = "http"
 [env.canary.vars]
 ENVIRONMENT = "production"
 DEPLOY_TARGET = "canary"
+SENTRY_RELEASE = "orchestrator-hub@2026.03.02"
 # Safety: canary shares production resources unless you explicitly split D1/KV/R2.
 # Block write methods by default to avoid accidental production data mutation.
 CANARY_WRITE_ENABLED = "true"
@@ -242,6 +245,7 @@ bucket_name = "receipt-worm-storage-canary"
 [env.dev.vars]
 ENVIRONMENT = "development"
 DEPLOY_TARGET = "dev"
+SENTRY_RELEASE = "orchestrator-hub@2026.03.02"
 ALLOW_DEV_ORIGINS = "localhost:3000,fugue-system-ui.vercel.app"
 LIMITLESS_AUTO_SYNC_ENABLED = "false"
 LIMITLESS_USER_ID = "masayuki"
