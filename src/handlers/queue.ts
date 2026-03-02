@@ -14,6 +14,7 @@
 
 import { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
+import { doFetch } from '../utils/do-fetch';
 import { checkRateLimit, createRateLimitResponse } from '../utils/rate-limiter';
 import { validateRequestBody, validatePathParameter } from '../schemas/validation-helper';
 import {
@@ -60,7 +61,7 @@ async function coordinatorFetch(
   const init: RequestInit = { method, headers };
   if (body) init.body = JSON.stringify(body);
 
-  const res = await stub.fetch(new Request(`http://do${path}`, init));
+  const res = await doFetch(stub, `http://do${path}`, init);
   const data = await res.json() as Record<string, unknown>;
   return { status: res.status, data };
 }

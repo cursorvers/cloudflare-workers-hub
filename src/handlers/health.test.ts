@@ -151,6 +151,7 @@ describe('Monitoring Endpoint Authentication', () => {
       const body = await response.json();
       expect(body).toHaveProperty('timestamp');
       expect(body).toHaveProperty('summary');
+      expect(body).toHaveProperty('circuitBreakers');
     });
 
     it('should fall back to ADMIN_API_KEY when MONITORING_API_KEY is not set', async () => {
@@ -163,6 +164,7 @@ describe('Monitoring Endpoint Authentication', () => {
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body).toHaveProperty('summary');
+      expect(body).toHaveProperty('circuitBreakers');
     });
 
     it('should allow public access when neither key is configured', async () => {

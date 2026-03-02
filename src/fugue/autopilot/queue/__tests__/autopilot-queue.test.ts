@@ -238,7 +238,7 @@ describe('fugue/autopilot/queue/autopilot-queue', () => {
       const result = await dispatchToDO(env, task);
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe('Network error');
+      expect(result.error).toContain('Network error');
     });
   });
 

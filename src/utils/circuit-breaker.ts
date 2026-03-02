@@ -101,6 +101,11 @@ export class CircuitBreaker {
     };
   }
 
+  /** Manually record a failure (e.g., HTTP 5xx that doesn't throw) */
+  recordFailure(): void {
+    this.onFailure();
+  }
+
   /** Reset the circuit breaker to CLOSED state */
   reset(): void {
     this.transitionTo('CLOSED');

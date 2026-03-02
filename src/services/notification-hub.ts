@@ -12,6 +12,7 @@
 
 import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
+import { doFetch } from '../utils/do-fetch';
 import { sendDiscordNotification, type Notification } from '../handlers/notifications';
 
 export type NotificationSeverity = 'info' | 'warning' | 'error' | 'success';
@@ -97,7 +98,7 @@ export async function notify(
 
       // We'll broadcast via a message to all connected clients
       // The DO has a /broadcast-alert endpoint we can call
-      const response = await stub.fetch('http://internal/broadcast-alert', {
+      const response = await doFetch(stub, 'http://internal/broadcast-alert', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(wsAlert),

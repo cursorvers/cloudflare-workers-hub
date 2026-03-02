@@ -15,6 +15,8 @@ import { safeLog } from './utils/log-sanitizer';
 import { getDeployTarget, isCanaryWriteEnabled, maybeBlockCanaryWrite } from './utils/canary-write-gate';
 import { authenticateWithAccess, mapAccessUserToInternal } from './utils/cloudflare-access';
 import { isFreeeIntegrationEnabled } from './utils/freee-integration';
+import { createSentryConfig } from './utils/sentry';
+import { doFetch } from './utils/do-fetch';
 
 // Durable Objects — wrapped with Sentry for error monitoring
 import { TaskCoordinator as _TaskCoordinator } from './durable-objects/task-coordinator';
@@ -25,13 +27,7 @@ import { RunCoordinator as _RunCoordinator } from './durable-objects/run-coordin
 import { AutopilotCoordinator as _AutopilotCoordinator } from './fugue/autopilot/durable-objects/autopilot-coordinator';
 import { SafetySentinel as _SafetySentinel } from './fugue/autopilot/durable-objects/safety-sentinel';
 
-const sentryDOConfig = (env: Env) => ({
-  dsn: env.SENTRY_DSN,
-  environment: env.DEPLOY_TARGET || env.ENVIRONMENT || 'production',
-  release: env.SENTRY_RELEASE || 'orchestrator-hub@unknown',
-  tracesSampleRate: env.ENVIRONMENT === 'production' ? 0.1 : 1.0,
-  sendDefaultPii: false,
-});
+const sentryDOConfig = (env: Env) => createSentryConfig(env);
 
 export const TaskCoordinator = instrumentDurableObjectWithSentry(sentryDOConfig, _TaskCoordinator);
 export const CockpitWebSocket = instrumentDurableObjectWithSentry(sentryDOConfig, _CockpitWebSocket);
@@ -409,6 +405,37 @@ const worker = {
 	    }
       serviceRoleMappingsInitialized = true;
 	    }
+
+    // Sentry test event endpoint (admin only, verifies Sentry connectivity)
+    if (path === '/api/sentry/test' && request.method === 'POST') {
+      const { verifyAPIKey } = await import('./utils/api-auth');
+      if (!verifyAPIKey(request, env, 'admin')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const { captureMessage, captureException } = await import('./utils/sentry');
+      try {
+        captureMessage(`[Sentry Test] Workers Hub connectivity check at ${new Date().toISOString()}`, 'info');
+        captureException(new Error('[Sentry Test] Deliberate test error from Workers Hub'), {
+          source: 'sentry-test-endpoint',
+          deployTarget: env.DEPLOY_TARGET,
+          environment: env.ENVIRONMENT,
+        });
+        return new Response(JSON.stringify({
+          success: true,
+          message: 'Test event and test error sent to Sentry',
+          dsn: env.SENTRY_DSN ? 'configured' : 'missing',
+          environment: env.DEPLOY_TARGET || env.ENVIRONMENT,
+          release: env.SENTRY_RELEASE || 'orchestrator-hub@unknown',
+        }), { headers: { 'Content-Type': 'application/json' } });
+      } catch (error) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: String(error),
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      }
+    }
 
     // Health check endpoint
     if (path === '/health') {
@@ -1233,7 +1260,7 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
 
       // Map API paths to DO endpoints
       const subPath = path.replace('/api/notifications', '') || '/state';
-      const response = await doStub.fetch(new Request(`http://do${subPath}`, request));
+      const response = await doFetch(doStub, new Request(`http://do${subPath}`, request));
 
       // Add CORS headers
       const newResponse = new Response(response.body, response);

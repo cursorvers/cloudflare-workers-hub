@@ -150,11 +150,11 @@ describe('Limitless Service', () => {
       await getRecentLifelogs('test-api-key', { startTime, endTime });
 
       expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining('start_time='),
+        expect.stringContaining('start='),
         expect.any(Object)
       );
       expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining('end_time='),
+        expect.stringContaining('end='),
         expect.any(Object)
       );
     });
