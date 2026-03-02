@@ -120,8 +120,8 @@ export async function doFetch(
 
         // Retry 5xx for idempotent operations
         if (attempt < effectiveRetries) {
-          const jitter = Math.random() * 0.3 * retryDelayMs;
-          const delay = Math.min(retryDelayMs * Math.pow(2, attempt) + jitter, 10_000);
+          const base = Math.min(retryDelayMs * Math.pow(2, attempt), 10_000);
+          const delay = base + Math.random() * 0.3 * base;
           await new Promise((resolve) => setTimeout(resolve, delay));
           continue;
         }
@@ -153,9 +153,13 @@ export async function doFetch(
     }
   }
 
-  // Return last 5xx response if available, otherwise throw
+  // Return last 5xx response if available, otherwise throw with context
   if (lastResponse) return lastResponse;
-  throw lastError!;
+  const contextError = new Error(
+    `[doFetch] ${cbName} failed after ${effectiveRetries + 1} attempt(s): ${lastError?.message}`,
+  );
+  contextError.cause = lastError;
+  throw contextError;
 }
 
 // ============================================================================
