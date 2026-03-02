@@ -114,6 +114,11 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
+      - name: Inject SENTRY_RELEASE from git SHA
+        run: |
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          sed -i "s/SENTRY_RELEASE = \"orchestrator-hub@local\"/SENTRY_RELEASE = \"orchestrator-hub@${SHORT_SHA}\"/" wrangler.toml
+
       - name: Deploy (hub)
         if: ${{ github.event.inputs.target == 'hub' }}
         uses: cloudflare/wrangler-action@v3
