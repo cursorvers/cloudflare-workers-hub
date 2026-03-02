@@ -81,6 +81,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
+    env:
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 
     steps:
       - name: Checkout
@@ -118,6 +120,32 @@ jobs:
         run: |
           SHORT_SHA="${GITHUB_SHA:0:7}"
           sed -i "s/SENTRY_RELEASE = \"orchestrator-hub@local\"/SENTRY_RELEASE = \"orchestrator-hub@${SHORT_SHA}\"/" wrangler.toml
+
+      - name: Build worker with sourcemaps (hub)
+        if: ${{ github.event.inputs.target == 'hub' }}
+        run: npx wrangler deploy --dry-run --outdir dist --env=
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Build worker with sourcemaps (canary)
+        if: ${{ github.event.inputs.target == 'canary' || github.event.inputs.target == 'hub-production' }}
+        run: npx wrangler deploy --dry-run --outdir dist --env canary
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Upload sourcemaps to Sentry
+        if: ${{ env.SENTRY_AUTH_TOKEN != '' }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          npx sentry-cli sourcemaps upload \
+            --org cursorvers \
+            --project javascript-react \
+            --release "orchestrator-hub@${SHORT_SHA}" \
+            dist/
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 
       - name: Deploy (hub)
         if: ${{ github.event.inputs.target == 'hub' }}

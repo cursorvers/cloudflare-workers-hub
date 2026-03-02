@@ -2,6 +2,7 @@ name = "orchestrator-hub"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
+upload_source_maps = true
 
 # Workers AI binding
 [ai]
