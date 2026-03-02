@@ -16,6 +16,7 @@ import { getDeployTarget, isCanaryWriteEnabled, maybeBlockCanaryWrite } from './
 import { authenticateWithAccess, mapAccessUserToInternal } from './utils/cloudflare-access';
 import { isFreeeIntegrationEnabled } from './utils/freee-integration';
 import { createSentryConfig } from './utils/sentry';
+import { doFetch } from './utils/do-fetch';
 
 // Durable Objects — wrapped with Sentry for error monitoring
 import { TaskCoordinator as _TaskCoordinator } from './durable-objects/task-coordinator';
@@ -1259,7 +1260,7 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
 
       // Map API paths to DO endpoints
       const subPath = path.replace('/api/notifications', '') || '/state';
-      const response = await doStub.fetch(new Request(`http://do${subPath}`, request));
+      const response = await doFetch(doStub, new Request(`http://do${subPath}`, request));
 
       // Add CORS headers
       const newResponse = new Response(response.body, response);

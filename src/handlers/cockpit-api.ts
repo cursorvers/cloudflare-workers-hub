@@ -44,6 +44,7 @@ import {
   verifyPassword,
   PasswordSchema,
 } from '../utils/password-auth';
+import { doFetch } from '../utils/do-fetch';
 
 // =============================================================================
 // Request Schemas
@@ -626,7 +627,7 @@ async function handleCreateTask(request: Request, env: Env): Promise<Response> {
         const doId = env.COCKPIT_WS.idFromName('cockpit');
         const doStub = env.COCKPIT_WS.get(doId);
 
-        await doStub.fetch(new Request('http://do/broadcast-task', {
+        await doFetch(doStub, 'http://do/broadcast-task', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -635,7 +636,7 @@ async function handleCreateTask(request: Request, env: Env): Promise<Response> {
             taskType: validated.executor || 'unknown',
             payload: validated.payload || {},
           }),
-        }));
+        });
 
         safeLog.log('[CockpitAPI] Task broadcasted to agents', { taskId });
       } catch (error) {
@@ -758,7 +759,7 @@ async function handleUpdateTask(request: Request, env: Env, taskId: string): Pro
         const doId = env.COCKPIT_WS.idFromName('cockpit');
         const doStub = env.COCKPIT_WS.get(doId);
 
-        await doStub.fetch(new Request('http://do/broadcast-task', {
+        await doFetch(doStub, 'http://do/broadcast-task', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -766,7 +767,7 @@ async function handleUpdateTask(request: Request, env: Env, taskId: string): Pro
             taskId,
             changes: validated,
           }),
-        }));
+        });
       } catch (error) {
         safeLog.warn('[CockpitAPI] Failed to broadcast task update', {
           taskId,
@@ -835,14 +836,14 @@ async function handleDeleteTask(request: Request, env: Env, taskId: string): Pro
         const doId = env.COCKPIT_WS.idFromName('cockpit');
         const doStub = env.COCKPIT_WS.get(doId);
 
-        await doStub.fetch(new Request('http://do/broadcast-task', {
+        await doFetch(doStub, 'http://do/broadcast-task', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             type: 'task_delete',
             taskId,
           }),
-        }));
+        });
       } catch (error) {
         safeLog.warn('[CockpitAPI] Failed to broadcast task deletion', {
           taskId,
@@ -984,7 +985,7 @@ async function handleCommand(request: Request, env: Env): Promise<Response> {
         const doId = env.COCKPIT_WS.idFromName('cockpit');
         const doStub = env.COCKPIT_WS.get(doId);
 
-        await doStub.fetch(new Request('http://do/broadcast-task', {
+        await doFetch(doStub, 'http://do/broadcast-task', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -998,7 +999,7 @@ async function handleCommand(request: Request, env: Env): Promise<Response> {
               dangerReasons: dangerCheck.reasons,
             },
           }),
-        }));
+        });
       } catch (error) {
         safeLog.warn('[CockpitAPI] Failed to broadcast command task', {
           taskId,
@@ -1084,14 +1085,14 @@ async function handleApproveCommand(request: Request, env: Env, taskId: string):
         const doId = env.COCKPIT_WS.idFromName('cockpit');
         const doStub = env.COCKPIT_WS.get(doId);
 
-        await doStub.fetch(new Request('http://do/broadcast-task', {
+        await doFetch(doStub, 'http://do/broadcast-task', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             type: 'command_approved',
             taskId,
           }),
-        }));
+        });
       } catch (error) {
         safeLog.warn('[CockpitAPI] Failed to broadcast command approval', {
           taskId,
@@ -1157,14 +1158,14 @@ async function handleRejectCommand(request: Request, env: Env, taskId: string): 
         const doId = env.COCKPIT_WS.idFromName('cockpit');
         const doStub = env.COCKPIT_WS.get(doId);
 
-        await doStub.fetch(new Request('http://do/broadcast-task', {
+        await doFetch(doStub, 'http://do/broadcast-task', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             type: 'command_rejected',
             taskId,
           }),
-        }));
+        });
       } catch (error) {
         safeLog.warn('[CockpitAPI] Failed to broadcast command rejection', {
           taskId,

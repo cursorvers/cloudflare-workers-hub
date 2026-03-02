@@ -14,6 +14,7 @@
 
 import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
+import { doFetch } from '../utils/do-fetch';
 import {
   authenticateRequest,
   type UserRole,
@@ -257,7 +258,7 @@ async function decomposeAndStart(
       safeLog.warn('[Orchestrate] No API key available for DO auth', { runId });
     }
 
-    const startRes = await stub.fetch(new Request('https://do/start', {
+    const startRes = await doFetch(stub, 'https://do/start', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -273,7 +274,7 @@ async function decomposeAndStart(
           max_attempts: s.max_attempts,
         })),
       }),
-    }));
+    }, { timeoutMs: 10_000 });
 
     if (!startRes.ok) {
       const errText = await startRes.text().catch(() => 'unknown');
@@ -336,7 +337,7 @@ function emitRunEvent(env: Env, event: RunEvent): void {
     const doId = env.SYSTEM_EVENTS.idFromName('default');
     const stub = env.SYSTEM_EVENTS.get(doId);
 
-    void stub.fetch(new Request('https://do/', {
+    void doFetch(stub, 'https://do/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -355,7 +356,7 @@ function emitRunEvent(env: Env, event: RunEvent): void {
           },
         },
       }),
-    })).catch((err: unknown) => {
+    }).catch((err: unknown) => {
       safeLog.warn('[Orchestrate] Failed to emit event', { event: event.event, err: String(err) });
     });
   } catch (err) {

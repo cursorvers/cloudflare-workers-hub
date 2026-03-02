@@ -7,6 +7,7 @@
 
 import { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
+import { doFetch } from '../utils/do-fetch';
 
 /**
  * Alert severity levels
@@ -68,7 +69,7 @@ export async function sendPWAAlert(
     const stub = env.COCKPIT_WS.get(id);
 
     // Call /broadcast-alert endpoint
-    const response = await stub.fetch('https://internal/broadcast-alert', {
+    const response = await doFetch(stub, 'https://internal/broadcast-alert', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
