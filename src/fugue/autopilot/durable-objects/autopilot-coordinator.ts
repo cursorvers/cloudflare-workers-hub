@@ -92,6 +92,7 @@ const STORAGE_KEY_STATE_V2 = 'autopilot:state:v2';
 const STORAGE_KEY_HEARTBEAT = 'autopilot:heartbeat';
 const STORAGE_KEY_CIRCUIT = 'autopilot:circuit';
 const STORAGE_KEY_BUDGET = 'autopilot:budget';
+const STORAGE_KEY_HYSTERESIS = 'autopilot:hysteresis';
 
 /** Hysteresis counters for DEGRADE/RECOVER transitions */
 const DEGRADE_HYSTERESIS_THRESHOLD = 3;
@@ -139,10 +140,10 @@ const TransitionRequestSchema = z.object({
 
 export type TransitionRequest = z.infer<typeof TransitionRequestSchema>;
 
-/** Hysteresis state for flap suppression (stored in memory, reset on DO restart) */
+/** Hysteresis state for flap suppression (persisted to storage) */
 interface HysteresisState {
-  consecutiveDegradeVerdicts: number;
-  consecutiveContinueVerdicts: number;
+  readonly consecutiveDegradeVerdicts: number;
+  readonly consecutiveContinueVerdicts: number;
 }
 
 // =============================================================================
@@ -210,12 +211,13 @@ export class AutopilotCoordinator extends DurableObject<Env> {
     if (this.initialized) return;
 
     try {
-      const [state, stateV2, heartbeat, circuit, budget] = await Promise.all([
+      const [state, stateV2, heartbeat, circuit, budget, hysteresis] = await Promise.all([
         this.ctx.storage.get<RuntimeState>(STORAGE_KEY_STATE),
         this.ctx.storage.get<ExtendedRuntimeState>(STORAGE_KEY_STATE_V2),
         this.ctx.storage.get<HeartbeatState>(STORAGE_KEY_HEARTBEAT),
         this.ctx.storage.get<CircuitBreakerState>(STORAGE_KEY_CIRCUIT),
         this.ctx.storage.get<BudgetSnapshot>(STORAGE_KEY_BUDGET),
+        this.ctx.storage.get<HysteresisState>(STORAGE_KEY_HYSTERESIS),
       ]);
 
       if (state) this.runtimeState = Object.freeze({ ...state });
@@ -236,6 +238,7 @@ export class AutopilotCoordinator extends DurableObject<Env> {
       if (heartbeat) this.heartbeatState = Object.freeze({ ...heartbeat });
       if (circuit) this.circuitBreakerState = Object.freeze({ ...circuit });
       if (budget) this.budgetSnapshot = Object.freeze({ ...budget });
+      if (hysteresis) this.hysteresis = Object.freeze({ ...hysteresis });
     } catch (err) {
       safeLog.error('[AutopilotCoordinator] Storage restore failed (fail-closed)', {
         error: err instanceof Error ? err.message : String(err),
@@ -257,6 +260,7 @@ export class AutopilotCoordinator extends DurableObject<Env> {
       [STORAGE_KEY_HEARTBEAT]: this.heartbeatState,
       [STORAGE_KEY_CIRCUIT]: this.circuitBreakerState,
       [STORAGE_KEY_BUDGET]: this.budgetSnapshot,
+      [STORAGE_KEY_HYSTERESIS]: this.hysteresis,
     });
   }
 
@@ -846,7 +850,11 @@ export class AutopilotCoordinator extends DurableObject<Env> {
         return;
       }
 
-      // Guard checks only when operational (NORMAL or DEGRADED)
+      // Guard checks only when operational (NORMAL or DEGRADED).
+      // NOTE: SafetySentinel also runs guard checks independently as a defense-in-depth
+      // safety net. AutopilotCoordinator handles soft transitions (DEGRADE/RECOVER);
+      // SafetySentinel handles hard STOP only. syncFromSentinel() below ensures
+      // this DO honors SafetySentinel's STOPPED state to prevent divergence.
       if (this.isSystemOperational()) {
         const guardInput: GuardInput = {
           budget: {
@@ -956,6 +964,11 @@ export class AutopilotCoordinator extends DurableObject<Env> {
         }
       }
 
+      // Sentinel sync: honor SafetySentinel's STOPPED state (defense-in-depth)
+      if (this.isSystemOperational()) {
+        await this.syncFromSentinel(now);
+      }
+
       // Execution consumer: process async TOOL_EXECUTION tasks (5s interval)
       if (now - this.lastExecConsumerRunMs >= EXEC_CONSUMER_INTERVAL_MS) {
         this.lastExecConsumerRunMs = now;
@@ -988,6 +1001,51 @@ export class AutopilotCoordinator extends DurableObject<Env> {
           error: alarmErr instanceof Error ? alarmErr.message : String(alarmErr),
         });
       }
+    }
+  }
+
+  /**
+   * Sync from SafetySentinel: if Sentinel has auto-STOPPED, honor it.
+   * Runs best-effort — failure does not block the alarm cycle.
+   */
+  private async syncFromSentinel(now: number): Promise<void> {
+    try {
+      const sentinel = this.env.SAFETY_SENTINEL;
+      if (!sentinel) return;
+
+      const id = sentinel.idFromName('singleton');
+      const stub = sentinel.get(id);
+
+      const authKey =
+        this.env.AUTOPILOT_API_KEY ??
+        this.env.WORKERS_API_KEY ??
+        this.env.ASSISTANT_API_KEY;
+
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authKey) headers['Authorization'] = `Bearer ${authKey}`;
+
+      const res = await stub.fetch(new Request('https://sentinel/status', { headers }));
+      if (!res.ok) return;
+
+      const body = await res.json() as { success: boolean; data?: { mode: string } };
+      if (!body.success || !body.data) return;
+
+      // If Sentinel says STOPPED but we're still operational, honor Sentinel
+      if (body.data.mode === 'STOPPED' && this.isSystemOperational()) {
+        const reason = 'sentinel-sync: SafetySentinel auto-STOPPED, honoring';
+        this.extendedState = applyExtendedTransition(this.extendedState, 'STOPPED', reason, now);
+        this.syncLegacyState(reason, now);
+        this.hysteresis = { consecutiveDegradeVerdicts: 0, consecutiveContinueVerdicts: 0 };
+
+        safeLog.warn('[AutopilotCoordinator] Honoring SafetySentinel STOPPED state', {
+          extendedMode: this.extendedState.mode,
+        });
+      }
+    } catch (err) {
+      // Best-effort: don't block alarm on sentinel communication failure
+      safeLog.warn('[AutopilotCoordinator] Sentinel sync failed (non-blocking)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

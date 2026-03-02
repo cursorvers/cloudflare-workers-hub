@@ -36,18 +36,27 @@ const CRON_WEEKLY_DIGEST = '0 0 * * SUN';  // Sun 00:00 UTC = Sun 09:00 JST
 // ============================================================================
 
 /**
- * Acquire distributed lock using KV compare-and-swap
+ * Acquire distributed lock using KV put-then-verify.
+ *
+ * NOTE: KV has eventual consistency, so there's a small race window
+ * between put and get (~ms). Downstream handlers MUST be idempotent.
+ * The pre-check + UUID pattern narrows the window significantly.
+ *
  * @returns true if lock acquired, false if already held
  */
 async function acquireLock(kv: KVNamespace, lockKey: string, ttlSeconds: number): Promise<boolean> {
-  const lockValue = Date.now().toString();
-  const metadata = { acquiredAt: Date.now() };
-
   try {
+    // Pre-check: skip write if another instance already holds the lock
+    const existing = await kv.get(lockKey);
+    if (existing) return false;
+
+    // Use UUID to distinguish concurrent writers
+    const lockValue = `${Date.now()}-${crypto.randomUUID()}`;
     await kv.put(lockKey, lockValue, {
       expirationTtl: ttlSeconds,
-      metadata,
     });
+
+    // Verify: re-read to confirm our write won the race
     const verifyValue = await kv.get(lockKey);
     return verifyValue === lockValue;
   } catch (error) {

@@ -46,6 +46,8 @@ import type {
 // =============================================================================
 
 const ALARM_INTERVAL_MS = 10_000; // 10s heartbeat alarm
+const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute sliding window
+const RATE_LIMIT_MAX_REQUESTS = 120; // max requests per window
 const STORAGE_KEY_STATE = 'sentinel:state';
 const STORAGE_KEY_HEARTBEAT = 'sentinel:heartbeat';
 const STORAGE_KEY_CIRCUIT = 'sentinel:circuit';
@@ -82,6 +84,7 @@ export class SafetySentinel extends DurableObject<Env> {
   private budgetLimit: number;
   private lastGuardCheck: GuardCheckResult | null;
   private initialized: boolean;
+  private requestTimestamps: number[];
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -92,6 +95,7 @@ export class SafetySentinel extends DurableObject<Env> {
     this.budgetLimit = 200;
     this.lastGuardCheck = null;
     this.initialized = false;
+    this.requestTimestamps = [];
   }
 
   // ===========================================================================
@@ -153,6 +157,16 @@ export class SafetySentinel extends DurableObject<Env> {
         return errorResponse('Unauthorized', 401, 'UNAUTHORIZED');
       }
     }
+
+    // In-memory sliding window rate limit
+    const now = Date.now();
+    this.requestTimestamps = this.requestTimestamps.filter(
+      (t) => now - t < RATE_LIMIT_WINDOW_MS,
+    );
+    if (this.requestTimestamps.length >= RATE_LIMIT_MAX_REQUESTS) {
+      return errorResponse('Too many requests', 429, 'RATE_LIMITED');
+    }
+    this.requestTimestamps = [...this.requestTimestamps, now];
 
     await this.ensureInitialized();
 
