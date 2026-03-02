@@ -12,6 +12,7 @@ import { Env } from '../types';
 import { metricsCollector, featureFlags, rollbackManager } from '../utils/monitoring';
 import { safeLog } from '../utils/log-sanitizer';
 import { verifyAPIKey } from '../utils/api-auth';
+import { getCircuitBreakerStats } from '../utils/do-fetch';
 
 /**
  * Verify API Key for monitoring endpoints
@@ -114,6 +115,7 @@ export async function handleMetrics(request: Request, env: Env): Promise<Respons
         errors: rollbackManager.getErrorCount('clawdbot'),
       },
     },
+    circuitBreakers: getCircuitBreakerStats(),
   }), {
     headers: { 'Content-Type': 'application/json' },
   });
