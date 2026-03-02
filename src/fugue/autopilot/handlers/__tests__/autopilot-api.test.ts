@@ -84,9 +84,10 @@ describe('fugue/autopilot/handlers/autopilot-api', () => {
 
     expect(coordinator.idFromNameSpy).toHaveBeenCalledWith('autopilot');
     expect(coordinator.fetchSpy).toHaveBeenCalledTimes(1);
-    const doRequest = coordinator.fetchSpy.mock.calls[0][0] as Request;
-    expect(new URL(doRequest.url).pathname).toBe('/status');
-    expect(doRequest.headers.get('Authorization')).toBe('Bearer autopilot-api-key');
+    const doUrl = coordinator.fetchSpy.mock.calls[0][0] as string;
+    expect(new URL(doUrl).pathname).toBe('/status');
+    const doInit = coordinator.fetchSpy.mock.calls[0][1] as RequestInit;
+    expect(new Headers(doInit.headers).get('Authorization')).toBe('Bearer autopilot-api-key');
   });
 
   it('POST /transition: Bearer 不正なら 401', async () => {
@@ -147,10 +148,11 @@ describe('fugue/autopilot/handlers/autopilot-api', () => {
 
     expect(response.status).toBe(200);
     expect(coordinator.fetchSpy).toHaveBeenCalledTimes(1);
-    const doRequest = coordinator.fetchSpy.mock.calls[0][0] as Request;
-    expect(new URL(doRequest.url).pathname).toBe('/webhook');
-    expect(doRequest.headers.get('Authorization')).toBe('Bearer autopilot-api-key');
-    expect(await doRequest.text()).toBe(payload);
+    const doUrl = coordinator.fetchSpy.mock.calls[0][0] as string;
+    expect(new URL(doUrl).pathname).toBe('/webhook');
+    const doInit = coordinator.fetchSpy.mock.calls[0][1] as RequestInit;
+    expect(new Headers(doInit.headers).get('Authorization')).toBe('Bearer autopilot-api-key');
+    expect(doInit.body).toBe(payload);
   });
 
   it('OPTIONS は preflight を返す', async () => {
