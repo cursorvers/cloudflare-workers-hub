@@ -57,6 +57,7 @@ export interface Env {
   WHATSAPP_APP_SECRET?: string; // For webhook HMAC verification
   // Monitoring
   SENTRY_DSN?: string;
+  SENTRY_RELEASE?: string;
   // AI Assistant Daemon - Scoped API Keys
   ASSISTANT_API_KEY?: string;      // Legacy: falls back if scoped keys not set
   QUEUE_API_KEY?: string;          // /api/queue, /api/result endpoints

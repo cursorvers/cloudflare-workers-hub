@@ -7,6 +7,7 @@
  * - Claude Orchestrator への転送
  */
 
+import { withSentry, instrumentDurableObjectWithSentry } from '@sentry/cloudflare';
 import { Env } from './types';
 import { CommHubAdapter } from './adapters/commhub';
 import { performStartupCheck } from './utils/secrets-validator';
@@ -15,14 +16,30 @@ import { getDeployTarget, isCanaryWriteEnabled, maybeBlockCanaryWrite } from './
 import { authenticateWithAccess, mapAccessUserToInternal } from './utils/cloudflare-access';
 import { isFreeeIntegrationEnabled } from './utils/freee-integration';
 
-// Durable Objects
-export { TaskCoordinator } from './durable-objects/task-coordinator';
-export { CockpitWebSocket } from './durable-objects/cockpit-websocket';
-export { SystemEvents } from './durable-objects/system-events';
-export { RateLimiter } from './durable-objects/rate-limiter';
-export { RunCoordinator } from './durable-objects/run-coordinator';
-export { AutopilotCoordinator } from './fugue/autopilot/durable-objects/autopilot-coordinator';
-export { SafetySentinel } from './fugue/autopilot/durable-objects/safety-sentinel';
+// Durable Objects — wrapped with Sentry for error monitoring
+import { TaskCoordinator as _TaskCoordinator } from './durable-objects/task-coordinator';
+import { CockpitWebSocket as _CockpitWebSocket } from './durable-objects/cockpit-websocket';
+import { SystemEvents as _SystemEvents } from './durable-objects/system-events';
+import { RateLimiter as _RateLimiter } from './durable-objects/rate-limiter';
+import { RunCoordinator as _RunCoordinator } from './durable-objects/run-coordinator';
+import { AutopilotCoordinator as _AutopilotCoordinator } from './fugue/autopilot/durable-objects/autopilot-coordinator';
+import { SafetySentinel as _SafetySentinel } from './fugue/autopilot/durable-objects/safety-sentinel';
+
+const sentryDOConfig = (env: Env) => ({
+  dsn: env.SENTRY_DSN,
+  environment: env.DEPLOY_TARGET || env.ENVIRONMENT || 'production',
+  release: env.SENTRY_RELEASE || 'orchestrator-hub@unknown',
+  tracesSampleRate: env.ENVIRONMENT === 'production' ? 0.1 : 1.0,
+  sendDefaultPii: false,
+});
+
+export const TaskCoordinator = instrumentDurableObjectWithSentry(sentryDOConfig, _TaskCoordinator);
+export const CockpitWebSocket = instrumentDurableObjectWithSentry(sentryDOConfig, _CockpitWebSocket);
+export const SystemEvents = instrumentDurableObjectWithSentry(sentryDOConfig, _SystemEvents);
+export const RateLimiter = instrumentDurableObjectWithSentry(sentryDOConfig, _RateLimiter);
+export const RunCoordinator = instrumentDurableObjectWithSentry(sentryDOConfig, _RunCoordinator);
+export const AutopilotCoordinator = instrumentDurableObjectWithSentry(sentryDOConfig, _AutopilotCoordinator);
+export const SafetySentinel = instrumentDurableObjectWithSentry(sentryDOConfig, _SafetySentinel);
 
 // Handlers
 import { ensureServiceRoleMappings } from './handlers/initialization';
@@ -354,7 +371,7 @@ let startupCheckDone = false;
 let commHubInitialized = false;
 let serviceRoleMappingsInitialized = false;
 
-export default {
+const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		  const url = new URL(request.url);
 		  const workerOrigin = url.origin;
@@ -1346,3 +1363,10 @@ console.log('[SW ' + SW_VERSION + '] Service Worker loaded');
   //   return handlePushQueueBatch(batch, env);
   // },
 };
+
+// Wrap worker with Sentry error monitoring
+// DSN is set via `wrangler secret put SENTRY_DSN`
+export default withSentry(
+  (env: Env) => sentryDOConfig(env),
+  worker
+);
