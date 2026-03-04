@@ -1,0 +1,7 @@
+# .sops.yaml - sops configuration for cloudflare-workers-hub
+# Design: Hybrid - shared dev recipient + per-repo CI age key
+creation_rules:
+  - path_regex: \.(env|enc).*$
+    age: >-
+      age13h4s0ztxzl7phl4r7qczw9mtnt3pr6d7tlmc6cxft4z8tuzgxcxsz6af2w,
+      age1zzs4vxe3ex7r94rvvn307k9d3szrw8flsm6yxlnnpjh7lfkhgyjsvtm48u
