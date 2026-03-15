@@ -545,7 +545,7 @@ export async function selectAccountItemForReceipt(
     isHighRisk(receipt, scoreGap);
 
   // 2) OpenAI escalation (only when configured + necessary)
-  if (shouldEscalate && env.OPENAI_API_KEY) {
+  if (shouldEscalate && env.OPENAI_API_KEY && env.ENABLE_OPENAI_API === 'true') {
     let openai: z.infer<typeof SelectionSchema> | null = null;
     try {
       openai = await selectWithOpenAI(env.OPENAI_API_KEY, receipt, candidates);

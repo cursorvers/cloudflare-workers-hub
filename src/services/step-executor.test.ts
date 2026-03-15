@@ -68,6 +68,41 @@ describe('StepExecutor', () => {
       expect(callArgs.model).toBe('claude-haiku-4-20250414');
     });
 
+    it('should fall back sonnet to workers_ai when Anthropic is not configured', async () => {
+      const llm = createMockLlm();
+      const executor = new StepExecutor({
+        llm,
+        env: { AI: { run: vi.fn() } } as any,
+      });
+
+      const result = await executor.executeStep('run-1', createStep({ agent: 'sonnet' }));
+
+      expect(result.status).toBe('succeeded');
+      expect(result.result).toEqual({ text: 'LLM response', model: '@cf/meta/llama-3.1-8b-instruct' });
+      const callArgs = (llm.generateText as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(callArgs.provider).toBe('workers_ai');
+      expect(callArgs.model).toBe('@cf/meta/llama-3.1-8b-instruct');
+    });
+
+    it('should fall back haiku to openai when Anthropic is not configured and OpenAI is enabled', async () => {
+      const llm = createMockLlm();
+      const executor = new StepExecutor({
+        llm,
+        env: {
+          OPENAI_API_KEY: 'openai-key',
+          ENABLE_OPENAI_API: 'true',
+        } as any,
+      });
+
+      const result = await executor.executeStep('run-1', createStep({ agent: 'haiku' }));
+
+      expect(result.status).toBe('succeeded');
+      expect(result.result).toEqual({ text: 'LLM response', model: 'gpt-5.2' });
+      const callArgs = (llm.generateText as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(callArgs.provider).toBe('openai');
+      expect(callArgs.model).toBe('gpt-5.2');
+    });
+
     it('should succeed for codex agent (openai gpt-5.2)', async () => {
       const llm = createMockLlm();
       const executor = new StepExecutor({ llm });
@@ -78,6 +113,22 @@ describe('StepExecutor', () => {
       expect(result.cost_usd).toBeGreaterThanOrEqual(0);
     });
 
+    it('should fall back codex to workers_ai when OpenAI is not configured', async () => {
+      const llm = createMockLlm();
+      const executor = new StepExecutor({
+        llm,
+        env: { AI: { run: vi.fn() } } as any,
+      });
+
+      const result = await executor.executeStep('run-1', createStep({ agent: 'codex' }));
+
+      expect(result.status).toBe('succeeded');
+      expect(result.result).toEqual({ text: 'LLM response', model: '@cf/meta/llama-3.1-8b-instruct' });
+      const callArgs = (llm.generateText as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(callArgs.provider).toBe('workers_ai');
+      expect(callArgs.model).toBe('@cf/meta/llama-3.1-8b-instruct');
+    });
+
     it('should succeed for glm agent (workers_ai)', async () => {
       const llm = createMockLlm();
       const executor = new StepExecutor({ llm });
@@ -86,6 +137,18 @@ describe('StepExecutor', () => {
 
       expect(result.status).toBe('succeeded');
       expect(result.cost_usd).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should succeed for gemini agent via workers_ai mapping', async () => {
+      const llm = createMockLlm();
+      const executor = new StepExecutor({ llm });
+
+      const result = await executor.executeStep('run-1', createStep({ agent: 'gemini' }));
+
+      expect(result.status).toBe('succeeded');
+      const callArgs = (llm.generateText as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(callArgs.provider).toBe('workers_ai');
+      expect(callArgs.model).toBe('@cf/meta/llama-3.1-8b-instruct');
     });
 
     it('should handle LLM failure gracefully', async () => {
@@ -106,6 +169,23 @@ describe('StepExecutor', () => {
       expect(result.error).toContain('API timeout');
       expect(result.cost_usd).toBe(0);
       expect(events[1].data.status).toBe('failed');
+    });
+
+    it('should fail fast when step execution exceeds the timeout budget', async () => {
+      vi.useFakeTimers();
+      const llm = {
+        generateText: vi.fn(() => new Promise(() => {})),
+        generateJson: vi.fn(),
+      } as unknown as LlmGateway;
+      const executor = new StepExecutor({ llm });
+
+      const resultPromise = executor.executeStep('run-1', createStep({ agent: 'haiku' }));
+      await vi.advanceTimersByTimeAsync(90_000);
+      const result = await resultPromise;
+
+      expect(result.status).toBe('failed');
+      expect(result.error).toContain('step_execution_timeout_ms=90000');
+      vi.useRealTimers();
     });
 
     it('should build prompt from string input', async () => {

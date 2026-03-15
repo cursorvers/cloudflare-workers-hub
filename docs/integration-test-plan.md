@@ -24,6 +24,8 @@ freee領収書登録システムの全フロー統合テスト。本番環境 AP
 - Gmail アカウントに領収書メールが届いている
 - freee OAuth トークンが有効
 - Workers がデプロイ済み
+- `RECEIPT_OPERATIONAL_TENANT_ID` が設定済み
+- 複数 company の freee アカウントでは OAuth を `?company_id=<freee_company_id>` 付きで実施済み
 
 #### テスト手順
 
@@ -31,7 +33,8 @@ freee領収書登録システムの全フロー統合テスト。本番環境 AP
    ```bash
    # 手動トリガー（cron の代わり）
    curl -X POST https://orchestrator-hub.masa-stage1.workers.dev/api/receipts/poll \
-     -H "Authorization: Bearer $ADMIN_API_KEY"
+     -H "Authorization: Bearer $ADMIN_API_KEY" \
+     -H "X-Tenant-Id: $RECEIPT_OPERATIONAL_TENANT_ID"
    ```
 
 2. **Workers ログ確認**
@@ -205,6 +208,8 @@ freee領収書登録システムの全フロー統合テスト。本番環境 AP
 - [ ] RECEIPTS_API_KEY 生成・設定
 - [ ] Workers デプロイ完了
 - [ ] D1 マイグレーション実行完了
+- [ ] `RECEIPT_OPERATIONAL_TENANT_ID` 設定完了
+- [ ] freee OAuth を `company_id` 明示で接続済み
 
 ### Gmail → freee フロー
 - [ ] Gmail Polling 成功

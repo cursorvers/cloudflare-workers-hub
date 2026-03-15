@@ -437,7 +437,9 @@ export async function createDealFromReceipt(
     };
   }
 
-  const freeeClient = createFreeeClient(env) as unknown as RequestCapableFreeeClient;
+  const freeeClient = createFreeeClient(env, {
+    tenantId: receipt.tenant_id ?? 'default',
+  }) as unknown as RequestCapableFreeeClient;
   const companyIdStr = await (freeeClient as unknown as CompanyIdProvider).getCompanyId();
   const companyId = toNumber(companyIdStr);
   const accessToken = await resolveAccessToken(freeeClient);

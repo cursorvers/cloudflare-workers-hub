@@ -27,14 +27,13 @@ import { backupToGoogleDrive, type FreeeReceiptBackup } from '../services/google
 
 import {
   RETENTION_YEARS,
-  DEFAULT_TENANT_ID,
   MAX_DEALS_PER_RUN,
   addYears,
   toIsoDate,
   calculateSha256,
   normalizeVendorFromEmail,
   isEmailLikeVendor,
-  hasDuplicateHash,
+  hasDuplicateHashForTenant,
 } from './receipt-poller-utils';
 
 // ── Internal helpers ─────────────────────────────────────────────────
@@ -47,6 +46,7 @@ export function htmlProcessedKey(messageId: string): string {
 
 export async function processHtmlReceipt(
   env: Env,
+  tenantId: string,
   bucket: R2Bucket,
   freeeClient: ReturnType<typeof createFreeeClient>,
   email: GmailHtmlReceiptEmail,
@@ -56,11 +56,11 @@ export async function processHtmlReceipt(
   const textContent = email.htmlBody.plainText || stripHtmlTags(email.htmlBody.html);
   const htmlBytes = new TextEncoder().encode(email.htmlBody.html);
   const fileHash = await calculateSha256(htmlBytes);
-  const r2Key = `receipts/${DEFAULT_TENANT_ID}/${receiptId}/receipt.html`;
+  const r2Key = `receipts/${tenantId}/${receiptId}/receipt.html`;
   const retentionUntil = addYears(new Date(), RETENTION_YEARS);
 
   // Dedup by content hash
-  const duplicateId = await hasDuplicateHash(env, fileHash);
+  const duplicateId = await hasDuplicateHashForTenant(env, tenantId, fileHash);
   if (duplicateId) {
     safeLog.warn('[Gmail Poller] Duplicate HTML receipt detected, skipping', {
       receiptId: duplicateId,
@@ -87,11 +87,11 @@ export async function processHtmlReceipt(
       .bind(
         receiptId, fileHash, r2Key, fallbackDate, fallbackVendor,
         0, 'JPY', 'other', 'ai_assisted',
-        0, 'pending_validation', retentionUntil, DEFAULT_TENANT_ID, 'html_body'
+        0, 'pending_validation', retentionUntil, tenantId, 'html_body'
       )
       .run();
 
-    workflow = createStateMachine(env, receiptId);
+    workflow = createStateMachine(env, receiptId, { tenantId });
     await workflow.transition('validated', {
       source: 'gmail_html_poll',
       messageId: email.messageId,
@@ -113,7 +113,7 @@ export async function processHtmlReceipt(
     let classificationResult: ClassificationResult;
     try {
       classificationResult = await classifyReceipt(env, classificationText, {
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId,
         source: 'gmail_html',
         subject: email.subject,
         from: email.from,
@@ -169,7 +169,7 @@ export async function processHtmlReceipt(
         currency = ?, document_type = ?, account_category = ?,
         tax_type = ?, department = ?, classification_method = ?,
         classification_confidence = ?
-      WHERE id = ?`
+      WHERE tenant_id = ? AND id = ?`
     )
       .bind(
         classificationResult.transaction_date,
@@ -182,6 +182,7 @@ export async function processHtmlReceipt(
         classificationResult.department || null,
         classificationResult.method,
         classificationResult.confidence,
+        tenantId,
         receiptId
       )
       .run();
@@ -213,7 +214,7 @@ export async function processHtmlReceipt(
         fileHash,
         messageId: email.messageId,
         retentionUntil,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId,
         worm: 'true',
         hasExternalReferences: String(email.htmlBody.hasExternalReferences),
       },
@@ -233,7 +234,7 @@ export async function processHtmlReceipt(
         fileHash,
         messageId: email.messageId,
         retentionUntil,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId,
         worm: 'true',
         source: 'html_body_text',
       },
@@ -345,7 +346,7 @@ export async function processHtmlReceipt(
             transaction_date: classificationResult.transaction_date,
             account_category: classificationResult.account_category ?? null,
             classification_confidence: classificationResult.confidence ?? null,
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id: tenantId,
           };
 
           const dealResult = await createDealFromReceipt(env, receiptInput);
@@ -358,7 +359,7 @@ export async function processHtmlReceipt(
                    account_mapping_confidence = ?,
                    account_mapping_method = ?,
                    updated_at = datetime('now')
-               WHERE id = ?`
+               WHERE tenant_id = ? AND id = ?`
             ).bind(
               dealResult.dealId,
               dealResult.partnerId,
@@ -366,6 +367,7 @@ export async function processHtmlReceipt(
               dealResult.taxCode ?? null,
               dealResult.mappingConfidence,
               dealResult.mappingMethod ?? null,
+              tenantId,
               receiptId
             ).run();
           } catch {

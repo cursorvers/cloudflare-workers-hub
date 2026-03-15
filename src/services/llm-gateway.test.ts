@@ -28,6 +28,7 @@ function createMockEnv(overrides: Partial<Env> = {}): Env {
     } as unknown as Ai,
     ANTHROPIC_API_KEY: 'test-anthropic-key',
     OPENAI_API_KEY: 'test-openai-key',
+    ENABLE_OPENAI_API: 'true',
     ENVIRONMENT: 'test',
     ...overrides,
   } as Env;
@@ -172,6 +173,50 @@ describe('LlmGateway', () => {
           messages: [],
         }),
       ).rejects.toThrow(LlmGatewayError);
+    });
+
+    it('should time out hung Workers AI calls', async () => {
+      vi.useFakeTimers();
+      const env = createMockEnv({
+        AI: { run: vi.fn(() => new Promise(() => {})) } as unknown as Ai,
+      });
+      const gateway = new LlmGateway(env);
+
+      const resultPromise = gateway.generateText({
+        provider: 'workers_ai',
+        model: '@cf/meta/llama-3.1-8b-instruct',
+        messages: [{ role: 'user', content: 'Hi' }],
+      });
+      const assertion = expect(resultPromise).rejects.toThrow('request timed out after 90000ms');
+
+      await vi.advanceTimersByTimeAsync(90_000);
+
+      await assertion;
+      vi.useRealTimers();
+    });
+
+    it('should abort hung OpenAI fetches', async () => {
+      vi.useFakeTimers();
+      globalThis.fetch = vi.fn((_input, init) => new Promise((_resolve, reject) => {
+        const signal = init?.signal as AbortSignal | undefined;
+        signal?.addEventListener('abort', () => {
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        });
+      })) as any;
+
+      const env = createMockEnv();
+      const gateway = new LlmGateway(env);
+      const resultPromise = gateway.generateText({
+        provider: 'openai',
+        model: 'gpt-5.2',
+        messages: [{ role: 'user', content: 'Hi' }],
+      });
+      const assertion = expect(resultPromise).rejects.toThrow('openai:gpt-5.2 request timed out after 90000ms');
+
+      await vi.advanceTimersByTimeAsync(90_000);
+
+      await assertion;
+      vi.useRealTimers();
     });
   });
 

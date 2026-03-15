@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest';
 
 import { handleReceiptDetail, handleReceiptFileDownload } from './receipt-search';
 
+const tenantContext = {
+  tenantId: 'tenant-abc',
+  userId: 'admin-1',
+  role: 'admin',
+  authSource: 'api_key',
+} as const;
+
 function makeEnv(overrides: any = {}) {
   const db = {
     prepare: (sql: string) => {
@@ -75,7 +82,7 @@ describe('receipt-search handleReceiptDetail', () => {
     env.RECEIPTS = makeBucket({ headOk: true });
 
     const req = new Request('https://example.com/api/receipts/r1');
-    const res = await handleReceiptDetail(req, env, 'r1');
+    const res = await handleReceiptDetail(req, env, 'r1', tenantContext as any);
     expect(res.status).toBe(200);
 
     const json = await res.json();
@@ -101,7 +108,7 @@ describe('receipt-search handleReceiptDetail', () => {
     } as any;
 
     const req = new Request('https://example.com/api/receipts/r-html');
-    const res = await handleReceiptDetail(req, env, 'r-html');
+    const res = await handleReceiptDetail(req, env, 'r-html', tenantContext as any);
     expect(res.status).toBe(200);
 
     const json = await res.json();
@@ -116,7 +123,7 @@ describe('receipt-search handleReceiptDetail', () => {
     env.RECEIPTS = makeBucket({ headOk: false });
 
     const req = new Request('https://example.com/api/receipts/r2');
-    const res = await handleReceiptDetail(req, env, 'r2');
+    const res = await handleReceiptDetail(req, env, 'r2', tenantContext as any);
     expect(res.status).toBe(200);
 
     const json = await res.json();
@@ -132,7 +139,7 @@ describe('receipt-search handleReceiptFileDownload', () => {
     env.RECEIPTS = makeBucket({ getOk: true });
 
     const req = new Request('https://example.com/api/receipts/r3/file');
-    const res = await handleReceiptFileDownload(req, env, 'r3');
+    const res = await handleReceiptFileDownload(req, env, 'r3', tenantContext as any);
     expect(res.status).toBe(404);
   });
 
@@ -142,7 +149,7 @@ describe('receipt-search handleReceiptFileDownload', () => {
     env.RECEIPTS = makeBucket({ getOk: true });
 
     const req = new Request('https://example.com/api/receipts/r4/file');
-    const res = await handleReceiptFileDownload(req, env, 'r4');
+    const res = await handleReceiptFileDownload(req, env, 'r4', tenantContext as any);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/pdf');
     expect(res.headers.get('content-disposition') || '').toContain('attachment;');
@@ -154,7 +161,7 @@ describe('receipt-search handleReceiptFileDownload', () => {
     env.RECEIPTS = makeBucket({ headOk: true, getOk: true });
 
     const req = new Request('https://example.com/api/receipts/r5/file', { method: 'HEAD' });
-    const res = await handleReceiptFileDownload(req, env, 'r5');
+    const res = await handleReceiptFileDownload(req, env, 'r5', tenantContext as any);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/pdf');
     expect(res.headers.get('content-disposition') || '').toContain('attachment;');

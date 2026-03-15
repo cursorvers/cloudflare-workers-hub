@@ -26,6 +26,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { config } from 'dotenv';
+import { classifyEssential } from '../src/services/lifelog-processor';
 
 // Load environment variables from .env.local (preferred) or .env.
 // This keeps local secrets out of the repo by default, while still allowing
@@ -72,11 +73,15 @@ interface ProcessedLifelog {
   topics: string[];
   speakers: string[];
   sentiment: string | null;
+  confidence_score: number | null;
   title: string | null;
   start_time: string;
   end_time: string;
+  original_length: number | null;
   duration_seconds: number | null;
   is_starred: boolean;
+  is_essential: boolean | null;
+  essential_score: number | null;
   raw_markdown: string | null;
 }
 
@@ -228,9 +233,23 @@ function parseJsonArray(value: unknown): string[] {
 }
 
 /**
- * Classifications considered "meaningful" — shown with full detail in the digest
+ * Resolve essential score for a lifelog.
+ * Uses DB columns if available (migration 0013); computes on-the-fly otherwise.
  */
-const MEANINGFUL_CLASSIFICATIONS = new Set(['insight', 'meeting', 'brainstorm', 'todo', 'reflection']);
+function resolveEssential(log: ProcessedLifelog): { isEssential: boolean; essentialScore: number } {
+  if (log.is_essential != null && log.essential_score != null) {
+    return { isEssential: log.is_essential, essentialScore: log.essential_score };
+  }
+  return classifyEssential({
+    classification: log.classification,
+    confidenceScore: log.confidence_score,
+    durationSeconds: log.duration_seconds,
+    keyInsightsCount: parseJsonArray(log.key_insights).length,
+    actionItemsCount: parseJsonArray(log.action_items).length,
+    isStarred: log.is_starred,
+    originalLength: log.original_length,
+  });
+}
 
 /**
  * Build daily digest markdown from lifelogs
@@ -263,8 +282,12 @@ function buildDailyDigest(date: string, lifelogs: ProcessedLifelog[], highlights
     allInsights.push(...parseJsonArray(log.key_insights));
   }
 
-  const meaningful = sorted.filter((l) => MEANINGFUL_CLASSIFICATIONS.has(l.classification));
-  const casual = sorted.filter((l) => !MEANINGFUL_CLASSIFICATIONS.has(l.classification));
+  // 3-tier essential scoring: essential / middle / noise
+  const scored = sorted.map((l) => ({ log: l, ...resolveEssential(l) }));
+  const essential = scored.filter((s) => s.isEssential);
+  const middle = scored.filter((s) => !s.isEssential && s.essentialScore >= 0.3);
+  const noise = scored.filter((s) => s.essentialScore < 0.3);
+
 
   // Frontmatter
   const tags = [...allTopics]
@@ -297,7 +320,9 @@ function buildDailyDigest(date: string, lifelogs: ProcessedLifelog[], highlights
   for (const [cls, count] of Object.entries(classificationCounts)) {
     statParts.push(`${classificationLabel(cls)} ×${count}`);
   }
-  lines.push(`> ${sorted.length}件の録音 | ${formatDuration(totalDuration) || '不明'} | ${statParts.join(' / ')}`);
+  const essentialStat = `Essential ${essential.length} / Noise ${noise.length}`;
+  lines.push(`> ${sorted.length}件の録音 | ${formatDuration(totalDuration) || '不明'} | ${essentialStat}`);
+  lines.push(`> ${statParts.join(' / ')}`);
   lines.push('');
 
   // === Action Items (aggregated) ===
@@ -387,18 +412,19 @@ function buildDailyDigest(date: string, lifelogs: ProcessedLifelog[], highlights
     }
   }
 
-  // === Meaningful Recordings (detail view) ===
-  if (meaningful.length > 0) {
-    lines.push('## Highlights');
+  // === Essential Recordings (full detail view) ===
+  if (essential.length > 0) {
+    lines.push('## Essential');
     lines.push('');
 
-    for (const log of meaningful) {
+    for (const { log, essentialScore } of essential) {
       const time = formatTimeJST(log.start_time);
       const duration = formatDuration(log.duration_seconds);
       const title = log.title || 'Untitled';
       const starred = log.is_starred ? ' ⭐' : '';
+      const scoreTag = `\`${(essentialScore * 100).toFixed(0)}%\``;
 
-      lines.push(`### ${classificationLabel(log.classification)} ${title}${starred}`);
+      lines.push(`### ${classificationLabel(log.classification)} ${title}${starred} ${scoreTag}`);
       lines.push(`*${time} (${duration || '不明'})*`);
       lines.push('');
 
@@ -434,16 +460,28 @@ function buildDailyDigest(date: string, lifelogs: ProcessedLifelog[], highlights
     }
   }
 
-  // === Casual recordings (compact list) ===
-  if (casual.length > 0) {
-    lines.push('## Other');
+  // === Middle-tier recordings (summary only, no insights/actions) ===
+  if (middle.length > 0) {
+    lines.push('## Other Recordings');
     lines.push('');
-    for (const log of casual) {
+    for (const { log } of middle) {
       const time = formatTimeJST(log.start_time);
       const title = log.title || 'Untitled';
       const dur = formatDuration(log.duration_seconds);
-      const summary = log.summary ? ` — ${log.summary.substring(0, 60)}` : '';
-      lines.push(`- **${time}** ${title} (${dur || '?'})${summary}`);
+      const summary = log.summary ? ` — ${log.summary.substring(0, 80)}` : '';
+      lines.push(`- **${time}** ${classificationLabel(log.classification)} ${title} (${dur || '?'})${summary}`);
+    }
+    lines.push('');
+  }
+
+  // === Noise recordings (collapsed, count only) ===
+  if (noise.length > 0) {
+    lines.push(`> [!abstract]- Noise (${noise.length}件)`);
+    for (const { log } of noise) {
+      const time = formatTimeJST(log.start_time);
+      const title = log.title || 'Untitled';
+      const dur = formatDuration(log.duration_seconds);
+      lines.push(`> - ${time} ${title} (${dur || '?'})`);
     }
     lines.push('');
   }
@@ -824,12 +862,24 @@ async function main(): Promise<void> {
   // Fetch unsynced lifelogs from Supabase
   console.log('📥 Fetching unsynced lifelogs from Supabase...');
 
-  const lifelogs = await supabaseFetch<ProcessedLifelog[]>(
-    supabaseUrl,
-    serviceRoleKey,
-    'processed_lifelogs',
-    `select=id,limitless_id,classification,summary,key_insights,action_items,topics,speakers,sentiment,title,start_time,end_time,duration_seconds,is_starred,raw_markdown&${query}`
-  );
+  // Try fetching with essential scoring columns; fallback without if migration not applied
+  let lifelogs: ProcessedLifelog[];
+  try {
+    lifelogs = await supabaseFetch<ProcessedLifelog[]>(
+      supabaseUrl,
+      serviceRoleKey,
+      'processed_lifelogs',
+      `select=id,limitless_id,classification,summary,key_insights,action_items,topics,speakers,sentiment,confidence_score,title,start_time,end_time,original_length,duration_seconds,is_starred,is_essential,essential_score,raw_markdown&${query}`
+    );
+  } catch {
+    console.log('⚠️  Essential columns not found, using on-the-fly scoring');
+    lifelogs = await supabaseFetch<ProcessedLifelog[]>(
+      supabaseUrl,
+      serviceRoleKey,
+      'processed_lifelogs',
+      `select=id,limitless_id,classification,summary,key_insights,action_items,topics,speakers,sentiment,confidence_score,title,start_time,end_time,original_length,duration_seconds,is_starred,raw_markdown&${query}`
+    );
+  }
 
   const syncedIds: string[] = [];
 

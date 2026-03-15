@@ -21,7 +21,8 @@
 
 import { z } from 'zod';
 import type { AgentType } from '../schemas/orchestration';
-import type { LlmGateway, CostSnapshot } from './llm-gateway';
+import type { Env } from '../types';
+import type { LlmGateway, CostSnapshot, LlmProvider } from './llm-gateway';
 import { safeLog } from '../utils/log-sanitizer';
 
 // =============================================================================
@@ -33,6 +34,8 @@ const MAX_STEPS_LIMIT = 50;
 
 const DEFAULT_DECOMPOSE_MODEL = 'gpt-5.2';
 const DEFAULT_DECOMPOSE_PROVIDER = 'openai' as const;
+const WORKERS_AI_DECOMPOSE_MODEL = '@cf/meta/llama-3.1-8b-instruct';
+const ANTHROPIC_DECOMPOSE_MODEL = 'claude-sonnet-4-20250514';
 
 // =============================================================================
 // Public Types
@@ -68,6 +71,45 @@ export interface DelegationMatrix {
 export interface TaskPackGeneratorDeps {
   readonly llm: LlmGateway;
   readonly delegation: DelegationMatrix;
+  readonly env?: {
+    readonly AI?: Env['AI'];
+    readonly OPENAI_API_KEY?: string;
+    readonly ENABLE_OPENAI_API?: string;
+    readonly ANTHROPIC_API_KEY?: string;
+  };
+}
+
+interface DecomposeTarget {
+  readonly provider: LlmProvider;
+  readonly model: string;
+}
+
+function resolveDecomposeTarget(env?: TaskPackGeneratorDeps['env']): DecomposeTarget {
+  if (env?.AI) {
+    return {
+      provider: 'workers_ai',
+      model: WORKERS_AI_DECOMPOSE_MODEL,
+    };
+  }
+
+  if (env?.OPENAI_API_KEY && env.ENABLE_OPENAI_API === 'true') {
+    return {
+      provider: 'openai',
+      model: DEFAULT_DECOMPOSE_MODEL,
+    };
+  }
+
+  if (env?.ANTHROPIC_API_KEY) {
+    return {
+      provider: 'anthropic',
+      model: ANTHROPIC_DECOMPOSE_MODEL,
+    };
+  }
+
+  return {
+    provider: DEFAULT_DECOMPOSE_PROVIDER,
+    model: DEFAULT_DECOMPOSE_MODEL,
+  };
 }
 
 // =============================================================================
@@ -179,10 +221,12 @@ Rules:
 export class TaskPackGenerator {
   private readonly llm: LlmGateway;
   private readonly delegation: DelegationMatrix;
+  private readonly env?: TaskPackGeneratorDeps['env'];
 
   constructor(deps: Readonly<TaskPackGeneratorDeps>) {
     this.llm = deps.llm;
     this.delegation = deps.delegation;
+    this.env = deps.env;
   }
 
   /**
@@ -223,10 +267,17 @@ export class TaskPackGenerator {
     requestId?: string,
   ): Promise<{ output: RawTaskPack; costEvent: CostSnapshot }> {
     try {
+      const target = resolveDecomposeTarget(this.env);
+      safeLog.info('[TaskPackGenerator] Selected decomposition provider', {
+        provider: target.provider,
+        model: target.model,
+        requestId,
+      });
+
       const result = await this.llm.generateJson<RawTaskPack>(
         {
-          provider: DEFAULT_DECOMPOSE_PROVIDER,
-          model: DEFAULT_DECOMPOSE_MODEL,
+          provider: target.provider,
+          model: target.model,
           messages: [
             { role: 'system', content: buildSystemPrompt(maxSteps) },
             { role: 'user', content: userContent },

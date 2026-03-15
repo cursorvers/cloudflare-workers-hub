@@ -10,12 +10,13 @@
  * Design: Case A (waitUntil loop) with StepExecutionDriver abstraction
  * for future migration to Case B (DO) or Case C (Queue).
  *
- * MVP: Only sonnet/haiku agents are supported via LLM Gateway.
- * Other agents (codex, glm, gemini) result in run_blocked.
+ * Execution supports Anthropic-mapped agents plus codex/glm/gemini through
+ * provider-specific mappings and safe fallbacks.
  */
 
 import { z } from 'zod';
 import type { AgentType } from '../schemas/orchestration';
+import type { Env } from '../types';
 import type { LlmGateway, CostSnapshot, LlmProvider } from './llm-gateway';
 import { LlmGatewayError } from './llm-gateway';
 import { safeLog } from '../utils/log-sanitizer';
@@ -29,6 +30,7 @@ const MAX_LOOP_ITERATIONS = 50;
 
 /** Maximum wall-clock time for the execution loop (13 min, leaving 2 min buffer for waitUntil 15 min limit) */
 const MAX_EXECUTION_MS = 13 * 60_000;
+const STEP_EXECUTION_TIMEOUT_MS = 90_000;
 
 // =============================================================================
 // Agent → Provider/Model Mapping
@@ -46,7 +48,7 @@ const AGENT_CONFIG: Readonly<Record<AgentType, AgentConfig>> = {
   opus: { provider: 'anthropic', model: 'claude-sonnet-4-20250514', supported: false },
   codex: { provider: 'openai', model: 'gpt-5.2', supported: true },
   glm: { provider: 'workers_ai', model: '@cf/meta/llama-3.1-8b-instruct', supported: true },
-  gemini: { provider: 'workers_ai', model: '@cf/meta/llama-3.1-8b-instruct', supported: false },
+  gemini: { provider: 'workers_ai', model: '@cf/meta/llama-3.1-8b-instruct', supported: true },
 };
 
 // =============================================================================
@@ -99,7 +101,70 @@ export interface DOResponse {
 
 export interface StepExecutorDeps {
   readonly llm: LlmGateway;
+  readonly env?: {
+    readonly AI?: Env['AI'];
+    readonly ANTHROPIC_API_KEY?: string;
+    readonly OPENAI_API_KEY?: string;
+    readonly ENABLE_OPENAI_API?: string;
+  };
   readonly onEvent?: RunEventHandler;
+}
+
+interface ResolvedAgentConfig extends AgentConfig {
+  readonly fallbackReason?: string;
+}
+
+function resolveAgentConfig(
+  agent: AgentType,
+  env?: StepExecutorDeps['env'],
+): ResolvedAgentConfig {
+  const config = AGENT_CONFIG[agent];
+  if (!config.supported) {
+    return config;
+  }
+
+  if (config.provider === 'anthropic') {
+    if (env?.ANTHROPIC_API_KEY) {
+      return config;
+    }
+
+    if (env?.AI) {
+      return {
+        provider: 'workers_ai',
+        model: '@cf/meta/llama-3.1-8b-instruct',
+        supported: true,
+        fallbackReason: 'anthropic_unconfigured_workers_ai_fallback',
+      };
+    }
+
+    if (env?.OPENAI_API_KEY && env.ENABLE_OPENAI_API === 'true') {
+      return {
+        provider: 'openai',
+        model: 'gpt-5.2',
+        supported: true,
+        fallbackReason: 'anthropic_unconfigured_openai_fallback',
+      };
+    }
+
+    return config;
+  }
+
+  if (config.provider === 'openai') {
+    if (env?.OPENAI_API_KEY && env.ENABLE_OPENAI_API === 'true') {
+      return config;
+    }
+
+    if (env?.AI) {
+      return {
+        provider: 'workers_ai',
+        model: '@cf/meta/llama-3.1-8b-instruct',
+        supported: true,
+        fallbackReason: 'openai_unconfigured_workers_ai_fallback',
+      };
+    }
+  }
+
+  return config;
 }
 
 // =============================================================================
@@ -108,10 +173,12 @@ export interface StepExecutorDeps {
 
 export class StepExecutor {
   private readonly llm: LlmGateway;
+  private readonly env?: StepExecutorDeps['env'];
   private readonly onEvent: RunEventHandler;
 
   constructor(deps: Readonly<StepExecutorDeps>) {
     this.llm = deps.llm;
+    this.env = deps.env;
     this.onEvent = deps.onEvent ?? (() => {});
   }
 
@@ -120,13 +187,13 @@ export class StepExecutor {
    * Returns a result suitable for DO /step-complete.
    */
   async executeStep(runId: string, step: Readonly<StepInput>): Promise<StepResult> {
-    const config = AGENT_CONFIG[step.agent];
+    const config = resolveAgentConfig(step.agent, this.env);
 
     // Unsupported agent → fail immediately
     if (!config.supported) {
       return {
         status: 'failed',
-        error: `unsupported_agent: ${step.agent} (MVP supports sonnet/haiku only)`,
+        error: `unsupported_agent: ${step.agent}`,
         cost_usd: 0,
       };
     }
@@ -134,22 +201,39 @@ export class StepExecutor {
     this.emitEvent(runId, 'run:step_started', step.seq, {
       agent: step.agent,
       attempt: step.attempts,
+      provider: config.provider,
+      model: config.model,
     });
 
     try {
       const prompt = buildStepPrompt(step.input);
 
-      const textResult = await this.llm.generateText({
-        provider: config.provider,
-        model: config.model,
-        messages: [
-          { role: 'system', content: 'You are a task execution agent. Execute the given task and return results.' },
-          { role: 'user', content: prompt },
-        ],
-        maxTokens: 4096,
-        temperature: 0.2,
-        requestId: `${runId}:${step.seq}:${step.attempts}`,
-      });
+      if (config.fallbackReason) {
+        safeLog.info('[StepExecutor] Falling back from Anthropic agent mapping', {
+          runId,
+          seq: step.seq,
+          agent: step.agent,
+          provider: config.provider,
+          model: config.model,
+          reason: config.fallbackReason,
+        });
+      }
+
+      const textResult = await withExecutionTimeout(
+        this.llm.generateText({
+          provider: config.provider,
+          model: config.model,
+          messages: [
+            { role: 'system', content: 'You are a task execution agent. Execute the given task and return results.' },
+            { role: 'user', content: prompt },
+          ],
+          maxTokens: 4096,
+          temperature: 0.2,
+          requestId: `${runId}:${step.seq}:${step.attempts}`,
+        }),
+        STEP_EXECUTION_TIMEOUT_MS,
+        `step_execution_timeout_ms=${STEP_EXECUTION_TIMEOUT_MS} provider=${config.provider} model=${config.model}`,
+      );
 
       this.emitEvent(runId, 'run:step_completed', step.seq, {
         agent: step.agent,
@@ -319,4 +403,24 @@ function buildStepPrompt(input: unknown): string {
   } catch {
     return String(input);
   }
+}
+
+async function withExecutionTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }

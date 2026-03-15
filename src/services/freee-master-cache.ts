@@ -7,6 +7,7 @@
 
 import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
+import { resolveFreeeBaseUrl } from '../utils/freee-base-url';
 
 // =============================================================================
 // Types
@@ -76,7 +77,6 @@ type FetchOptions = Omit<RequestInit, 'headers'> & {
 // Constants
 // =============================================================================
 
-const DEFAULT_BASE_URL = 'https://api.freee.co.jp/api/1';
 const ACCOUNT_ITEMS_TTL_SECONDS = 24 * 60 * 60;
 const TAXES_TTL_SECONDS = 24 * 60 * 60;
 const PARTNERS_TTL_SECONDS = 60 * 60;
@@ -92,7 +92,7 @@ const CACHE_KEYS = {
 // =============================================================================
 
 function getBaseUrl(env: FreeeMasterCacheEnv): string {
-  return env.FREEE_BASE_URL ?? DEFAULT_BASE_URL;
+  return resolveFreeeBaseUrl(env);
 }
 
 function getCompanyId(env: FreeeMasterCacheEnv): string {

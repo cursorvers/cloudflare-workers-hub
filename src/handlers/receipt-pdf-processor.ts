@@ -30,14 +30,13 @@ import { CONFIDENCE } from '../config/confidence-thresholds';
 
 import {
   RETENTION_YEARS,
-  DEFAULT_TENANT_ID,
   MAX_DEALS_PER_RUN,
   addYears,
   toIsoDate,
   calculateSha256,
   normalizeVendorFromEmail,
   isEmailLikeVendor,
-  hasDuplicateHash,
+  hasDuplicateHashForTenant,
   normalizeFileName,
 } from './receipt-poller-utils';
 
@@ -135,6 +134,7 @@ export async function fetchReceiptEmailsWithRetry(
 
 export async function processAttachment(
   env: Env,
+  tenantId: string,
   bucket: R2Bucket,
   freeeClient: ReturnType<typeof createFreeeClient>,
   email: GmailReceiptEmail,
@@ -145,12 +145,12 @@ export async function processAttachment(
   const attachmentId = attachment.attachmentId;
   const receiptId = crypto.randomUUID().replace(/-/g, '');
   const safeFileName = normalizeFileName(attachment.filename || 'receipt.pdf', `${receiptId}.pdf`);
-  const r2Key = `receipts/${DEFAULT_TENANT_ID}/${receiptId}/${safeFileName}`;
+  const r2Key = `receipts/${tenantId}/${receiptId}/${safeFileName}`;
   const retentionUntil = addYears(new Date(), RETENTION_YEARS);
   const idempotencyKey = buildIdempotencyKey(email.messageId, attachmentId);
 
   const fileHash = await calculateSha256(attachment.data);
-  const duplicateId = await hasDuplicateHash(env, fileHash);
+  const duplicateId = await hasDuplicateHashForTenant(env, tenantId, fileHash);
   if (duplicateId) {
     safeLog.warn('[Gmail Poller] Duplicate receipt detected, skipping', {
       receiptId: duplicateId,
@@ -198,11 +198,11 @@ export async function processAttachment(
         0,
         'pending_validation',
         retentionUntil,
-        DEFAULT_TENANT_ID
+        tenantId
       )
       .run();
 
-    workflow = createStateMachine(env, receiptId);
+    workflow = createStateMachine(env, receiptId, { tenantId });
 
     await workflow.transition('validated', {
       source: 'gmail_poll',
@@ -226,7 +226,7 @@ export async function processAttachment(
       const useExtractedTextForClassification = env.PDF_TEXT_EXTRACTION_USE_FOR_CLASSIFICATION === 'true';
       const classificationMetadata: Record<string, unknown> = {
         // Keep prompt/cache stable: avoid volatile per-message identifiers.
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId,
         source: 'gmail',
         subject: email.subject,
         from: email.from,
@@ -359,7 +359,7 @@ export async function processAttachment(
         department = ?,
         classification_method = ?,
         classification_confidence = ?
-      WHERE id = ?`
+      WHERE tenant_id = ? AND id = ?`
     )
       .bind(
         classificationResult.transaction_date,
@@ -372,6 +372,7 @@ export async function processAttachment(
         classificationResult.department || null,
         classificationResult.method,
         classificationResult.confidence,
+        tenantId,
         receiptId
       )
       .run();
@@ -401,7 +402,7 @@ export async function processAttachment(
         messageId: email.messageId,
         attachmentId,
         retentionUntil,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId,
         worm: 'true',
       },
       onlyIf: { etagDoesNotMatch: '*' },
@@ -474,7 +475,7 @@ export async function processAttachment(
             transaction_date: classificationResult.transaction_date,
             account_category: classificationResult.account_category ?? null,
             classification_confidence: classificationResult.confidence ?? null,
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id: tenantId,
           };
 
           const dealResult = await createDealFromReceipt(env, receiptInput);
@@ -489,7 +490,7 @@ export async function processAttachment(
                    account_mapping_confidence = ?,
                    account_mapping_method = ?,
                    updated_at = datetime('now')
-               WHERE id = ?`
+               WHERE tenant_id = ? AND id = ?`
             ).bind(
               dealResult.dealId,
               dealResult.partnerId,
@@ -497,6 +498,7 @@ export async function processAttachment(
               dealResult.taxCode ?? null,
               dealResult.mappingConfidence,
               dealResult.mappingMethod ?? null,
+              tenantId,
               receiptId
             ).run();
           } catch (dbError) {

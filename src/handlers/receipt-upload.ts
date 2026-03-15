@@ -11,10 +11,8 @@
 import { z } from 'zod';
 import type { Env } from '../types';
 import { safeLog, maskUserId } from '../utils/log-sanitizer';
-import { authenticateWithAccess, mapAccessUserToInternal } from '../utils/cloudflare-access';
-import { getTenantContext } from '../utils/tenant-isolation';
-import { verifyAPIKey } from '../utils/api-auth';
-import { createFreeeClient, ApiError } from '../services/freee-client';
+import { resolveTenantContext } from '../utils/tenant-isolation';
+import { createFreeeClient } from '../services/freee-client';
 import { createStateMachine } from '../services/workflow-state-machine';
 import { createDealFromReceipt } from '../services/freee-deal-service';
 import type { ReceiptInput } from '../services/freee-deal-service';
@@ -49,6 +47,8 @@ type UploadMetadata = z.infer<typeof UploadMetadataSchema>;
 
 interface AuthContext {
   authenticated: boolean;
+  status?: number;
+  error?: string;
   userId?: string;
   role?: string;
   tenantId?: string;
@@ -62,16 +62,16 @@ function getReceiptBucket(env: Env): R2Bucket | null {
   return env.RECEIPTS ?? env.R2 ?? null;
 }
 
-async function hasFreeeAuthTokens(env: Env): Promise<boolean> {
+async function hasFreeeAuthTokens(env: Env, tenantId: string): Promise<boolean> {
   // Prefer D1 (current). Fallback to KV (legacy) if present.
   if (env.DB) {
     try {
       const row = await env.DB.prepare(
         `SELECT encrypted_refresh_token
          FROM external_oauth_tokens
-         WHERE provider = 'freee'
+         WHERE tenant_id = ? AND provider = 'freee'
          LIMIT 1`
-      ).first() as { encrypted_refresh_token?: string | null } | null;
+      ).bind(tenantId).first() as { encrypted_refresh_token?: string | null } | null;
       if (row?.encrypted_refresh_token) return true;
     } catch {
       // ignore (fail-open to KV check below)
@@ -128,32 +128,21 @@ async function authenticateReceiptUpload(
   request: Request,
   env: Env
 ): Promise<AuthContext> {
-  const accessResult = await authenticateWithAccess(request, env);
-  if (accessResult.verified && accessResult.email) {
-    const internalUser = await mapAccessUserToInternal(accessResult.email, env);
-    if (internalUser) {
-      const tenantContext = await getTenantContext(internalUser.userId, env);
-      return {
-        authenticated: true,
-        userId: internalUser.userId,
-        role: internalUser.role,
-        tenantId: tenantContext?.tenantId ?? 'default',
-      };
-    }
-  }
-
-  // Support both `X-API-Key` and `Authorization: Bearer <key>` for compatibility
-  // with existing scripts/clients (including the Chrome extension).
-  if (verifyAPIKey(request, env, 'receipts')) {
+  const tenantResult = await resolveTenantContext(request, env, 'receipts');
+  if (!tenantResult.ok || !tenantResult.tenantContext) {
     return {
-      authenticated: true,
-      userId: 'system',
-      role: 'service',
-      tenantId: 'default',
+      authenticated: false,
+      error: tenantResult.error ?? 'Unauthorized',
+      status: tenantResult.status ?? 401,
     };
   }
 
-  return { authenticated: false };
+  return {
+    authenticated: true,
+    userId: tenantResult.tenantContext.userId,
+    role: tenantResult.tenantContext.role,
+    tenantId: tenantResult.tenantContext.tenantId,
+  };
 }
 
 export async function handleReceiptUpload(
@@ -181,7 +170,7 @@ export async function handleReceiptUpload(
 
   const auth = await authenticateReceiptUpload(request, env);
   if (!auth.authenticated) {
-    return jsonResponse({ error: 'Unauthorized' }, 401);
+    return jsonResponse({ error: auth.error || 'Unauthorized' }, auth.status || 401);
   }
 
   if (!contentType.includes('multipart/form-data')) {
@@ -227,10 +216,42 @@ export async function handleReceiptUpload(
   const receiptId = crypto.randomUUID().replace(/-/g, '');
   const retentionUntil = addYears(new Date(), 7);
   const userId = auth.userId ?? 'unknown';
-  const tenantId = auth.tenantId ?? 'default';
+  const tenantId = auth.tenantId as string;
   const safeFileName = normalizeFileName(fileEntry.name || 'receipt', `${receiptId}.bin`);
   const r2Key = `receipts/${tenantId}/${receiptId}/${safeFileName}`;
-  let workflow = createStateMachine(env, receiptId);
+  let workflow = createStateMachine(env, receiptId, { tenantId });
+
+  if (!freeeEnabled) {
+    return jsonResponse({
+      success: false,
+      error: 'freee integration is disabled',
+      receipt_id: receiptId,
+      workflow_status: 'failed',
+      freee_status: 'skipped_not_configured',
+      freee_status_detail: 'disabled_by_flag',
+    }, 503);
+  }
+
+  if (!freeeSecretsConfigured) {
+    return jsonResponse({
+      success: false,
+      error: 'freee integration is not configured',
+      receipt_id: receiptId,
+      workflow_status: 'failed',
+      freee_status: 'skipped_not_configured',
+    }, 503);
+  }
+
+  const freeeAuthenticated = await hasFreeeAuthTokens(env, tenantId);
+  if (!freeeAuthenticated) {
+    return jsonResponse({
+      success: false,
+      error: 'freee integration is not authenticated for this tenant',
+      receipt_id: receiptId,
+      workflow_status: 'failed',
+      freee_status: 'skipped_not_authenticated',
+    }, 503);
+  }
 
   try {
     const fileBuffer = await fileEntry.arrayBuffer();
@@ -321,63 +342,10 @@ export async function handleReceiptUpload(
       size: fileEntry.size,
     });
 
-    if (!freeeEnabled) {
-      safeLog.warn('[Receipts] freee integration disabled; stored in R2 only', {
-        receiptId,
-        r2Key,
-        tenantId,
-        userId: maskUserId(userId),
-        durationMs: Date.now() - startTime,
-      });
-
-      return jsonResponse({
-        success: true,
-        receipt_id: receiptId,
-        r2_object_key: r2Key,
-        freee_status: 'skipped_not_configured',
-        freee_status_detail: 'disabled_by_flag',
-      });
-    }
-
-    if (!freeeSecretsConfigured) {
-      safeLog.warn('[Receipts] freee integration not configured (missing secrets); stored in R2 only', {
-        receiptId,
-        r2Key,
-        tenantId,
-        userId: maskUserId(userId),
-        durationMs: Date.now() - startTime,
-      });
-
-      return jsonResponse({
-        success: true,
-        receipt_id: receiptId,
-        r2_object_key: r2Key,
-        freee_status: 'skipped_not_configured',
-      });
-    }
-
-    const freeeAuthenticated = await hasFreeeAuthTokens(env);
-    if (!freeeAuthenticated) {
-      safeLog.warn('[Receipts] freee secrets configured but not authenticated; stored in R2 only', {
-        receiptId,
-        r2Key,
-        tenantId,
-        userId: maskUserId(userId),
-        durationMs: Date.now() - startTime,
-      });
-
-      return jsonResponse({
-        success: true,
-        receipt_id: receiptId,
-        r2_object_key: r2Key,
-        freee_status: 'skipped_not_authenticated',
-      });
-    }
-
     try {
       await workflow.transition('submitting_freee', { fileName: safeFileName });
 
-      const freeeClient = createFreeeClient(env);
+      const freeeClient = createFreeeClient(env, { tenantId });
       const freeeResult = await freeeClient.uploadReceipt(
         fileEntry,
         safeFileName,
@@ -391,9 +359,9 @@ export async function handleReceiptUpload(
 
       // Persist freee_receipt_id to receipts table for deal linking
       await env.DB.prepare(
-        "UPDATE receipts SET freee_receipt_id = ?, updated_at = datetime('now') WHERE id = ?"
+        "UPDATE receipts SET freee_receipt_id = ?, updated_at = datetime('now') WHERE tenant_id = ? AND id = ?"
       )
-        .bind(String(freeeResult.receipt.id), receiptId)
+        .bind(String(freeeResult.receipt.id), tenantId, receiptId)
         .run();
 
       // === Deal Automation (Phase 5) ===
@@ -466,7 +434,7 @@ export async function handleReceiptUpload(
               document_type = ?, account_category = ?,
               classification_method = ?, classification_confidence = ?,
               updated_at = datetime('now')
-            WHERE id = ?`
+            WHERE tenant_id = ? AND id = ?`
           ).bind(
             classifiedVendor,
             classifiedAmount,
@@ -475,6 +443,7 @@ export async function handleReceiptUpload(
             classifiedAccountCategory,
             classifiedMethod,
             classifiedConfidence,
+            tenantId,
             receiptId
           ).run();
 
@@ -547,13 +516,14 @@ export async function handleReceiptUpload(
                SET account_item_id = ?, tax_code = ?,
                    account_mapping_confidence = ?, account_mapping_method = ?,
                    updated_at = datetime('now')
-               WHERE id = ?`
+               WHERE tenant_id = ? AND id = ?`
             )
               .bind(
                 dealResult.accountItemId ?? null,
                 dealResult.taxCode ?? null,
                 dealResult.mappingConfidence ?? null,
                 dealResult.mappingMethod ?? null,
+                tenantId,
                 receiptId
               )
               .run();
@@ -571,12 +541,13 @@ export async function handleReceiptUpload(
           });
 
           return jsonResponse({
-            success: true,
+            success: false,
             receipt_id: receiptId,
             freee_receipt_id: freeeResult.receipt.id,
             r2_object_key: r2Key,
             deal_status: 'needs_review',
             mapping_confidence: dealResult.mappingConfidence,
+            workflow_status: 'needs_review',
           });
         }
 
@@ -588,7 +559,7 @@ export async function handleReceiptUpload(
                account_mapping_confidence = ?,
                account_mapping_method = ?,
                updated_at = datetime('now')
-           WHERE id = ?`
+           WHERE tenant_id = ? AND id = ?`
         )
           .bind(
             dealResult.dealId,
@@ -597,6 +568,7 @@ export async function handleReceiptUpload(
             dealResult.taxCode ?? null,
             dealResult.mappingConfidence,
             dealResult.mappingMethod ?? null,
+            tenantId,
             receiptId
           )
           .run();
@@ -650,16 +622,16 @@ export async function handleReceiptUpload(
         }
 
         return jsonResponse({
-          success: true,
+          success: false,
           receipt_id: receiptId,
           freee_receipt_id: freeeResult.receipt.id,
           r2_object_key: r2Key,
           deal_status: 'failed',
           deal_error: dealMessage,
-        });
+          workflow_status: 'failed',
+        }, 502);
       }
     } catch (freeeError: unknown) {
-      // Fail-open: the receipt is already stored durably in R2+D1.
       const freeeMessage = freeeError instanceof Error ? freeeError.message : String(freeeError);
       safeLog.warn('[Receipts] freee upload failed (receipt stored)', {
         receiptId,
@@ -676,12 +648,13 @@ export async function handleReceiptUpload(
         // ignore
       }
       return jsonResponse({
-        success: true,
+        success: false,
         receipt_id: receiptId,
         r2_object_key: r2Key,
         freee_status: 'failed',
         freee_error: freeeMessage,
-      });
+        workflow_status: 'failed',
+      }, 502);
     }
   } catch (error: any) {
     const message = error instanceof Error ? error.message : String(error);

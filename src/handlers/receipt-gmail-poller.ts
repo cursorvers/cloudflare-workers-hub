@@ -21,7 +21,7 @@ import { isFreeeIntegrationEnabled } from '../utils/freee-integration';
 import { withLock } from './scheduled';
 import { HEALTH } from '../config/confidence-thresholds';
 
-import { getReceiptBucket, MAX_RESULTS } from './receipt-poller-utils';
+import { getReceiptBucket, MAX_RESULTS, resolveOperationalTenantId } from './receipt-poller-utils';
 import {
   processAttachment,
   fetchReceiptEmailsWithRetry,
@@ -33,19 +33,18 @@ import { processHtmlReceipt, htmlProcessedKey } from './receipt-html-processor';
 // Re-export for backward compatibility (tests import from this module)
 export { buildClassificationText } from './receipt-pdf-processor';
 
-const LOCK_KEY = 'gmail:polling';
 const LOCK_TTL_SECONDS = 300;
 
-async function hasFreeeAuthTokens(env: Env): Promise<boolean> {
+async function hasFreeeAuthTokens(env: Env, tenantId: string): Promise<boolean> {
   // Prefer D1 (current). Fallback to KV (legacy) if present.
   if (env.DB) {
     try {
       const row = await env.DB.prepare(
         `SELECT encrypted_refresh_token
          FROM external_oauth_tokens
-         WHERE provider = 'freee'
+         WHERE tenant_id = ? AND provider = 'freee'
          LIMIT 1`
-      ).first() as { encrypted_refresh_token?: string | null } | null;
+      ).bind(tenantId).first() as { encrypted_refresh_token?: string | null } | null;
       if (row?.encrypted_refresh_token) return true;
     } catch {
       // ignore
@@ -55,7 +54,7 @@ async function hasFreeeAuthTokens(env: Env): Promise<boolean> {
   if (env.KV) {
     try {
       // kv-optimizer:ignore-next
-      const token = await env.KV.get('freee:refresh_token');
+      const token = await env.KV.get(`freee:${tenantId}:refresh_token`);
       return Boolean(token);
     } catch {
       return false;
@@ -65,7 +64,7 @@ async function hasFreeeAuthTokens(env: Env): Promise<boolean> {
   return false;
 }
 
-export async function handleGmailReceiptPolling(env: Env): Promise<void> {
+export async function handleGmailReceiptPolling(env: Env, tenantId?: string): Promise<void> {
   if (!env.DB) {
     safeLog.warn('[Gmail Poller] DB not configured, skipping');
     return;
@@ -96,12 +95,14 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
     return;
   }
 
-  if (!(await hasFreeeAuthTokens(env))) {
+  const operationalTenantId = tenantId ?? await resolveOperationalTenantId(env);
+
+  if (!(await hasFreeeAuthTokens(env, operationalTenantId))) {
     safeLog.warn('[Gmail Poller] freee not authenticated (no tokens found), skipping');
     return;
   }
 
-  await withLock(env.KV, LOCK_KEY, LOCK_TTL_SECONDS, async () => {
+  await withLock(env.KV, `gmail:polling:${operationalTenantId}`, LOCK_TTL_SECONDS, async () => {
     const startTime = Date.now();
     safeLog.info('[Gmail Poller] Starting Gmail receipt polling');
 
@@ -152,7 +153,7 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
       }
     }
 
-    const freeeClient = createFreeeClient(env);
+    const freeeClient = createFreeeClient(env, { tenantId: operationalTenantId });
     const metrics = { processed: 0, skipped: 0, failed: 0, dealsCreated: 0 };
     const pdfTextMetrics: PdfTextMetrics = {
       attempted: 0,
@@ -169,7 +170,7 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
     } else {
       for (const email of emails) {
         for (const attachment of email.attachments) {
-          await processAttachment(env, bucket, freeeClient, email, attachment, metrics, pdfTextMetrics);
+          await processAttachment(env, operationalTenantId, bucket, freeeClient, email, attachment, metrics, pdfTextMetrics);
         }
       }
     }
@@ -226,7 +227,7 @@ export async function handleGmailReceiptPolling(env: Env): Promise<void> {
 
       const htmlDealMetrics = { ...metrics }; // Share deal counter with PDF path
       for (const htmlEmail of unprocessed) {
-        await processHtmlReceipt(env, bucket, freeeClient, htmlEmail, htmlDealMetrics);
+        await processHtmlReceipt(env, operationalTenantId, bucket, freeeClient, htmlEmail, htmlDealMetrics);
       }
       htmlMetrics = {
         processed: htmlDealMetrics.processed - metrics.processed,

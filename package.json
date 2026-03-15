@@ -44,11 +44,13 @@
     "poc:extract-pdf": "wrangler dev --local src/poc/unpdf-extract-api-worker.ts --port 8792 --show-interactive-dev-session=false",
     "poc:extract-file": "node scripts/poc-extract-pdf-file.mjs",
     "poc:extract-batch": "node scripts/poc-extract-pdf-batch.mjs",
+    "finance:smoke:remote": "bash scripts/finance-hardening-smoke.sh",
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
     "test": "vitest run",
     "test:all": "vitest run --config vitest.all.config.ts",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:production-sim": "vitest run src/index.production-sim.test.ts src/handlers/finance-automation-api.test.ts src/handlers/freee-oauth.test.ts src/handlers/receipt-admin-api.test.ts src/handlers/receipt-backfill.test.ts src/utils/freee-base-url.test.ts"
   },
   "keywords": [
     "cloudflare",

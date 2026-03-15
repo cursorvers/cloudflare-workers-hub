@@ -189,6 +189,48 @@ describe('TaskPackGenerator', () => {
       const callArgs = (llm.generateJson as ReturnType<typeof vi.fn>).mock.calls[0][0];
       expect(callArgs.messages[1].content).toContain('Context:');
     });
+
+    it('should prefer workers ai for decomposition when available', async () => {
+      const rawOutput = {
+        steps: [
+          { seq: 1, capability: 'code', description: 'Step', input: {}, risk: 'low', max_attempts: 3 },
+        ],
+      };
+
+      const llm = createMockLlm(rawOutput);
+      const generator = new TaskPackGenerator({
+        llm,
+        delegation: createDefaultDelegationMatrix(),
+        env: { AI: {} as any },
+      });
+
+      await generator.generate({ instruction: 'Use workers ai' });
+
+      const callArgs = (llm.generateJson as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(callArgs.provider).toBe('workers_ai');
+      expect(callArgs.model).toBe('@cf/meta/llama-3.1-8b-instruct');
+    });
+
+    it('should use openai only when explicitly enabled and configured', async () => {
+      const rawOutput = {
+        steps: [
+          { seq: 1, capability: 'code', description: 'Step', input: {}, risk: 'low', max_attempts: 3 },
+        ],
+      };
+
+      const llm = createMockLlm(rawOutput);
+      const generator = new TaskPackGenerator({
+        llm,
+        delegation: createDefaultDelegationMatrix(),
+        env: { OPENAI_API_KEY: 'openai-key', ENABLE_OPENAI_API: 'true' },
+      });
+
+      await generator.generate({ instruction: 'Use openai' });
+
+      const callArgs = (llm.generateJson as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(callArgs.provider).toBe('openai');
+      expect(callArgs.model).toBe('gpt-5.2');
+    });
   });
 
   describe('createDefaultDelegationMatrix', () => {

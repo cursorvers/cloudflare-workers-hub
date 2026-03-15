@@ -91,12 +91,65 @@ export function isEmailLikeVendor(vendor: string): boolean {
 // ── D1 helpers ───────────────────────────────────────────────────────
 export async function hasDuplicateHash(env: Env, fileHash: string): Promise<string | null> {
   const existing = await env.DB!.prepare(
-    'SELECT id FROM receipts WHERE file_hash = ? LIMIT 1'
+    'SELECT id FROM receipts WHERE tenant_id = ? AND file_hash = ? LIMIT 1'
   )
-    .bind(fileHash)
+    .bind(DEFAULT_TENANT_ID, fileHash)
     .first<{ id: string }>();
 
   return existing?.id ?? null;
+}
+
+export async function hasDuplicateHashForTenant(
+  env: Env,
+  tenantId: string,
+  fileHash: string
+): Promise<string | null> {
+  const existing = await env.DB!.prepare(
+    'SELECT id FROM receipts WHERE tenant_id = ? AND file_hash = ? LIMIT 1'
+  )
+    .bind(tenantId, fileHash)
+    .first<{ id: string }>();
+
+  return existing?.id ?? null;
+}
+
+export async function resolveOperationalTenantId(env: Env): Promise<string> {
+  if (!env.DB) {
+    throw new Error('DB not configured');
+  }
+
+  const configured = (env as Env & { RECEIPT_OPERATIONAL_TENANT_ID?: string }).RECEIPT_OPERATIONAL_TENANT_ID?.trim();
+  if (configured) {
+    const row = await env.DB.prepare(
+      'SELECT tenant_id FROM tenant_users WHERE tenant_id = ? AND is_active = 1 LIMIT 1'
+    )
+      .bind(configured)
+      .first<{ tenant_id: string }>();
+    if (!row) {
+      throw new Error(`Configured operational tenant ${configured} is not active`);
+    }
+    return configured;
+  }
+
+  const rows = await env.DB.prepare(
+    `SELECT tenant_id
+     FROM tenant_users
+     WHERE is_active = 1
+     GROUP BY tenant_id
+     ORDER BY tenant_id ASC
+     LIMIT 2`
+  ).all<{ tenant_id: string }>();
+
+  const results = rows.results ?? [];
+  if (results.length === 0) {
+    throw new Error('No active tenant found for scheduled receipt operations');
+  }
+
+  if (results.length > 1) {
+    throw new Error('Multiple active tenants found; RECEIPT_OPERATIONAL_TENANT_ID is required');
+  }
+
+  return results[0].tenant_id;
 }
 
 // ── File name helpers ────────────────────────────────────────────────

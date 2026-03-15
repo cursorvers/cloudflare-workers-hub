@@ -84,7 +84,7 @@ export class RunStateMachine {
   // ---------------------------------------------------------------------------
 
   async handleStart(req: StartRequest): Promise<{ run: RunState; action: DriveAction; idempotency_hits: IdempotencyHit[] }> {
-    const { run } = await this.ensureInitialized(req);
+    const { run, steps } = await this.ensureInitialized(req);
 
     if (run.cost_usd > run.budget_usd) {
       const updated = {
@@ -101,9 +101,58 @@ export class RunStateMachine {
       };
     }
 
-    const { action, idempotency_hits } = await this.driveRunCollectingIdempotencyHits();
-    const latestRun = (await this.store.getRun()) ?? run;
-    return { run: latestRun, action, idempotency_hits };
+    if (run.status === 'succeeded') {
+      return { run, action: { action: 'run_done', status: run.status }, idempotency_hits: [] };
+    }
+
+    if (run.status === 'cancelled') {
+      return { run, action: { action: 'run_cancelled', status: run.status, reason: run.cancelled_reason }, idempotency_hits: [] };
+    }
+
+    if (run.status === 'blocked_error') {
+      return { run, action: { action: 'run_blocked', status: run.status, reason: run.blocked_reason }, idempotency_hits: [] };
+    }
+
+    const running = steps.find((step) => step.status === 'running');
+    if (running) {
+      return {
+        run,
+        action: {
+          action: 'awaiting_step',
+          step: {
+            seq: running.seq,
+            status: running.status,
+            started_at: running.started_at,
+            attempts: running.attempts,
+            max_attempts: running.max_attempts,
+          },
+        },
+        idempotency_hits: [],
+      };
+    }
+
+    const pending = steps.find((step) => step.status === 'pending');
+    if (pending) {
+      return {
+        run,
+        action: {
+          action: 'awaiting_step',
+          step: {
+            seq: pending.seq,
+            status: pending.status,
+            attempts: pending.attempts,
+            max_attempts: pending.max_attempts,
+          },
+        },
+        idempotency_hits: [],
+      };
+    }
+
+    return {
+      run,
+      action: { action: 'run_blocked', status: 'blocked_error', reason: 'No runnable steps after start' },
+      idempotency_hits: [],
+    };
   }
 
   // ---------------------------------------------------------------------------

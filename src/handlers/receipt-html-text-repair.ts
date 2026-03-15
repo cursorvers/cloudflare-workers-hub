@@ -2,9 +2,11 @@ import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { stripHtmlTags } from '../services/gmail-receipt-client';
 import { classifyReceipt } from '../services/ai-receipt-classifier';
+import { resolveTenantContext } from '../utils/tenant-isolation';
 
 type HtmlReceiptRow = {
   id: string;
+  tenant_id: string;
   r2_object_key: string;
   vendor_name: string;
   amount: number;
@@ -60,6 +62,12 @@ export async function handleRepairHtmlReceiptText(
 ): Promise<Response> {
   if (!env.DB) return json({ error: 'DB not configured' }, 503);
 
+  const tenantResult = await resolveTenantContext(request, env, 'admin');
+  if (!tenantResult.ok || !tenantResult.tenantContext) {
+    return json({ error: tenantResult.error || 'Unauthorized' }, tenantResult.status || 401);
+  }
+  const tenantId = tenantResult.tenantContext.tenantId;
+
   const bucket = getReceiptBucket(env);
   if (!bucket) return json({ error: 'R2 bucket not configured' }, 500);
 
@@ -71,14 +79,14 @@ export async function handleRepairHtmlReceiptText(
   const only_missing_text = toBool(url.searchParams.get('only_missing_text'), true);
 
   const rows = await env.DB.prepare(
-    `SELECT id, r2_object_key, vendor_name, amount, currency, transaction_date,
+    `SELECT id, tenant_id, r2_object_key, vendor_name, amount, currency, transaction_date,
             account_category, classification_confidence,
             freee_receipt_id, freee_deal_id, status
      FROM receipts
-     WHERE source_type = 'html_body'
+     WHERE tenant_id = ? AND source_type = 'html_body'
      ORDER BY created_at DESC
      LIMIT ?`
-  ).bind(limit).all<HtmlReceiptRow>();
+  ).bind(tenantId, limit).all<HtmlReceiptRow>();
 
   let scanned = 0;
   let wrote_text = 0;
@@ -231,7 +239,7 @@ export async function handleRepairHtmlReceiptText(
         amount: row.amount,
         currency: row.currency,
         transaction_date: row.transaction_date,
-        tenant_id: 'default',
+        tenant_id: tenantId,
       });
 
       const nextVendor = (classification.vendor_name || row.vendor_name || 'Unknown').toString().trim() || row.vendor_name;
@@ -254,7 +262,7 @@ export async function handleRepairHtmlReceiptText(
                classification_confidence = ?, classification_method = ?,
                status = ?, error_code = ?, error_message = ?,
                updated_at = datetime('now')
-           WHERE id = ?`
+           WHERE tenant_id = ? AND id = ?`
         ).bind(
           nextVendor,
           nextAmount,
@@ -265,6 +273,7 @@ export async function handleRepairHtmlReceiptText(
           nextStatus,
           nextErrorCode,
           nextErrorMessage,
+          tenantId,
           row.id
         ).run();
       }
@@ -301,7 +310,7 @@ export async function handleRepairHtmlReceiptText(
     }
   }
   return json({
-    success: true,
+    success: errors === 0,
     dry_run,
     reclassify,
     only_missing_text,
@@ -313,5 +322,5 @@ export async function handleRepairHtmlReceiptText(
     skipped,
     errors,
     results,
-  });
+  }, errors > 0 ? 207 : 200);
 }

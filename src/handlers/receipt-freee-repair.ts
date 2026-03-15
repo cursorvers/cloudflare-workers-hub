@@ -28,6 +28,7 @@ function json(data: unknown, status = 200): Response {
 export async function handleRepairFreeeLinks(
   request: Request,
   env: Env,
+  tenantId: string,
   clientOverride?: LinkableFreeeClient
 ): Promise<Response> {
   if (!env.DB) {
@@ -42,18 +43,19 @@ export async function handleRepairFreeeLinks(
   const rows = await env.DB.prepare(
     `SELECT id, freee_receipt_id, freee_deal_id
      FROM receipts
-     WHERE freee_receipt_id IS NOT NULL AND freee_deal_id IS NOT NULL
+     WHERE tenant_id = ? AND freee_receipt_id IS NOT NULL AND freee_deal_id IS NOT NULL
      ORDER BY created_at DESC
      LIMIT ?`
   )
-    .bind(limit)
+    .bind(tenantId, limit)
     .all<{
       id: string;
       freee_receipt_id: string | number | null;
       freee_deal_id: string | number | null;
     }>();
 
-  const client: LinkableFreeeClient = clientOverride ?? (createFreeeClient(env) as unknown as LinkableFreeeClient);
+  const client: LinkableFreeeClient =
+    clientOverride ?? (createFreeeClient(env, { tenantId }) as unknown as LinkableFreeeClient);
 
   let scanned = 0;
   let ok = 0;

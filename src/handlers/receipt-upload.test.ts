@@ -18,7 +18,7 @@ vi.mock('../utils/cloudflare-access', () => ({
 }));
 
 vi.mock('../utils/tenant-isolation', () => ({
-  getTenantContext: vi.fn(),
+  resolveTenantContext: vi.fn(),
 }));
 
 vi.mock('../services/freee-client', () => ({
@@ -42,7 +42,7 @@ import {
   authenticateWithAccess,
   mapAccessUserToInternal,
 } from '../utils/cloudflare-access';
-import { getTenantContext } from '../utils/tenant-isolation';
+import { resolveTenantContext } from '../utils/tenant-isolation';
 
 type MockDbStatement = {
   sql: string;
@@ -67,7 +67,12 @@ function createMockDb(): MockDb {
         statement.bound = args;
         return statement;
       }),
-      first: vi.fn().mockResolvedValue(null),
+      first: vi.fn().mockImplementation(async () => {
+        if (sql.includes('FROM external_oauth_tokens')) {
+          return { encrypted_refresh_token: 'encrypted-refresh-token' };
+        }
+        return null;
+      }),
       run: vi.fn().mockResolvedValue({}),
     };
     statements.push(statement);
@@ -138,7 +143,15 @@ beforeEach(() => {
     role: 'user',
   } as any);
 
-  vi.mocked(getTenantContext).mockResolvedValue({ tenantId: 'tenant-abc' } as any);
+  vi.mocked(resolveTenantContext).mockResolvedValue({
+    ok: true,
+    tenantContext: {
+      tenantId: 'tenant-abc',
+      userId: 'user-123',
+      role: 'member',
+      authSource: 'access',
+    },
+  } as any);
 
   vi.mocked(createStateMachine).mockReturnValue({
     transition: vi.fn().mockResolvedValue(undefined),
@@ -187,6 +200,7 @@ describe('handleReceiptUpload', () => {
 
     expect(updateStatement?.bound).toEqual([
       '987',
+      'tenant-abc',
       expectedReceiptId,
     ]);
 

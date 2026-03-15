@@ -23,6 +23,8 @@
  */
 
 import type { Env } from '../types';
+import { extractUserIdFromKey, type APIScope, verifyAPIKey } from './api-auth';
+import { authenticateWithAccess, mapAccessUserToInternal } from './cloudflare-access';
 import { safeLog } from './log-sanitizer';
 
 // =============================================================================
@@ -39,6 +41,31 @@ export interface TenantAccessResult {
   hasAccess: boolean;
   tenantContext?: TenantContext;
   error?: string;
+}
+
+export interface ResolvedTenantContext extends TenantContext {
+  authSource: 'access' | 'api_key';
+  requestedTenantId?: string | null;
+}
+
+export interface TenantResolutionResult {
+  ok: boolean;
+  tenantContext?: ResolvedTenantContext;
+  error?: string;
+  status?: number;
+}
+
+export function readRequestedTenantId(request: Request): string | null {
+  const headerValue = request.headers.get('X-Tenant-Id')?.trim();
+  if (headerValue) return headerValue;
+
+  const url = new URL(request.url);
+  const queryValue = url.searchParams.get('tenant_id')?.trim();
+  return queryValue || null;
+}
+
+function isScopedTenantId(value: string | null | undefined): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 // =============================================================================
@@ -114,6 +141,133 @@ export async function checkTenantAccess(
   };
 }
 
+/**
+ * Resolve tenant context for the current request.
+ *
+ * Resolution order:
+ * 1. Cloudflare Access authenticated user -> tenant_users mapping
+ * 2. Scoped/admin API key with explicit tenant_id or user mapping
+ *
+ * SECURITY:
+ * - authenticated flows must not silently fall back to the legacy "default" tenant
+ * - service/admin keys require explicit tenant selection unless a user mapping exists
+ */
+export async function resolveTenantContext(
+  request: Request,
+  env: Env,
+  scope: APIScope
+): Promise<TenantResolutionResult> {
+  const requestedTenantId = readRequestedTenantId(request);
+
+  const accessResult = await authenticateWithAccess(request, env);
+  if (accessResult.verified && accessResult.email) {
+    const internalUser = await mapAccessUserToInternal(accessResult.email, env);
+    if (!internalUser) {
+      return {
+        ok: false,
+        error: 'Authenticated user is not mapped to an internal tenant',
+        status: 403,
+      };
+    }
+
+    const tenantContext = await getTenantContext(internalUser.userId, env);
+    if (!tenantContext) {
+      return {
+        ok: false,
+        error: 'Authenticated user is not associated with a tenant',
+        status: 403,
+      };
+    }
+
+    if (isScopedTenantId(requestedTenantId) && requestedTenantId !== tenantContext.tenantId) {
+      return {
+        ok: false,
+        error: 'Tenant mismatch',
+        status: 403,
+      };
+    }
+
+    return {
+      ok: true,
+      tenantContext: {
+        ...tenantContext,
+        authSource: 'access',
+        requestedTenantId,
+      },
+    };
+  }
+
+  if (!verifyAPIKey(request, env, scope)) {
+    return {
+      ok: false,
+      error: 'Unauthorized',
+      status: 401,
+    };
+  }
+
+  const apiKey =
+    request.headers.get('X-API-Key') ||
+    (request.headers.get('Authorization')?.startsWith('Bearer ')
+      ? request.headers.get('Authorization')?.slice('Bearer '.length)
+      : null);
+
+  if (!apiKey) {
+    return {
+      ok: false,
+      error: 'Missing API key',
+      status: 401,
+    };
+  }
+
+  const mapping = await extractUserIdFromKey(apiKey, env);
+  if (mapping?.userId && mapping.role !== 'service') {
+    const tenantContext = await getTenantContext(mapping.userId, env);
+    if (!tenantContext) {
+      return {
+        ok: false,
+        error: 'Mapped API user is not associated with a tenant',
+        status: 403,
+      };
+    }
+
+    if (isScopedTenantId(requestedTenantId) && requestedTenantId !== tenantContext.tenantId) {
+      return {
+        ok: false,
+        error: 'Tenant mismatch',
+        status: 403,
+      };
+    }
+
+    return {
+      ok: true,
+      tenantContext: {
+        ...tenantContext,
+        authSource: 'api_key',
+        requestedTenantId,
+      },
+    };
+  }
+
+  if (!isScopedTenantId(requestedTenantId)) {
+    return {
+      ok: false,
+      error: 'Explicit tenant_id is required for service/admin API keys',
+      status: 400,
+    };
+  }
+
+  return {
+    ok: true,
+    tenantContext: {
+      tenantId: requestedTenantId,
+      userId: mapping?.userId ?? 'service',
+      role: 'admin',
+      authSource: 'api_key',
+      requestedTenantId,
+    },
+  };
+}
+
 // =============================================================================
 // Tenant-Scoped Queries
 // =============================================================================
@@ -143,9 +297,8 @@ export async function tenantScopedQuery<T = unknown>(
   // Validate that query includes tenant_id check
   const normalizedSql = sql.toLowerCase().replace(/\s+/g, ' ');
   if (!normalizedSql.includes('tenant_id')) {
-    safeLog.warn('[Tenant] Query missing tenant_id filter', { sql });
-    // In strict mode, this should throw an error
-    // For now, we'll log a warning
+    safeLog.error('[Tenant] Query missing tenant_id filter', { sql, tenantId });
+    throw new Error('Tenant-scoped query missing tenant_id filter');
   }
 
   return env.DB.prepare(sql).bind(...params).all<T>();
@@ -166,7 +319,8 @@ export async function tenantScopedQueryFirst<T = unknown>(
 
   const normalizedSql = sql.toLowerCase().replace(/\s+/g, ' ');
   if (!normalizedSql.includes('tenant_id')) {
-    safeLog.warn('[Tenant] Query missing tenant_id filter', { sql });
+    safeLog.error('[Tenant] Query missing tenant_id filter', { sql, tenantId });
+    throw new Error('Tenant-scoped query missing tenant_id filter');
   }
 
   return env.DB.prepare(sql).bind(...params).first<T>();

@@ -107,6 +107,7 @@ export interface Env {
   SCHEDULED_GMAIL_ONLY?: string;   // "true" to run only Gmail polling in hourly cron (production-safe)
   GMAIL_HTML_RECEIPTS_ENABLED?: string;  // "true" to also fetch HTML email receipts (no PDF attachment)
   GMAIL_HTML_RECEIPT_SENDERS?: string;   // Comma-separated sender allowlist for HTML receipts
+  RECEIPT_OPERATIONAL_TENANT_ID?: string; // Explicit tenant for scheduled receipt jobs when multiple tenants exist
   // JWT Authentication (Cockpit API)
   JWT_SECRET?: string;             // HS256 secret for development
   JWT_PRIVATE_KEY?: string;        // RS256 private key for production
@@ -150,6 +151,7 @@ export interface Env {
   // GitHub Actions Integration (Web Receipt Scraper)
   GITHUB_TOKEN?: string;           // GitHub Personal Access Token for workflow_dispatch
   GITHUB_REPO?: string;            // Repository name (default: cursorvers/cloudflare-workers-hub)
+  ENABLE_OPENAI_API?: string;      // "true" to allow metered OpenAI API usage
 }
 
 /**

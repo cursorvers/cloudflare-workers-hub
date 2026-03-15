@@ -197,6 +197,7 @@ describe('selectAccountItemForReceipt', () => {
   it('OpenAI escalation when Workers AI confidence < 0.85, with valid OpenAI choice', async () => {
     const env = workersEnvWithResponse(JSON.stringify({ chosen_account_item_id: 1, confidence: 0.2, reason: '低確度' }), {
       OPENAI_API_KEY: 'test-key',
+      ENABLE_OPENAI_API: 'true',
     });
     mockOpenAIOnceJsonContent(JSON.stringify({ chosen_account_item_id: 2, confidence: 0.93, reason: 'より適切' }));
 
@@ -217,6 +218,7 @@ describe('selectAccountItemForReceipt', () => {
   it('OpenAI escalation when amount >= 500,000 JPY (high-risk) even if Workers AI is confident', async () => {
     const env = workersEnvWithResponse(JSON.stringify({ chosen_account_item_id: 1, confidence: 0.96, reason: '確信' }), {
       OPENAI_API_KEY: 'test-key',
+      ENABLE_OPENAI_API: 'true',
     });
     mockOpenAIOnceJsonContent(JSON.stringify({ chosen_account_item_id: 2, confidence: 0.9, reason: '高額なので慎重に' }));
 
@@ -236,6 +238,7 @@ describe('selectAccountItemForReceipt', () => {
   it('OpenAI escalation when scoreGap < 0.06 (ambiguous) even if Workers AI is confident', async () => {
     const env = workersEnvWithResponse(JSON.stringify({ chosen_account_item_id: 101, confidence: 0.95, reason: '上位同率' }), {
       OPENAI_API_KEY: 'test-key',
+      ENABLE_OPENAI_API: 'true',
     });
     mockOpenAIOnceJsonContent(JSON.stringify({ chosen_account_item_id: 102, confidence: 0.9, reason: 'より適切' }));
 
@@ -256,6 +259,7 @@ describe('selectAccountItemForReceipt', () => {
   it('OpenAI returns invalid id -> falls back to Workers AI result', async () => {
     const env = workersEnvWithResponse(JSON.stringify({ chosen_account_item_id: 2, confidence: 0.3, reason: '低確度' }), {
       OPENAI_API_KEY: 'test-key',
+      ENABLE_OPENAI_API: 'true',
     });
     mockOpenAIOnceJsonContent(JSON.stringify({ chosen_account_item_id: 999, confidence: 0.99, reason: '候補外' }));
 
@@ -276,6 +280,7 @@ describe('selectAccountItemForReceipt', () => {
   it('OpenAI fails (HTTP error) -> falls back to Workers AI result', async () => {
     const env = workersEnvWithResponse(JSON.stringify({ chosen_account_item_id: 2, confidence: 0.4, reason: '低確度' }), {
       OPENAI_API_KEY: 'test-key',
+      ENABLE_OPENAI_API: 'true',
     });
     mockOpenAIOnceError(500, 'boom');
 
@@ -296,6 +301,7 @@ describe('selectAccountItemForReceipt', () => {
   it('OpenAI fails and Workers AI choice invalid -> deterministic fallback', async () => {
     const env = workersEnvWithResponse(JSON.stringify({ chosen_account_item_id: 999, confidence: 0.4, reason: '候補外' }), {
       OPENAI_API_KEY: 'test-key',
+      ENABLE_OPENAI_API: 'true',
     });
     mockOpenAIOnceError(503, 'unavailable');
 

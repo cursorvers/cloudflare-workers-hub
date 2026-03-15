@@ -15,7 +15,7 @@ import { z } from 'zod';
 import { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { storeKnowledge, KnowledgeItem } from './knowledge';
-import { processLifelog, RawLifelogInput } from './lifelog-processor';
+import { processLifelog, RawLifelogInput, classifyEssential } from './lifelog-processor';
 import { supabaseUpsert, SupabaseConfig } from './supabase-client';
 import { CircuitBreaker } from '../utils/circuit-breaker';
 
@@ -582,8 +582,20 @@ export async function syncToSupabase(
             .map((c) => `${c.speakerName || 'Unknown'}: ${c.content}`)
             .join('\n') || '';
 
+          // Essential / noise scoring
+          const essential = classifyEssential({
+            classification: processed.classification,
+            confidenceScore: processed.confidenceScore,
+            durationSeconds: durationSeconds > 0 ? durationSeconds : null,
+            keyInsightsCount: processed.keyInsights.length,
+            actionItemsCount: processed.actionItems.length,
+            isStarred: lifelog.isStarred || false,
+            originalLength: transcript.length,
+          });
+
           // Upsert into Supabase (conflict on limitless_id)
-          const row = {
+          // Note: is_essential and essential_score columns require migration 0013
+          const row: Record<string, unknown> = {
             limitless_id: lifelog.id,
             classification: processed.classification,
             summary: processed.summary,
@@ -603,14 +615,28 @@ export async function syncToSupabase(
             raw_contents: lifelog.contents ? JSON.stringify(lifelog.contents) : null,
             processed_at: processed.classification !== 'unprocessed' ? new Date().toISOString() : null,
             sync_source: validatedOptions.syncSource,
+            is_essential: essential.isEssential,
+            essential_score: essential.essentialScore,
           };
 
-          const upsertResult = await supabaseUpsert(
+          let upsertResult = await supabaseUpsert(
             supabaseConfig,
             'processed_lifelogs',
             row,
             'limitless_id'
           );
+
+          // Graceful fallback: if essential columns don't exist yet (migration 0013 not applied),
+          // retry without them — never block data ingestion
+          if (upsertResult.error?.code === '42703') {
+            const { is_essential: _ie, essential_score: _es, ...rowWithoutEssential } = row;
+            upsertResult = await supabaseUpsert(
+              supabaseConfig,
+              'processed_lifelogs',
+              rowWithoutEssential,
+              'limitless_id'
+            );
+          }
 
           if (upsertResult.error) {
             throw new Error(`Supabase upsert failed: ${upsertResult.error.message}`);
@@ -621,6 +647,8 @@ export async function syncToSupabase(
           safeLog.info('[Limitless] Synced lifelog to Supabase', {
             lifelogId: lifelog.id,
             classification: processed.classification,
+            isEssential: essential.isEssential,
+            essentialScore: essential.essentialScore,
           });
         } catch (itemError) {
           const errorMsg = `Failed to sync lifelog ${lifelog.id}: ${String(itemError)}`;

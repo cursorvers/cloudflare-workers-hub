@@ -13,6 +13,7 @@
  */
 
 import type { Env } from '../types';
+import { verifyAPIKey } from '../utils/api-auth';
 import { safeLog } from '../utils/log-sanitizer';
 import { doFetch } from '../utils/do-fetch';
 import {
@@ -23,6 +24,7 @@ import {
   authenticateWithAccess,
   mapAccessUserToInternal,
 } from '../utils/cloudflare-access';
+import { authenticateBearer } from '../fugue/autopilot/auth';
 import {
   checkRateLimit,
   createRateLimitErrorResponse,
@@ -34,6 +36,7 @@ import {
   type Run,
   type Step,
 } from '../schemas/orchestration';
+import type { RunState, StepState } from '../durable-objects/run-storage';
 import { LlmGateway } from '../services/llm-gateway';
 import {
   TaskPackGenerator,
@@ -49,6 +52,31 @@ import {
 // Helpers
 // =============================================================================
 
+const ORCHESTRATION_SERVICE_OWNER_ID = 'orchestration-system';
+
+interface DOStatePayload {
+  readonly run: RunState | null;
+  readonly steps: StepState[];
+}
+
+type ApiStep = Step | {
+  readonly step_id: string;
+  readonly run_id: string;
+  readonly seq: number;
+  readonly status: StepState['status'];
+  readonly agent: StepState['agent'];
+  readonly error?: string;
+  readonly attempts: number;
+  readonly max_attempts: number;
+  readonly idempotency_key: string;
+  readonly cost_usd: number;
+  readonly started_at?: string;
+  readonly completed_at?: string;
+  readonly created_at: string;
+  readonly input_ref?: string;
+  readonly output_ref?: string;
+};
+
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -60,13 +88,75 @@ function errorResponse(code: string, message: string, status: number): Response 
   return jsonResponse({ success: false, error: { code, message } }, status);
 }
 
+function getInternalBearerToken(env: Env): string {
+  return env.WORKERS_API_KEY ?? env.ASSISTANT_API_KEY ?? env.QUEUE_API_KEY ?? '';
+}
+
+function mapDoStepToApi(runId: string, step: StepState, fallbackCreatedAt: string): ApiStep {
+  return {
+    step_id: `${runId}:${step.seq}`,
+    run_id: runId,
+    seq: step.seq,
+    status: step.status,
+    agent: step.agent,
+    error: step.error,
+    attempts: step.attempts,
+    max_attempts: step.max_attempts,
+    idempotency_key: step.idempotency_key,
+    cost_usd: step.cost_usd,
+    started_at: step.started_at,
+    completed_at: step.completed_at,
+    created_at: step.started_at ?? step.updated_at ?? fallbackCreatedAt,
+  };
+}
+
+async function fetchLiveRunState(
+  env: Env,
+  runId: string,
+): Promise<DOStatePayload | null> {
+  if (!env.RUN_COORDINATOR) return null;
+
+  try {
+    const doId = env.RUN_COORDINATOR.idFromName(runId);
+    const stub = env.RUN_COORDINATOR.get(doId);
+    const bearerToken = getInternalBearerToken(env);
+    const stateRes = await doFetch(stub, 'https://do/state', {
+      method: 'GET',
+      headers: bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {},
+    }, { retries: 1 });
+
+    if (!stateRes.ok) return null;
+
+    const stateBody = (await stateRes.json()) as { data?: DOStatePayload };
+    return stateBody.data ?? null;
+  } catch (err) {
+    safeLog.warn('[Orchestrate] Live DO state fetch failed', { runId, err: String(err) });
+    return null;
+  }
+}
+
+async function syncLiveRunStateToD1(
+  db: D1Database,
+  runId: string,
+  doRun: RunState,
+): Promise<void> {
+  try {
+    await db
+      .prepare('UPDATE runs SET status = ?, cost_usd = ?, step_count = ?, updated_at = ? WHERE run_id = ?')
+      .bind(doRun.status, doRun.cost_usd ?? 0, doRun.step_count ?? 0, doRun.updated_at ?? new Date().toISOString(), runId)
+      .run();
+  } catch (err) {
+    safeLog.warn('[Orchestrate] Failed to sync live DO run state to D1', { runId, err: String(err) });
+  }
+}
+
 /**
  * Extract owner_id from request via Cloudflare Access or JWT
  */
 async function extractOwnerId(
   request: Request,
   env: Env,
-): Promise<{ ownerId: string; role: UserRole } | Response> {
+): Promise<{ ownerId: string; role: UserRole; authMode: 'access' | 'jwt' | 'admin' | 'autopilot' } | Response> {
   // Rate limit
   const rateLimitResult = await checkRateLimit(request, env);
   if (!rateLimitResult.allowed) {
@@ -78,17 +168,30 @@ async function extractOwnerId(
   if (accessResult.verified && accessResult.email) {
     const internalUser = await mapAccessUserToInternal(accessResult.email, env);
     if (internalUser) {
-      return { ownerId: internalUser.userId, role: internalUser.role as UserRole };
+      return { ownerId: internalUser.userId, role: internalUser.role as UserRole, authMode: 'access' };
     }
   }
 
   // Fallback to JWT
   const authResult = await authenticateRequest(request, env);
-  if (!authResult.authenticated || !authResult.userId) {
-    return errorResponse('UNAUTHORIZED', 'Authentication required', 401);
+  if (authResult.authenticated && authResult.userId) {
+    return { ownerId: authResult.userId, role: (authResult.role ?? 'viewer') as UserRole, authMode: 'jwt' };
   }
 
-  return { ownerId: authResult.userId, role: (authResult.role ?? 'viewer') as UserRole };
+  // Production-safe service auth fallback for operator backends and FUGUE.
+  if (verifyAPIKey(request, env, 'admin')) {
+    return { ownerId: ORCHESTRATION_SERVICE_OWNER_ID, role: 'admin', authMode: 'admin' };
+  }
+
+  const autopilotToken = env.AUTOPILOT_API_KEY?.trim();
+  if (autopilotToken) {
+    const serviceAuth = authenticateBearer(request.headers.get('Authorization'), [autopilotToken]);
+    if (serviceAuth.authenticated) {
+      return { ownerId: ORCHESTRATION_SERVICE_OWNER_ID, role: 'operator', authMode: 'autopilot' };
+    }
+  }
+
+  return errorResponse('UNAUTHORIZED', 'Authentication required', 401);
 }
 
 // =============================================================================
@@ -122,7 +225,7 @@ export async function handleOrchestrateAPI(
   // GET /api/runs/:run_id/steps
   const stepsMatch = path.match(/^\/api\/runs\/([^/]+)\/steps$/);
   if (stepsMatch && method === 'GET') {
-    return handleGetSteps(db, ownerId, stepsMatch[1]);
+    return handleGetSteps(env, db, ownerId, stepsMatch[1]);
   }
 
   // POST /api/runs/:run_id/resume
@@ -134,7 +237,7 @@ export async function handleOrchestrateAPI(
   // GET /api/runs/:run_id
   const runMatch = path.match(/^\/api\/runs\/([^/]+)$/);
   if (runMatch && method === 'GET') {
-    return handleGetRun(db, ownerId, runMatch[1]);
+    return handleGetRun(env, db, ownerId, runMatch[1]);
   }
 
   // POST /api/approvals/:id/decision
@@ -189,7 +292,7 @@ async function handleCreateRun(
   // Day 3: Background task decomposition via LLM Gateway + Task Pack Generator
   // Uses waitUntil to avoid blocking the 202 response (Design: Case B)
   if (env.RUN_COORDINATOR) {
-    const bgPromise = decomposeAndStart(env, db, runId, instruction, budget_usd);
+    const bgPromise = decomposeAndStart(env, db, runId, instruction, budget_usd, max_steps);
     if (ctx) {
       ctx.waitUntil(bgPromise);
     } else {
@@ -222,15 +325,17 @@ async function decomposeAndStart(
   runId: string,
   instruction: string,
   budgetUsd: number,
+  maxSteps: number,
 ): Promise<void> {
   try {
     const llm = new LlmGateway(env);
     const generator = new TaskPackGenerator({
       llm,
       delegation: createDefaultDelegationMatrix(),
+      env,
     });
 
-    const taskPack = await generator.generate({ instruction, requestId: runId });
+    const taskPack = await generator.generate({ instruction, requestId: runId, maxSteps });
 
     // Record decomposition cost in D1 (CostEvent)
     const ce = taskPack.costEvent;
@@ -401,6 +506,7 @@ async function syncRunStatusToD1(
  * GET /api/runs/:run_id -> Run + Steps
  */
 async function handleGetRun(
+  env: Env,
   db: D1Database,
   ownerId: string,
   runId: string,
@@ -412,6 +518,23 @@ async function handleGetRun(
 
   if (!run) {
     return errorResponse('NOT_FOUND', 'Run not found', 404);
+  }
+
+  const liveState = await fetchLiveRunState(env, runId);
+  if (liveState?.run) {
+    await syncLiveRunStateToD1(db, runId, liveState.run);
+    const liveSteps = liveState.steps.map((step) => mapDoStepToApi(runId, step, run.created_at));
+    return jsonResponse({
+      success: true,
+      data: {
+        ...run,
+        status: liveState.run.status,
+        cost_usd: liveState.run.cost_usd,
+        step_count: liveState.run.step_count,
+        updated_at: liveState.run.updated_at,
+        steps: liveSteps,
+      },
+    });
   }
 
   const { results: steps } = await db
@@ -429,6 +552,7 @@ async function handleGetRun(
  * GET /api/runs/:run_id/steps -> Step[]
  */
 async function handleGetSteps(
+  env: Env,
   db: D1Database,
   ownerId: string,
   runId: string,
@@ -441,6 +565,14 @@ async function handleGetSteps(
 
   if (!run) {
     return errorResponse('NOT_FOUND', 'Run not found', 404);
+  }
+
+  const liveState = await fetchLiveRunState(env, runId);
+  if (liveState?.steps) {
+    return jsonResponse({
+      success: true,
+      data: liveState.steps.map((step) => mapDoStepToApi(runId, step, new Date().toISOString())),
+    });
   }
 
   const { results: steps } = await db

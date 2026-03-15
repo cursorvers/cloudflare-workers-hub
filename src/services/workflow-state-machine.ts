@@ -52,6 +52,7 @@ export type EventType =
 
 export interface Receipt {
   id: string;
+  tenant_id?: string;
   file_hash: string;
   r2_object_key: string;
   freee_receipt_id?: string;
@@ -69,6 +70,7 @@ export interface Receipt {
 }
 
 export interface AuditLog {
+  tenant_id?: string;
   receipt_id: string;
   event_type: EventType;
   previous_status?: ReceiptStatus;
@@ -125,8 +127,9 @@ export class WorkflowStateMachine {
   private env: Env;
   private db: D1Database;
   private receiptId: string;
+  private tenantId: string;
 
-  constructor(env: Env, receiptId: string) {
+  constructor(env: Env, receiptId: string, tenantId: string) {
     this.env = env;
     if (!env.DB) {
       // Callers should guard this, but keep a hard runtime check to avoid silent corruption.
@@ -134,6 +137,7 @@ export class WorkflowStateMachine {
     }
     this.db = env.DB;
     this.receiptId = receiptId;
+    this.tenantId = tenantId;
   }
 
   /**
@@ -141,9 +145,9 @@ export class WorkflowStateMachine {
    */
   async getCurrentState(): Promise<Receipt | null> {
     const result = await this.db.prepare(
-      'SELECT * FROM receipts WHERE id = ?'
+      'SELECT * FROM receipts WHERE tenant_id = ? AND id = ?'
     )
-      .bind(this.receiptId)
+      .bind(this.tenantId, this.receiptId)
       .first<Receipt>();
 
     return result;
@@ -183,14 +187,15 @@ export class WorkflowStateMachine {
     await this.db.batch([
       // Update receipt status
       this.db.prepare(
-        "UPDATE receipts SET status = ?, updated_at = datetime('now') WHERE id = ?"
-      ).bind(to, this.receiptId),
+        "UPDATE receipts SET status = ?, updated_at = datetime('now') WHERE tenant_id = ? AND id = ?"
+      ).bind(to, this.tenantId, this.receiptId),
 
       // Insert audit log
       this.db.prepare(
-        `INSERT INTO audit_logs (receipt_id, event_type, previous_status, new_status, metadata)
-         VALUES (?, ?, ?, ?, ?)`
+        `INSERT INTO audit_logs (tenant_id, receipt_id, event_type, previous_status, new_status, metadata)
+         VALUES (?, ?, ?, ?, ?, ?)`
       ).bind(
+        this.tenantId,
         this.receiptId,
         'state_transition',
         from,
@@ -221,14 +226,15 @@ export class WorkflowStateMachine {
         `UPDATE receipts
          SET error_message = ?, error_code = ?, retry_count = retry_count + 1,
              last_retry_at = datetime('now'), updated_at = datetime('now')
-         WHERE id = ?`
-      ).bind(errorMessage, errorCode, this.receiptId),
+         WHERE tenant_id = ? AND id = ?`
+      ).bind(errorMessage, errorCode, this.tenantId, this.receiptId),
 
       // Insert audit log
       this.db.prepare(
-        `INSERT INTO audit_logs (receipt_id, event_type, metadata)
-         VALUES (?, ?, ?)`
+        `INSERT INTO audit_logs (tenant_id, receipt_id, event_type, metadata)
+         VALUES (?, ?, ?, ?)`
       ).bind(
+        this.tenantId,
         this.receiptId,
         'error_occurred',
         JSON.stringify({ errorMessage, errorCode, ...metadata })
@@ -290,9 +296,9 @@ export class WorkflowStateMachine {
    */
   async getAuditTrail(): Promise<AuditLog[]> {
     const results = await this.db.prepare(
-      `SELECT * FROM audit_logs WHERE receipt_id = ? ORDER BY created_at ASC`
+      `SELECT * FROM audit_logs WHERE tenant_id = ? AND receipt_id = ? ORDER BY created_at ASC`
     )
-      .bind(this.receiptId)
+      .bind(this.tenantId, this.receiptId)
       .all<AuditLog>();
 
     return results.results || [];
@@ -308,14 +314,15 @@ export class WorkflowStateMachine {
         `UPDATE receipts
          SET status = ?, freee_receipt_id = ?, completed_at = datetime('now'),
              updated_at = datetime('now')
-         WHERE id = ?`
-      ).bind('completed', freeeReceiptId, this.receiptId),
+         WHERE tenant_id = ? AND id = ?`
+      ).bind('completed', freeeReceiptId, this.tenantId, this.receiptId),
 
       // Insert audit log
       this.db.prepare(
-        `INSERT INTO audit_logs (receipt_id, event_type, new_status, metadata)
-         VALUES (?, ?, ?, ?)`
+        `INSERT INTO audit_logs (tenant_id, receipt_id, event_type, new_status, metadata)
+         VALUES (?, ?, ?, ?, ?)`
       ).bind(
+        this.tenantId,
         this.receiptId,
         'state_transition',
         'completed',
@@ -336,7 +343,8 @@ export class WorkflowStateMachine {
 
 export function createStateMachine(
   env: Env,
-  receiptId: string
+  receiptId: string,
+  options: { tenantId: string }
 ): WorkflowStateMachine {
-  return new WorkflowStateMachine(env, receiptId);
+  return new WorkflowStateMachine(env, receiptId, options.tenantId);
 }

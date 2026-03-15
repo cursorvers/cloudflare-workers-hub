@@ -94,6 +94,7 @@ export class RunCoordinator extends DurableObject<Env> {
         const parsed = StartRequestSchema.safeParse(body);
         if (!parsed.success) return errorResponse(parsed.error.message, 400, 'VALIDATION_ERROR');
         const res = await this.sm.handleStart(parsed.data);
+        await this.ctx.storage.setAlarm(Date.now());
         return jsonResponse({ success: true, data: res }, 200);
       }
 
@@ -166,7 +167,7 @@ export class RunCoordinator extends DurableObject<Env> {
 
     try {
       const llm = new LlmGateway(this.env);
-      const executor = new StepExecutor({ llm });
+      const executor = new StepExecutor({ llm, env: this.env });
       const result = await executor.executeStep(runId, action.step);
 
       // Report result back to state machine

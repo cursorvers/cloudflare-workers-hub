@@ -10,6 +10,7 @@
 
 import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
+import { resolveFreeeBaseUrl } from '../utils/freee-base-url';
 
 // =============================================================================
 // Constants
@@ -179,16 +180,32 @@ type FreeeEnv = Env & {
   FREEE_ENCRYPTION_KEY: string;
 };
 
+export interface FreeeClientOptions {
+  tenantId: string;
+  companyId?: string | null;
+}
+
+interface ExternalOauthTokenRow {
+  tenant_id: string;
+  provider: string;
+  company_id: string | null;
+  encrypted_refresh_token?: string | null;
+  access_token?: string | null;
+  access_token_expires_at_ms?: number | null;
+}
+
 export class FreeeClient {
   private env: FreeeEnv;
   private config: FreeeConfig;
-  private baseUrl = 'https://api.freee.co.jp/api/1';
+  private baseUrl: string;
+  private tenantId: string;
+  private requestedCompanyId: string | null;
   // Invocation-local cache: avoids repeated KV reads and token refreshes within a single worker run.
   private cachedAccessToken: string | null = null;
   private cachedAccessTokenExpiryMs: number | null = null;
   private cachedCompanyId: string | null = null;
 
-  constructor(env: Env) {
+  constructor(env: Env, options: FreeeClientOptions) {
     const requireEnv = (value: string | undefined, name: string): string => {
       if (!value) {
         throw new Error(`Missing required env var: ${name}`);
@@ -217,12 +234,80 @@ export class FreeeClient {
       FREEE_CLIENT_SECRET: clientSecret,
       FREEE_ENCRYPTION_KEY: encryptionKey,
     };
+    this.baseUrl = resolveFreeeBaseUrl(env);
+    this.tenantId = options.tenantId;
+    this.requestedCompanyId = options.companyId?.trim() || null;
     this.config = {
       clientId,
       clientSecret,
       // company_id can be stored in D1 during OAuth callback and resolved lazily.
-      companyId: env.FREEE_COMPANY_ID || '',
+      companyId: this.requestedCompanyId || env.FREEE_COMPANY_ID || '',
     };
+  }
+
+  private buildTokenQuery(selectClause: string): { sql: string; bindings: unknown[] } {
+    let sql = `${selectClause}
+      FROM external_oauth_tokens
+      WHERE tenant_id = ? AND provider = 'freee'`;
+    const bindings: unknown[] = [this.tenantId];
+
+    if (this.requestedCompanyId) {
+      sql += ' AND company_id = ?';
+      bindings.push(this.requestedCompanyId);
+    }
+
+    sql += ' ORDER BY updated_at DESC LIMIT 2';
+    return { sql, bindings };
+  }
+
+  private async getTokenRow(): Promise<ExternalOauthTokenRow | null> {
+    const { sql, bindings } = this.buildTokenQuery(
+      'SELECT tenant_id, provider, company_id, encrypted_refresh_token, access_token, access_token_expires_at_ms'
+    );
+    const rows = await this.env.DB.prepare(sql).bind(...bindings).all<ExternalOauthTokenRow>();
+    const results = rows.results ?? [];
+    if (results.length === 0) return null;
+
+    if (!this.requestedCompanyId) {
+      const companyIds = new Set(results.map((row) => row.company_id || ''));
+      if (companyIds.size > 1) {
+        throw new Error(`Multiple freee token records found for tenant ${this.tenantId}; company_id is required`);
+      }
+    }
+
+    return results[0];
+  }
+
+  private async persistTokenRecord(
+    encryptedRefreshToken: string,
+    accessToken: string | null,
+    accessTokenExpiresAtMs: number | null,
+    companyId?: string | null
+  ): Promise<void> {
+    const scopedCompanyId = companyId ?? this.requestedCompanyId ?? this.cachedCompanyId ?? '';
+    await this.env.DB.prepare(
+      `INSERT INTO external_oauth_tokens (
+        tenant_id,
+        provider,
+        company_id,
+        encrypted_refresh_token,
+        access_token,
+        access_token_expires_at_ms,
+        updated_at
+      )
+      VALUES (?, 'freee', ?, ?, ?, ?, strftime('%s','now'))
+      ON CONFLICT(tenant_id, provider, company_id) DO UPDATE SET
+        encrypted_refresh_token = excluded.encrypted_refresh_token,
+        access_token = excluded.access_token,
+        access_token_expires_at_ms = excluded.access_token_expires_at_ms,
+        updated_at = strftime('%s','now')`
+    ).bind(
+      this.tenantId,
+      scopedCompanyId,
+      encryptedRefreshToken,
+      accessToken,
+      accessTokenExpiresAtMs
+    ).run();
   }
 
   /**
@@ -240,21 +325,15 @@ export class FreeeClient {
     // Check if access token is still valid (D1 persisted cache)
     let accessTokenExpiryMs: number | null = null;
     let accessToken: string | null = null;
+    let tokenRow: ExternalOauthTokenRow | null = null;
     try {
-      const row = await this.env.DB.prepare(
-        `SELECT access_token, access_token_expires_at_ms, company_id
-         FROM external_oauth_tokens
-         WHERE provider = 'freee'
-         LIMIT 1`
-      ).first() as {
-        access_token?: string | null;
-        access_token_expires_at_ms?: number | null;
-        company_id?: string | null;
-      } | null;
-      accessToken = row?.access_token ?? null;
-      accessTokenExpiryMs = typeof row?.access_token_expires_at_ms === 'number' ? row.access_token_expires_at_ms : null;
-      if (!this.cachedCompanyId && row?.company_id) {
-        this.cachedCompanyId = row.company_id;
+      tokenRow = await this.getTokenRow();
+      accessToken = tokenRow?.access_token ?? null;
+      accessTokenExpiryMs = typeof tokenRow?.access_token_expires_at_ms === 'number'
+        ? tokenRow.access_token_expires_at_ms
+        : null;
+      if (!this.cachedCompanyId && tokenRow?.company_id) {
+        this.cachedCompanyId = tokenRow.company_id;
       }
     } catch (error) {
       safeLog(this.env, 'warn', 'D1 read failed while checking freee access token (continuing)', {
@@ -275,13 +354,8 @@ export class FreeeClient {
     // Get encrypted refresh token from D1 for token refresh
     let encryptedRefreshToken: string | null = null;
     try {
-      const row = await this.env.DB.prepare(
-        `SELECT encrypted_refresh_token
-         FROM external_oauth_tokens
-         WHERE provider = 'freee'
-         LIMIT 1`
-      ).first() as { encrypted_refresh_token?: string | null } | null;
-      encryptedRefreshToken = row?.encrypted_refresh_token ?? null;
+      tokenRow = tokenRow ?? await this.getTokenRow();
+      encryptedRefreshToken = tokenRow?.encrypted_refresh_token ?? null;
     } catch (error) {
       safeLog(this.env, 'warn', 'D1 read failed while fetching freee refresh token', {
         error: error instanceof Error ? error.message : String(error),
@@ -298,23 +372,7 @@ export class FreeeClient {
         const kvExpiry = await kv.get('freee:access_token_expiry'); // kv-optimizer:ignore
         if (kvEncrypted) {
           const expiresAtMs = kvExpiry ? Number.parseInt(kvExpiry, 10) : null;
-          await this.env.DB.prepare(
-            `INSERT INTO external_oauth_tokens (provider, encrypted_refresh_token, access_token, access_token_expires_at_ms, updated_at, company_id)
-             VALUES (
-               'freee',
-               ?,
-               ?,
-               ?,
-               strftime('%s','now'),
-               COALESCE((SELECT company_id FROM external_oauth_tokens WHERE provider='freee' LIMIT 1), NULL)
-             )
-             ON CONFLICT(provider) DO UPDATE SET
-               encrypted_refresh_token=excluded.encrypted_refresh_token,
-               access_token=excluded.access_token,
-               access_token_expires_at_ms=excluded.access_token_expires_at_ms,
-               company_id=COALESCE(external_oauth_tokens.company_id, excluded.company_id),
-               updated_at=strftime('%s','now')`
-          ).bind(kvEncrypted, kvAccess, expiresAtMs).run();
+          await this.persistTokenRecord(kvEncrypted, kvAccess, expiresAtMs, tokenRow?.company_id ?? null);
           encryptedRefreshToken = kvEncrypted;
           accessToken = kvAccess;
           accessTokenExpiryMs = expiresAtMs;
@@ -366,29 +424,19 @@ export class FreeeClient {
         tokens.refresh_token,
         this.env.FREEE_ENCRYPTION_KEY
       );
-      await this.env.DB.prepare(
-        `INSERT INTO external_oauth_tokens (provider, encrypted_refresh_token, access_token, access_token_expires_at_ms, updated_at, company_id)
-         VALUES (
-           'freee',
-           ?,
-           ?,
-           ?,
-           strftime('%s','now'),
-           COALESCE((SELECT company_id FROM external_oauth_tokens WHERE provider='freee' LIMIT 1), NULL)
-         )
-         ON CONFLICT(provider) DO UPDATE SET
-           encrypted_refresh_token=excluded.encrypted_refresh_token,
-           access_token=excluded.access_token,
-           access_token_expires_at_ms=excluded.access_token_expires_at_ms,
-           company_id=COALESCE(external_oauth_tokens.company_id, excluded.company_id),
-           updated_at=strftime('%s','now')`
-      ).bind(encryptedNewRefreshToken, tokens.access_token, newExpiryMs).run();
+      await this.persistTokenRecord(
+        encryptedNewRefreshToken,
+        tokens.access_token,
+        newExpiryMs,
+        tokenRow?.company_id ?? null
+      );
     } catch (error) {
-      // Fail-open: allow processing to proceed even if D1 writes are blocked.
-      // Note: if freee rotates refresh tokens, inability to persist may require re-auth later.
-      safeLog(this.env, 'warn', 'D1 write failed while storing freee tokens (continuing)', {
+      this.cachedAccessToken = null;
+      this.cachedAccessTokenExpiryMs = null;
+      safeLog(this.env, 'error', 'D1 write failed while storing freee tokens', {
         error: error instanceof Error ? error.message : String(error),
       });
+      throw new Error('Failed to persist refreshed freee tokens');
     }
 
     safeLog(this.env, 'info', 'Access token refreshed', {});
@@ -404,6 +452,11 @@ export class FreeeClient {
   }
 
   private async resolveCompanyId(): Promise<string> {
+    if (this.requestedCompanyId && this.env.FREEE_COMPANY_ID && this.requestedCompanyId !== this.env.FREEE_COMPANY_ID) {
+      throw new Error('Configured FREEE_COMPANY_ID does not match requested company_id');
+    }
+
+    if (this.requestedCompanyId) return this.requestedCompanyId;
     // Prefer explicit env var.
     if (this.env.FREEE_COMPANY_ID) return this.env.FREEE_COMPANY_ID;
     if (this.cachedCompanyId) return this.cachedCompanyId;
@@ -411,12 +464,7 @@ export class FreeeClient {
 
     // Try D1 cache.
     try {
-      const row = await this.env.DB.prepare(
-        `SELECT company_id
-         FROM external_oauth_tokens
-         WHERE provider = 'freee'
-         LIMIT 1`
-      ).first() as { company_id?: string | null } | null;
+      const row = await this.getTokenRow();
       if (row?.company_id) {
         this.cachedCompanyId = row.company_id;
         this.config.companyId = row.company_id;
@@ -449,8 +497,8 @@ export class FreeeClient {
       await this.env.DB.prepare(
         `UPDATE external_oauth_tokens
          SET company_id = ?, updated_at = strftime('%s','now')
-         WHERE provider = 'freee'`
-      ).bind(companyId).run();
+         WHERE tenant_id = ? AND provider = 'freee' AND company_id = ?`
+      ).bind(companyId, this.tenantId, this.requestedCompanyId ?? '').run();
     } catch (error) {
       safeLog(this.env, 'warn', 'D1 write failed while persisting freee company_id (continuing)', {
         error: error instanceof Error ? error.message : String(error),
@@ -682,6 +730,6 @@ export class FreeeClient {
 // Factory Function
 // =============================================================================
 
-export function createFreeeClient(env: Env): FreeeClient {
-  return new FreeeClient(env);
+export function createFreeeClient(env: Env, options: FreeeClientOptions): FreeeClient {
+  return new FreeeClient(env, options);
 }

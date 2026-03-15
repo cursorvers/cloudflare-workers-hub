@@ -82,11 +82,18 @@ freee側を別で触る/事故リスクを下げたい場合、以下を検討:
 
 少なくとも「freeeへの自動ミューテーション」を止めるなら、`wrangler.toml` のcronと `scheduled.ts` の quick-job を外す。
 
+## 2026-03-10 時点の追加注意
+- scheduled Gmail poll / backfill は `default` tenant に自動フォールバックしない。
+- 複数 active tenant がある環境では `RECEIPT_OPERATIONAL_TENANT_ID` を Workers secret/env に設定しないと fail-closed する。
+- freee OAuth callback は複数 company で「先頭を採用」しない。`/api/freee/auth?company_id=<freee_company_id>` で開始する。
+- token 保存先は D1 の `external_oauth_tokens(tenant_id, provider, company_id)`。
+- migration `0029_harden_freee_tokens_and_audit.sql` を適用してから dry-run smoke を行うこと。
+
 ## GitHub Actions (検証/修復)
 `Verify Receipt Evidence` workflow が存在し、schedule/dispatchで以下の管理用エンドポイントを叩く:
 - `/api/receipts/repair-freee-links`
 - `/api/receipts/repair-html-text`
-- `/api/receipts/retry`
+- `/api/receipts/retry?dry_run=false&confirm=execute-retry`
 
 このworkflowは `WORKERS_API_KEY` を用いて本番へリクエストするため、freee運用を別系統にする場合は **無効化/停止** を検討。
 
@@ -94,4 +101,3 @@ freee側を別で触る/事故リスクを下げたい場合、以下を検討:
 - Cloudflare Worker: `orchestrator-hub` (production)
 - データ: D1 `knowledge-base` (`receipts`, `receipt_deals`, `cron_runs`)
 - 保存: R2 `receipt-worm-storage`
-

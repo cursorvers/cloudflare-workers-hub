@@ -17,6 +17,10 @@
  */
 
 import type { Env } from '../types';
+import {
+  tenantScopedQuery,
+  type ResolvedTenantContext,
+} from '../utils/tenant-isolation';
 
 // =============================================================================
 // Types
@@ -119,7 +123,8 @@ function errorResponse(message: string, status = 400): Response {
 
 export async function handleReceiptList(
   request: Request,
-  env: Env
+  env: Env,
+  tenantContext: ResolvedTenantContext
 ): Promise<Response> {
   if (!env.DB) {
     return errorResponse('D1 database not configured', 500);
@@ -142,8 +147,8 @@ export async function handleReceiptList(
     return errorResponse('Invalid to date. Use YYYY-MM-DD.');
   }
 
-  const conditions: string[] = [];
-  const bindings: (string | number)[] = [];
+  const conditions: string[] = ['tenant_id = ?'];
+  const bindings: (string | number)[] = [tenantContext.tenantId];
 
   if (statusFilter) {
     conditions.push('receipt_status = ?');
@@ -171,9 +176,12 @@ LIMIT ?`;
 
   bindings.push(limit);
 
-  const { results } = await env.DB.prepare(sql)
-    .bind(...bindings)
-    .all<ReceiptStatusRow>();
+  const { results } = await tenantScopedQuery<ReceiptStatusRow>(
+    env,
+    tenantContext.tenantId,
+    sql,
+    bindings
+  );
 
   return jsonResponse({
     success: true,
@@ -188,21 +196,28 @@ LIMIT ?`;
 
 export async function handleReceiptSummary(
   _request: Request,
-  env: Env
+  env: Env,
+  tenantContext: ResolvedTenantContext
 ): Promise<Response> {
   if (!env.DB) {
     return errorResponse('D1 database not configured', 500);
   }
 
-  const sql = `${STATUS_CTE}
+const sql = `${STATUS_CTE}
 SELECT
   receipt_status,
   COUNT(*) AS count,
   COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS total_amount
 FROM computed
+WHERE tenant_id = ?
 GROUP BY receipt_status`;
 
-  const { results } = await env.DB.prepare(sql).all<SummaryRow>();
+  const { results } = await tenantScopedQuery<SummaryRow>(
+    env,
+    tenantContext.tenantId,
+    sql,
+    [tenantContext.tenantId]
+  );
 
   // Build summary object with all statuses (default 0)
   const summary: Record<string, { count: number; totalAmount: number }> = {};

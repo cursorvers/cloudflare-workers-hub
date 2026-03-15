@@ -52,6 +52,12 @@ export interface RawLifelogInput {
   isStarred?: boolean;
 }
 
+/** Essential scoring result */
+export interface EssentialScore {
+  isEssential: boolean;
+  essentialScore: number;
+}
+
 /** Output: processed lifelog ready for Supabase storage */
 export interface ProcessedLifelog {
   classification: Classification;
@@ -586,4 +592,100 @@ function parseHighlightResponse(text: string): {
     : 'ハイライトの要約';
 
   return { topics, summary };
+}
+
+// ============================================================================
+// Essential / Noise Classification
+// ============================================================================
+
+/** Weight constants for essential scoring */
+const ESSENTIAL_WEIGHTS = {
+  CLASSIFICATION: 0.30,
+  CONFIDENCE: 0.15,
+  DURATION: 0.15,
+  INSIGHTS: 0.15,
+  ACTIONS: 0.15,
+  STARRED: 0.10,
+} as const;
+
+/** Classification scores (0=noise, 1=essential) */
+const CLASSIFICATION_SCORES: Record<string, number> = {
+  insight: 1.0,
+  reflection: 0.9,
+  brainstorm: 0.8,
+  todo: 0.7,
+  meeting: 0.5,
+  casual: 0.1,
+  unprocessed: 0.0,
+  pending: 0.0,
+};
+
+const ESSENTIAL_THRESHOLD = 0.55;
+
+/**
+ * Classify a processed lifelog as essential or noise.
+ *
+ * Pure deterministic function — no AI calls, no DB dependency.
+ * Uses weighted scoring from existing processed fields.
+ *
+ * Essential (score >= 0.55): personality-reflecting, actionable, insightful
+ * Noise (score < 0.55): ambient, trivial, unprocessed
+ */
+export function classifyEssential(input: {
+  classification: string;
+  confidenceScore: number | null;
+  durationSeconds: number | null;
+  keyInsightsCount: number;
+  actionItemsCount: number;
+  isStarred: boolean;
+  originalLength: number | null;
+}): EssentialScore {
+  // Short-circuit: unprocessed / pending → always noise
+  if (input.classification === 'unprocessed' || input.classification === 'pending') {
+    return { isEssential: false, essentialScore: 0.0 };
+  }
+
+  // Short-circuit: ultra-short recordings with no content
+  if ((input.durationSeconds ?? 0) < 15 && (input.originalLength ?? 0) < 50) {
+    return { isEssential: false, essentialScore: 0.05 };
+  }
+
+  // Short-circuit: starred items are always essential
+  if (input.isStarred) {
+    const baseScore = CLASSIFICATION_SCORES[input.classification] ?? 0.3;
+    return { isEssential: true, essentialScore: Math.max(0.8, baseScore) };
+  }
+
+  // Weighted scoring
+  const classificationScore = CLASSIFICATION_SCORES[input.classification] ?? 0.3;
+
+  const confidenceScore = input.confidenceScore ?? 0.5;
+
+  // Duration: 0-30s = 0.0, 30-120s = linear, 120s+ = 1.0
+  const dur = input.durationSeconds ?? 0;
+  const durationScore = dur <= 30 ? 0.0 : dur >= 120 ? 1.0 : (dur - 30) / 90;
+
+  // Insights: 0 = 0.0, 1 = 0.5, 2 = 0.8, 3+ = 1.0
+  const insightsScore = Math.min(input.keyInsightsCount / 3, 1.0);
+
+  // Actions: 0 = 0.0, 1 = 0.6, 2+ = 1.0
+  const actionsScore = Math.min(input.actionItemsCount / 2, 1.0);
+
+  const starredScore = 0.0; // already handled by short-circuit
+
+  const rawScore =
+    classificationScore * ESSENTIAL_WEIGHTS.CLASSIFICATION +
+    confidenceScore * ESSENTIAL_WEIGHTS.CONFIDENCE +
+    durationScore * ESSENTIAL_WEIGHTS.DURATION +
+    insightsScore * ESSENTIAL_WEIGHTS.INSIGHTS +
+    actionsScore * ESSENTIAL_WEIGHTS.ACTIONS +
+    starredScore * ESSENTIAL_WEIGHTS.STARRED;
+
+  // Clamp to [0, 1]
+  const essentialScore = Math.round(Math.min(Math.max(rawScore, 0), 1) * 100) / 100;
+
+  return {
+    isEssential: essentialScore >= ESSENTIAL_THRESHOLD,
+    essentialScore,
+  };
 }

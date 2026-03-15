@@ -112,9 +112,14 @@ jobs:
           echo "- Base URL: ${BASE_URL}" >> "$GITHUB_STEP_SUMMARY"
 
           if [ "${MODE}" = "retry_failed" ]; then
-            echo "Running POST /api/receipts/retry ..."
-            resp="$(curl -sS -H "${auth_header}" -X POST "${BASE_URL}/api/receipts/retry")"
-            echo "$resp" | jq -r '. as $r | "retried=\($r.retried)"' | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "Running POST /api/receipts/retry?dry_run=false&confirm=execute-retry ..."
+            resp="$(curl -sS -H "${auth_header}" -X POST "${BASE_URL}/api/receipts/retry?dry_run=false&confirm=execute-retry")"
+            echo "$resp" | jq -e '.applied == true and .dry_run == false' >/dev/null || {
+              echo "::error::retry_failed did not execute mutations"
+              echo "$resp" | jq .
+              exit 1
+            }
+            echo "$resp" | jq -r '. as $r | "retried=\($r.retried) dry_run=\($r.dry_run) applied=\($r.applied)"' | tee -a "$GITHUB_STEP_SUMMARY"
             echo "$resp" | jq -r '[.results[] | {id, status, freeeId, error}] | (group_by(.status) | map({status: .[0].status, count: length}))' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi

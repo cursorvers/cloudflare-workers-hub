@@ -34,6 +34,7 @@ const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
 
 const DEFAULT_MAX_TOKENS = 4096;
 const DEFAULT_TEMPERATURE = 0.2;
+const PROVIDER_TIMEOUT_MS = 90_000;
 
 /** USD per million tokens (input, output) */
 const PRICING: Readonly<Record<string, Readonly<{ in: number; out: number }>>> = {
@@ -191,7 +192,11 @@ export class LlmGateway {
     const breaker = this.getBreaker(`${provider}:${model}`);
 
     try {
-      return await breaker.execute(() => this.dispatch(validated.data));
+      return await breaker.execute(() => withProviderTimeout(
+        this.dispatch(validated.data),
+        `${provider}:${model}`,
+        PROVIDER_TIMEOUT_MS,
+      ));
     } catch (err) {
       if (err instanceof CircuitOpenError) {
         throw new LlmGatewayError('CIRCUIT_OPEN', err.message, { cause: err });
@@ -238,7 +243,7 @@ export class LlmGateway {
       messages: nonSystemMsgs.map((m) => ({ role: m.role, content: m.content })),
     };
 
-    const res = await fetch(ANTHROPIC_API_URL, {
+    const res = await fetchWithTimeout(ANTHROPIC_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -246,7 +251,7 @@ export class LlmGateway {
         'anthropic-version': ANTHROPIC_VERSION,
       },
       body: JSON.stringify(body),
-    });
+    }, PROVIDER_TIMEOUT_MS, `anthropic:${req.model}`);
 
     if (!res.ok) {
       const errText = await res.text().catch(() => 'unknown');
@@ -326,6 +331,12 @@ export class LlmGateway {
     if (!apiKey) {
       throw new LlmGatewayError('PROVIDER_ERROR', 'OPENAI_API_KEY not configured');
     }
+    if (this.env.ENABLE_OPENAI_API !== 'true') {
+      throw new LlmGatewayError(
+        'PROVIDER_DISABLED',
+        'OpenAI API disabled by policy; set ENABLE_OPENAI_API=true to opt in',
+      );
+    }
 
     const maxTokens = req.maxTokens ?? DEFAULT_MAX_TOKENS;
     const isNewModel = /^(gpt-[5-9]|o[1-9])/.test(req.model);
@@ -336,14 +347,14 @@ export class LlmGateway {
       temperature: req.temperature ?? DEFAULT_TEMPERATURE,
     };
 
-    const res = await fetch(OPENAI_API_URL, {
+    const res = await fetchWithTimeout(OPENAI_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(body),
-    });
+    }, PROVIDER_TIMEOUT_MS, `openai:${req.model}`);
 
     if (!res.ok) {
       const errText = await res.text().catch(() => 'unknown');
@@ -383,6 +394,59 @@ export class LlmGateway {
     });
     this.breakers.set(key, breaker);
     return breaker;
+  }
+}
+
+async function withProviderTimeout<T>(
+  promise: Promise<T>,
+  name: string,
+  timeoutMs: number,
+): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new LlmGatewayError(
+        'PROVIDER_UNAVAILABLE',
+        `${name} request timed out after ${timeoutMs}ms`,
+      ));
+    }, timeoutMs);
+
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs: number,
+  providerName: string,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new LlmGatewayError(
+        'PROVIDER_UNAVAILABLE',
+        `${providerName} request timed out after ${timeoutMs}ms`,
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

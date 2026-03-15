@@ -1,0 +1,275 @@
+// Cockpit PWA HTML (inline for Workers) - Gemini UI/UX Design v3.0
+// Phase 3: Swipe gestures, ARIA, Dynamic Type, Coach marks
+export const COCKPIT_HTML = `<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#121212">
+  <meta name="description" content="FUGUE Strategic Advisor - AI-powered development insights">
+  <title>FUGUE Cockpit</title>
+  <style>
+    :root{--bg:#121212;--surface:#1e1e1e;--border:#333;--primary:#5e6ad2;--text-high:#f3f4f6;--text-low:#9ca3af;--confidence-high:#10b981;--confidence-mid:#f59e0b;--danger:#ef4444;--accept:#22c55e;--safe-top:env(safe-area-inset-top);--safe-bottom:env(safe-area-inset-bottom);--base-font:clamp(0.875rem,2.5vw,1rem)}
+    *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+    html{font-size:var(--base-font);-webkit-text-size-adjust:100%}
+    @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text-high);min-height:100vh;min-height:100dvh;padding:calc(1rem + var(--safe-top)) 0.75rem calc(5rem + var(--safe-bottom)) 0.75rem}
+    .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;padding:4px 0}
+    h1{font-size:1.25rem;font-weight:600;letter-spacing:-0.02em}
+    .status{display:flex;align-items:center;gap:6px;font-size:0.75rem;color:var(--text-low)}
+    .status-dot{width:8px;height:8px;border-radius:50%;background:var(--danger)}
+    .status-dot.connected{background:var(--confidence-high);box-shadow:0 0 6px var(--confidence-high)}
+    .section{margin-bottom:20px}
+    .section-title{display:flex;justify-content:space-between;align-items:center;font-size:0.7rem;color:var(--text-low);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;padding:0 4px}
+    .section-badge{background:var(--primary);color:#fff;padding:1px 6px;border-radius:8px;font-size:0.65rem}
+    .kbd{font-size:0.6rem;color:var(--text-low);border:1px solid var(--border);padding:1px 4px;border-radius:3px;font-family:monospace}
+    .insight-list{background:var(--surface);border-radius:10px;overflow:hidden;border:1px solid var(--border)}
+    .insight-item{position:relative;display:flex;align-items:center;gap:0.625rem;padding:0.875rem 0.75rem;border-bottom:1px solid var(--border);cursor:pointer;transition:transform 0.15s,background 0.15s;min-height:3.25rem;outline:none;touch-action:pan-y;overflow:hidden}
+    .insight-item:last-child{border-bottom:none}
+    .insight-item:hover,.insight-item:focus-visible{background:rgba(255,255,255,0.03)}
+    .insight-item:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
+    .insight-item.selected{background:rgba(94,106,210,0.15);border-left:2px solid var(--primary)}
+    .insight-item.swiping-right{background:linear-gradient(90deg,rgba(34,197,94,0.2) 0%,transparent 50%)}
+    .insight-item.swiping-left{background:linear-gradient(270deg,rgba(239,68,68,0.2) 0%,transparent 50%)}
+    .swipe-hint{position:absolute;top:50%;transform:translateY(-50%);font-size:1.25rem;opacity:0;transition:opacity 0.15s}
+    .swipe-hint.left{right:0.75rem}
+    .swipe-hint.right{left:0.75rem}
+    .insight-item.swiping-right .swipe-hint.right,.insight-item.swiping-left .swipe-hint.left{opacity:1}
+    .insight-icon{flex-shrink:0;width:20px;height:20px;display:flex;align-items:center;justify-content:center}
+    .insight-icon.strategic{color:#8b5cf6}
+    .insight-icon.tactical{color:#3b82f6}
+    .insight-icon.reflective{color:#22c55e}
+    .insight-icon.questioning{color:#f59e0b}
+    .insight-content{flex:1;min-width:0}
+    .insight-header{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+    .insight-title{font-size:0.875rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .insight-time{font-size:0.7rem;font-family:monospace;color:var(--text-low);flex-shrink:0}
+    .insight-desc{font-size:0.75rem;color:var(--text-low);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+    .insight-confidence{flex-shrink:0;display:flex;align-items:center;gap:4px}
+    .confidence-value{font-size:0.75rem;font-family:monospace}
+    .confidence-value.high{color:var(--confidence-high)}
+    .confidence-value.mid{color:var(--confidence-mid)}
+    .confidence-value.low{color:var(--danger)}
+    .confidence-bar{width:3px;height:14px;background:var(--border);border-radius:2px;overflow:hidden;display:flex;flex-direction:column-reverse}
+    .confidence-bar-fill{width:100%;background:var(--confidence-high);transition:height 0.3s}
+    .confidence-bar-fill.mid{background:var(--confidence-mid)}
+    .confidence-bar-fill.low{background:var(--danger)}
+    .no-data{color:var(--text-low);text-align:center;padding:20px;font-size:0.8rem}
+    .repo-list,.task-list,.daemon-list{background:var(--surface);border-radius:10px;overflow:hidden;border:1px solid var(--border)}
+    .repo-item,.task-item,.daemon-item{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid var(--border)}
+    .repo-item:last-child,.task-item:last-child,.daemon-item:last-child{border-bottom:none}
+    .repo-name,.task-name,.daemon-name{font-size:0.875rem;font-weight:500}
+    .repo-branch,.task-meta,.daemon-time{font-size:0.7rem;color:var(--text-low);margin-top:1px}
+    .badge{padding:3px 8px;border-radius:4px;font-size:0.65rem;font-weight:600}
+    .badge.clean{background:rgba(34,197,94,0.15);color:#22c55e}
+    .badge.dirty{background:rgba(239,68,68,0.15);color:#ef4444}
+    .badge.ahead{background:rgba(59,130,246,0.15);color:#3b82f6}
+    .badge.backlog{background:rgba(156,163,175,0.15);color:#9ca3af}
+    .badge.pending{background:rgba(245,158,11,0.15);color:#f59e0b}
+    .badge.in_progress{background:rgba(59,130,246,0.15);color:#3b82f6}
+    .badge.review{background:rgba(139,92,246,0.15);color:#8b5cf6}
+    .badge.completed{background:rgba(34,197,94,0.15);color:#22c55e}
+    .badge.low{background:rgba(156,163,175,0.15);color:#9ca3af}
+    .badge.medium{background:rgba(59,130,246,0.15);color:#3b82f6}
+    .badge.high{background:rgba(245,158,11,0.15);color:#f59e0b}
+    .badge.urgent{background:rgba(239,68,68,0.15);color:#ef4444}
+    .daemon-dot{width:6px;height:6px;border-radius:50%;margin-right:8px}
+    .kanban{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:8px}
+    @media(max-width:768px){.kanban{grid-template-columns:repeat(4,minmax(140px,1fr));min-width:600px}}
+    .kanban-col{background:var(--surface);border-radius:8px;border:1px solid var(--border);min-height:120px}
+    .kanban-header{padding:8px 10px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+    .kanban-title{font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.03em}
+    .kanban-count{background:var(--border);color:var(--text-low);padding:1px 6px;border-radius:8px;font-size:0.6rem}
+    .kanban-cards{padding:6px;min-height:60px}
+    .kanban-card{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px;cursor:pointer;transition:transform 0.1s,box-shadow 0.1s}
+    .kanban-card:hover{transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+    .kanban-card:last-child{margin-bottom:0}
+    .kanban-card-title{font-size:0.75rem;font-weight:500;margin-bottom:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .kanban-card-meta{display:flex;justify-content:space-between;align-items:center;font-size:0.6rem;color:var(--text-low)}
+    .kanban-card-executor{display:flex;align-items:center;gap:3px}
+    .kanban-empty{color:var(--text-low);font-size:0.7rem;text-align:center;padding:16px 8px}
+    .view-toggle{display:flex;gap:4px}
+    .view-btn{background:none;border:1px solid var(--border);color:var(--text-low);padding:2px 8px;border-radius:4px;font-size:0.65rem;cursor:pointer}
+    .view-btn.active{background:var(--primary);border-color:var(--primary);color:#fff}
+    .daemon-dot.online{background:#22c55e}
+    .daemon-dot.offline{background:#ef4444}
+    .bottom-sheet{position:fixed;inset:0;z-index:50;display:flex;align-items:flex-end;justify-content:center;pointer-events:none;opacity:0;transition:opacity 0.2s}
+    .bottom-sheet.open{opacity:1;pointer-events:auto}
+    .sheet-backdrop{position:absolute;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px)}
+    .sheet-content{position:relative;width:100%;max-width:420px;background:var(--bg);border:1px solid var(--border);border-bottom:none;border-radius:16px 16px 0 0;max-height:85vh;display:flex;flex-direction:column;transform:translateY(100%);transition:transform 0.25s ease-out}
+    .bottom-sheet.open .sheet-content{transform:translateY(0)}
+    .sheet-handle{width:100%;display:flex;justify-content:center;padding:10px 0 6px}
+    .sheet-handle-bar{width:36px;height:4px;background:var(--border);border-radius:2px}
+    .sheet-body{flex:1;overflow-y:auto;padding:0 16px 16px}
+    .sheet-tag{display:inline-block;padding:3px 8px;border-radius:4px;font-size:0.7rem;font-weight:500;background:rgba(94,106,210,0.2);color:var(--primary);margin-bottom:10px}
+    .sheet-title{font-size:1.25rem;font-weight:700;margin-bottom:12px;line-height:1.3}
+    .sheet-desc{font-size:0.875rem;color:var(--text-low);line-height:1.5;margin-bottom:16px}
+    .sheet-code{background:#0a0a0a;border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.75rem;font-family:'SF Mono',Menlo,monospace;overflow-x:auto;color:var(--text-low);white-space:pre;margin-bottom:16px}
+    .sheet-actions{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--border);padding:12px 16px calc(12px + var(--safe-bottom));display:flex;gap:8px}
+    .sheet-btn{flex:1;padding:12px;border-radius:8px;font-size:0.875rem;font-weight:600;border:none;cursor:pointer;transition:transform 0.1s,opacity 0.1s}
+    .sheet-btn:active{transform:scale(0.97)}
+    .sheet-btn.secondary{background:var(--surface);color:var(--text-low);border:1px solid var(--border)}
+    .sheet-btn.danger{background:rgba(239,68,68,0.15);color:var(--danger);border:1px solid rgba(239,68,68,0.3)}
+    .sheet-btn.primary{background:var(--primary);color:#fff}
+    .bottom-bar{position:fixed;bottom:0;left:0;right:0;background:var(--bg);border-top:1px solid var(--border);padding:10px 12px calc(10px + var(--safe-bottom));display:flex;gap:8px}
+    .bottom-bar-btn{flex:1;padding:10px;border-radius:8px;font-size:0.8rem;font-weight:500;border:none;cursor:pointer;background:var(--surface);color:var(--text-low);transition:background 0.15s}
+    .bottom-bar-btn:active{background:var(--border)}
+    .bottom-bar-btn.active{background:var(--primary);color:#fff}
+    .updated{font-size:0.65rem;color:var(--text-low);text-align:center;margin-top:8px}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>FUGUE</h1>
+    <div style="display:flex;align-items:center;gap:8px">
+      <button id="pushNotifBtn" onclick="requestPushPermission()" style="display:none;background:var(--primary);color:#fff;border:none;padding:4px 8px;border-radius:4px;font-size:0.65rem;cursor:pointer" title="Enable push notifications">🔔 Enable Push</button>
+      <div class="status"><div id="statusDot" class="status-dot"></div><span id="statusText">Offline</span></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title"><span>💡 Insights</span><div style="display:flex;gap:6px;align-items:center"><span id="insightBadge" class="section-badge" style="display:none">0</span><span class="kbd">J/K</span></div></div>
+    <div id="insights" class="insight-list"><div class="no-data">Loading...</div></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title"><span>Repositories</span></div>
+    <div id="repos" class="repo-list"><div class="no-data">Loading...</div></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">
+      <span>Tasks</span>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span id="taskBadge" class="section-badge" style="display:none">0</span>
+        <div class="view-toggle">
+          <button class="view-btn" id="listViewBtn" onclick="setTaskView('list')">List</button>
+          <button class="view-btn active" id="kanbanViewBtn" onclick="setTaskView('kanban')">Board</button>
+        </div>
+        <button class="view-btn" onclick="openNewTaskSheet()" style="background:var(--primary);border-color:var(--primary);color:#fff">+ New</button>
+      </div>
+    </div>
+    <div id="tasksListView" class="task-list" style="display:none"><div class="no-data">No tasks</div></div>
+    <div id="tasksKanbanView" style="overflow-x:auto">
+      <div class="kanban">
+        <div class="kanban-col"><div class="kanban-header"><span class="kanban-title">📋 Backlog</span><span id="backlogCount" class="kanban-count">0</span></div><div id="backlogCards" class="kanban-cards"><div class="kanban-empty">Drop tasks here</div></div></div>
+        <div class="kanban-col"><div class="kanban-header"><span class="kanban-title">🔄 In Progress</span><span id="inProgressCount" class="kanban-count">0</span></div><div id="inProgressCards" class="kanban-cards"><div class="kanban-empty">No tasks</div></div></div>
+        <div class="kanban-col"><div class="kanban-header"><span class="kanban-title">👀 Review</span><span id="reviewCount" class="kanban-count">0</span></div><div id="reviewCards" class="kanban-cards"><div class="kanban-empty">No tasks</div></div></div>
+        <div class="kanban-col"><div class="kanban-header"><span class="kanban-title">✅ Done</span><span id="doneCount" class="kanban-count">0</span></div><div id="doneCards" class="kanban-cards"><div class="kanban-empty">No tasks</div></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title"><span>Daemons</span></div>
+    <div id="daemons" class="daemon-list"><div class="no-data">Loading...</div></div>
+  </div>
+
+  <div id="updated" class="updated"></div>
+
+  <div id="sheet" class="bottom-sheet">
+    <div class="sheet-backdrop" onclick="closeSheet()"></div>
+    <div class="sheet-content" role="dialog" aria-modal="true">
+      <div class="sheet-handle"><div class="sheet-handle-bar"></div></div>
+      <div class="sheet-body" id="sheetBody"></div>
+      <div class="sheet-actions" id="sheetActions"></div>
+    </div>
+  </div>
+
+  <div class="bottom-bar">
+    <button class="bottom-bar-btn" onclick="refresh()">↻ Refresh</button>
+    <button class="bottom-bar-btn" onclick="toggleDarkMode()">◐ Mode</button>
+  </div>
+
+  <script>
+    let ws=null,token=new URLSearchParams(location.search).get('token'),insights=[],selectedIdx=-1;
+    // XSS prevention: escape HTML entities
+    function escapeHtml(str){if(!str)return '';return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+    function connectWS(){const u=\`\${location.protocol==='https:'?'wss:':'ws:'}/\${location.host}/api/ws\`+(token?\`?token=\${token}\`:'');ws=new WebSocket(u);ws.onopen=()=>{document.getElementById('statusDot').classList.add('connected');document.getElementById('statusText').textContent='Online'};ws.onclose=()=>{document.getElementById('statusDot').classList.remove('connected');document.getElementById('statusText').textContent='Offline';setTimeout(connectWS,5000)};ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==='git-status')renderRepos(m.repos)}}
+
+    function renderInsights(data){insights=data;const c=document.getElementById('insights');const b=document.getElementById('insightBadge');b.textContent=data.length;b.style.display=data.length>0?'inline':'none';if(!data.length){c.innerHTML='<div class="no-data">No insights</div>';return}
+    c.innerHTML=data.map((i,idx)=>{const conf=i.confidence||75;const confClass=conf>=80?'high':conf>=50?'mid':'low';const typeIcon={strategic:'⚡',tactical:'🎯',reflective:'💭',questioning:'❓'}[i.type]||'💡';const ago=i.createdAt?formatAgo(i.createdAt):'';
+    return \`<article class="insight-item\${idx===selectedIdx?' selected':''}" tabindex="0" data-idx="\${idx}" onclick="openInsight(\${idx})" onkeydown="handleInsightKey(event,\${idx})" aria-label="\${escapeHtml(i.title)}, confidence \${conf}%">
+      <span class="swipe-hint right" aria-hidden="true">✓</span>
+      <div class="insight-icon \${escapeHtml(i.type)}">\${typeIcon}</div>
+      <div class="insight-content"><div class="insight-header"><span class="insight-title">\${escapeHtml(i.title)}</span><span class="insight-time">\${ago}</span></div><p class="insight-desc">\${escapeHtml(i.description)||''}</p></div>
+      <div class="insight-confidence" title="Confidence: \${conf}%"><span class="confidence-value \${confClass}">\${conf}%</span><div class="confidence-bar"><div class="confidence-bar-fill \${confClass}" style="height:\${conf}%"></div></div></div>
+      <span class="swipe-hint left" aria-hidden="true">✗</span>
+    </article>\`}).join('');initSwipeGestures()}
+
+    function handleInsightKey(e,idx){if(e.key==='Enter'||e.key===' '){e.preventDefault();openInsight(idx)}}
+    document.addEventListener('keydown',e=>{if(document.getElementById('sheet').classList.contains('open')){if(e.key==='Escape')closeSheet();if(e.key==='a')handleAction('accepted');if(e.key==='x')handleAction('dismissed');if(e.key==='s')handleAction('snoozed');return}
+    if(e.key==='j'||e.key==='ArrowDown'){e.preventDefault();selectedIdx=Math.min(selectedIdx+1,insights.length-1);renderInsights(insights);focusInsight()}
+    if(e.key==='k'||e.key==='ArrowUp'){e.preventDefault();selectedIdx=Math.max(selectedIdx-1,0);renderInsights(insights);focusInsight()}
+    if((e.key==='Enter'||e.key===' ')&&selectedIdx>=0){e.preventDefault();openInsight(selectedIdx)}
+    if(e.key==='r'){e.preventDefault();refresh()}})
+    function focusInsight(){const item=document.querySelector(\`.insight-item[data-idx="\${selectedIdx}"]\`);if(item)item.focus()}
+
+    function openInsight(idx){const i=insights[idx];if(!i)return;selectedIdx=idx;renderInsights(insights);const typeLabel={strategic:'Strategic',tactical:'Tactical',reflective:'Reflective',questioning:'Questioning'}[i.type]||escapeHtml(i.type);
+    document.getElementById('sheetBody').innerHTML=\`<span class="sheet-tag">\${escapeHtml(typeLabel)}</span><h2 class="sheet-title">\${escapeHtml(i.title)}</h2><p class="sheet-desc">\${escapeHtml(i.description)||''}</p>\${i.suggestedAction?\`<div class="sheet-code">\${escapeHtml(i.suggestedAction)}</div>\`:''}\`;
+    document.getElementById('sheetActions').innerHTML=\`<button class="sheet-btn secondary" onclick="handleAction('snoozed')">Snooze (S)</button><button class="sheet-btn danger" onclick="handleAction('dismissed')">Dismiss (X)</button><button class="sheet-btn primary" onclick="handleAction('accepted')">Accept (A)</button>\`;
+    document.getElementById('sheet').classList.add('open')}
+    function closeSheet(){document.getElementById('sheet').classList.remove('open')}
+    async function handleAction(action){const i=insights[selectedIdx];if(!i)return;closeSheet();try{await fetch('/api/advisor/insights/'+i.id+'/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});fetchData()}catch(e){console.error(e)}}
+
+    function renderRepos(repos){const c=document.getElementById('repos');if(!repos||!repos.length){c.innerHTML='<div class="no-data">No repositories</div>';return}c.innerHTML=repos.map(r=>{const cnt=r.uncommitted_count||r.uncommittedCount||0;const ahead=r.ahead_count||r.aheadCount||0;let status='clean',badge='Clean';if(cnt>0){status='dirty';badge=cnt+' changes'}else if(ahead>0){status='ahead';badge=ahead+' ahead'}return \`<div class="repo-item"><div><div class="repo-name">\${escapeHtml(r.name)}</div><div class="repo-branch">\${escapeHtml(r.branch||'main')}</div></div><span class="badge \${status}">\${badge}</span></div>\`}).join('')}
+
+    let allTasks=[],currentTaskView='kanban';
+    function setTaskView(view){currentTaskView=view;document.getElementById('listViewBtn').classList.toggle('active',view==='list');document.getElementById('kanbanViewBtn').classList.toggle('active',view==='kanban');document.getElementById('tasksListView').style.display=view==='list'?'block':'none';document.getElementById('tasksKanbanView').style.display=view==='kanban'?'block':'none';renderTasks(allTasks)}
+    function renderTasks(tasks){allTasks=tasks||[];const b=document.getElementById('taskBadge');const active=allTasks.filter(t=>t.status!=='completed');b.textContent=active.length;b.style.display=active.length>0?'inline':'none';if(currentTaskView==='list'){renderTasksList(allTasks)}else{renderKanban(allTasks)}}
+    function renderTasksList(tasks){const c=document.getElementById('tasksListView');if(!tasks||!tasks.length){c.innerHTML='<div class="no-data">No tasks</div>';return}c.innerHTML=tasks.slice(0,10).map(t=>{const statusLabel={backlog:'Backlog',pending:'Pending',in_progress:'Running',review:'Review',completed:'Done'}[t.status]||escapeHtml(t.status);return \`<div class="task-item" onclick="openTaskDetail('\${escapeHtml(t.id)}')" style="cursor:pointer"><div><div class="task-name">\${escapeHtml(t.title||'Task')}</div><div class="task-meta">\${escapeHtml(t.executor||'')} · \${escapeHtml(t.id?.slice(0,8)||'')}</div></div><span class="badge \${escapeHtml(t.status)}">\${statusLabel}</span></div>\`}).join('')}
+    function renderKanban(tasks){const cols={backlog:[],in_progress:[],review:[],completed:[]};(tasks||[]).forEach(t=>{const s=t.status==='pending'?'backlog':t.status;if(cols[s])cols[s].push(t)});
+    ['backlog','in_progress','review','completed'].forEach((col,i)=>{const cards=cols[col]||[];const container=document.getElementById(['backlogCards','inProgressCards','reviewCards','doneCards'][i]);const countEl=document.getElementById(['backlogCount','inProgressCount','reviewCount','doneCount'][i]);countEl.textContent=cards.length;if(!cards.length){container.innerHTML='<div class="kanban-empty">No tasks</div>';return}
+    container.innerHTML=cards.map(t=>{const execIcon={claude:'🤖','claude-code':'🤖',codex:'⚡',glm:'🧠',subagent:'👥',gemini:'💎'}[t.executor]||'📝';const prioClass=t.priority||'medium';return \`<div class="kanban-card" onclick="openTaskDetail('\${escapeHtml(t.id)}')" draggable="true" data-task-id="\${escapeHtml(t.id)}"><div class="kanban-card-title">\${escapeHtml(t.title)}</div><div class="kanban-card-meta"><span class="kanban-card-executor">\${execIcon} \${escapeHtml(t.executor||'')}</span><span class="badge \${prioClass}" style="padding:1px 4px;font-size:0.55rem">\${escapeHtml(t.priority||'med')}</span></div></div>\`}).join('')})}
+    async function openTaskDetail(taskId){const opts={credentials:'include',headers:token?{Authorization:'Bearer '+token}:{}};try{const r=await fetch('/api/cockpit/tasks/'+taskId,opts);if(!r.ok)return;const d=await r.json();const t=d.task;const statusOpts=['backlog','in_progress','review','completed'].map(s=>\`<option value="\${s}" \${t.status===s?'selected':''}>\${{backlog:'📋 Backlog',in_progress:'🔄 In Progress',review:'👀 Review',completed:'✅ Done'}[s]}</option>\`).join('');const prioOpts=['low','medium','high','urgent'].map(p=>\`<option value="\${p}" \${t.priority===p?'selected':''}>\${{low:'Low',medium:'Medium',high:'High',urgent:'Urgent'}[p]}</option>\`).join('');
+    document.getElementById('sheetBody').innerHTML=\`<span class="sheet-tag">\${escapeHtml(t.executor||'Unassigned')}</span><h2 class="sheet-title">\${escapeHtml(t.title)}</h2><p class="sheet-desc">\${escapeHtml(t.description)||'No description'}</p><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px"><label style="font-size:0.7rem;color:var(--text-low)">Status<select id="taskStatus" style="width:100%;margin-top:4px;padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-high);font-size:0.8rem">\${statusOpts}</select></label><label style="font-size:0.7rem;color:var(--text-low)">Priority<select id="taskPriority" style="width:100%;margin-top:4px;padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-high);font-size:0.8rem">\${prioOpts}</select></label></div>\`;
+    document.getElementById('sheetActions').innerHTML=\`<button class="sheet-btn danger" onclick="deleteTask('\${escapeHtml(t.id)}')">Delete</button><button class="sheet-btn primary" onclick="updateTask('\${escapeHtml(t.id)}')">Save</button>\`;
+    document.getElementById('sheet').classList.add('open')}catch(e){console.error(e)}}
+    async function updateTask(taskId){const status=document.getElementById('taskStatus').value;const priority=document.getElementById('taskPriority').value;const opts={method:'PUT',credentials:'include',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify({status,priority})};try{await fetch('/api/cockpit/tasks/'+taskId,opts);closeSheet();fetchData()}catch(e){console.error(e)}}
+    async function deleteTask(taskId){if(!confirm('Delete this task?'))return;const opts={method:'DELETE',credentials:'include',headers:token?{Authorization:'Bearer '+token}:{}};try{await fetch('/api/cockpit/tasks/'+taskId,opts);closeSheet();fetchData()}catch(e){console.error(e)}}
+    function openNewTaskSheet(){document.getElementById('sheetBody').innerHTML=\`<h2 class="sheet-title">New Task</h2><div style="display:flex;flex-direction:column;gap:12px"><label style="font-size:0.7rem;color:var(--text-low)">Title<input id="newTaskTitle" type="text" placeholder="Task title..." style="width:100%;margin-top:4px;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-high);font-size:0.875rem"></label><label style="font-size:0.7rem;color:var(--text-low)">Description<textarea id="newTaskDesc" placeholder="Optional description..." style="width:100%;margin-top:4px;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-high);font-size:0.8rem;min-height:60px;resize:vertical"></textarea></label><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><label style="font-size:0.7rem;color:var(--text-low)">Executor<select id="newTaskExecutor" style="width:100%;margin-top:4px;padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-high);font-size:0.8rem"><option value="">Unassigned</option><option value="claude-code">🤖 Claude Code</option><option value="codex">⚡ Codex</option><option value="glm">🧠 GLM</option><option value="subagent">👥 Subagent</option><option value="gemini">💎 Gemini</option></select></label><label style="font-size:0.7rem;color:var(--text-low)">Priority<select id="newTaskPriority" style="width:100%;margin-top:4px;padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-high);font-size:0.8rem"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="urgent">Urgent</option></select></label></div></div>\`;
+    document.getElementById('sheetActions').innerHTML=\`<button class="sheet-btn secondary" onclick="closeSheet()">Cancel</button><button class="sheet-btn primary" onclick="createTask()">Create</button>\`;document.getElementById('sheet').classList.add('open');setTimeout(()=>document.getElementById('newTaskTitle').focus(),100)}
+    async function createTask(){const title=document.getElementById('newTaskTitle').value.trim();if(!title){alert('Title is required');return}const body={title,description:document.getElementById('newTaskDesc').value.trim()||undefined,executor:document.getElementById('newTaskExecutor').value||undefined,priority:document.getElementById('newTaskPriority').value,status:'backlog'};const opts={method:'POST',credentials:'include',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify(body)};try{await fetch('/api/cockpit/tasks',opts);closeSheet();fetchData()}catch(e){console.error(e)}}
+
+    function renderDaemons(daemons){const c=document.getElementById('daemons');if(!daemons||!daemons.length){c.innerHTML='<div class="no-data">No daemons</div>';return}c.innerHTML=daemons.map(d=>{const online=d.status==='healthy'||d.is_healthy;const ago=d.last_heartbeat?formatAgo(d.last_heartbeat):'Unknown';return \`<div class="daemon-item"><div style="display:flex;align-items:center"><div class="daemon-dot \${online?'online':'offline'}"></div><div><div class="daemon-name">\${escapeHtml(d.daemon_id||d.daemonId||'Local Agent')}</div><div class="daemon-time">Last: \${ago}</div></div></div></div>\`}).join('')}
+
+    function formatAgo(ts){const s=Math.floor((Date.now()/1000)-(typeof ts==='number'?ts:new Date(ts).getTime()/1000));if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';return Math.floor(s/3600)+'h'}
+    function toggleDarkMode(){document.body.style.filter=document.body.style.filter?'':'invert(0.9) hue-rotate(180deg)'}
+
+    // Phase 3: Swipe gesture support (vanilla JS, no Hammer.js)
+    const SWIPE_THRESHOLD=80,SWIPE_VELOCITY=0.3;
+    function initSwipeGestures(){document.querySelectorAll('.insight-item').forEach((el,idx)=>{let startX=0,startY=0,currentX=0,isDragging=false,startTime=0;
+    el.addEventListener('touchstart',e=>{if(e.touches.length!==1)return;startX=e.touches[0].clientX;startY=e.touches[0].clientY;currentX=startX;isDragging=true;startTime=Date.now();el.style.transition='none'},{passive:true});
+    el.addEventListener('touchmove',e=>{if(!isDragging)return;const dx=e.touches[0].clientX-startX,dy=e.touches[0].clientY-startY;if(Math.abs(dy)>Math.abs(dx)*1.5){isDragging=false;resetSwipe(el);return}currentX=e.touches[0].clientX;const clampedDx=Math.max(-100,Math.min(100,dx));el.style.transform=\`translateX(\${clampedDx}px)\`;el.classList.toggle('swiping-right',dx>30);el.classList.toggle('swiping-left',dx<-30)},{passive:true});
+    el.addEventListener('touchend',e=>{if(!isDragging){resetSwipe(el);return}const dx=currentX-startX,dt=(Date.now()-startTime)/1000,v=Math.abs(dx)/dt/1000;if(Math.abs(dx)>SWIPE_THRESHOLD||v>SWIPE_VELOCITY){if(dx>0){selectedIdx=idx;handleAction('accepted')}else{selectedIdx=idx;handleAction('dismissed')}}resetSwipe(el);isDragging=false},{passive:true});
+    el.addEventListener('touchcancel',()=>{resetSwipe(el);isDragging=false},{passive:true})})}
+    function resetSwipe(el){el.style.transition='transform 0.2s';el.style.transform='';el.classList.remove('swiping-right','swiping-left')}
+
+    // Phase 3: Coach marks for first-time users
+    function showCoachMark(){if(localStorage.getItem('fugue_coach_seen'))return;if(!insights.length)return;const cm=document.createElement('div');cm.id='coachMark';cm.innerHTML=\`<div style="position:fixed;inset:0;z-index:100;background:rgba(0,0,0,0.7);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;text-align:center">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:300px">
+        <div style="font-size:2rem;margin-bottom:12px">👆</div>
+        <h3 style="font-size:1rem;margin-bottom:8px">Swipe Gestures</h3>
+        <p style="font-size:0.875rem;color:var(--text-low);margin-bottom:16px;line-height:1.5">Swipe right to <span style="color:var(--accept)">Accept</span>, left to <span style="color:var(--danger)">Dismiss</span>. Or use keyboard: <span class="kbd">J</span>/<span class="kbd">K</span> to navigate, <span class="kbd">Enter</span> for details.</p>
+        <button onclick="dismissCoachMark()" style="background:var(--primary);color:#fff;border:none;padding:10px 20px;border-radius:6px;font-size:0.875rem;cursor:pointer">Got it</button>
+      </div></div>\`;document.body.appendChild(cm)}
+    function dismissCoachMark(){localStorage.setItem('fugue_coach_seen','1');const cm=document.getElementById('coachMark');if(cm)cm.remove()}
+
+    async function fetchData(){try{const opts={credentials:'include',headers:token?{Authorization:'Bearer '+token}:{}};const[rr,tr,dr,ir]=await Promise.all([fetch('/api/cockpit/repos',opts),fetch('/api/cockpit/tasks',opts),fetch('/api/daemon/health',opts),fetch('/api/advisor/insights?limit=5',opts)]);if(rr.ok){const d=await rr.json();renderRepos(d.repos||d.data||d)}if(tr.ok){const d=await tr.json();renderTasks(d.tasks||d.data||[])}if(dr.ok){const d=await dr.json();renderDaemons(d.daemons||d.data||[])}if(ir.ok){const d=await ir.json();renderInsights(d.data||[]);showCoachMark()}document.getElementById('updated').textContent='Updated: '+new Date().toLocaleTimeString('ja-JP')}catch(e){console.error(e)}}
+    function refresh(){fetchData()}
+
+    // PWA Push Notifications initialization
+    async function initPushNotifications(){if(!('serviceWorker' in navigator)||!('PushManager' in window)){console.log('[Push] Not supported');return}try{const reg=await navigator.serviceWorker.register('/sw.js',{scope:'/'});console.log('[Push] SW registered:',reg.scope);await navigator.serviceWorker.ready;const permission=Notification.permission;const btn=document.getElementById('pushNotifBtn');if(permission==='granted'){await subscribeToPush(reg)}else if(permission==='default'){if(btn)btn.style.display='inline-block'}else{console.log('[Push] Permission denied')}}catch(e){console.error('[Push] Init failed:',e)}}
+
+    async function subscribeToPush(reg){try{let sub=await reg.pushManager.getSubscription();if(!sub){const keyRes=await fetch('/api/cockpit/vapid-public-key');if(!keyRes.ok){console.error('[Push] Failed to get VAPID key');return}const{publicKey}=await keyRes.json();const appServerKey=urlBase64ToUint8Array(publicKey);sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:appServerKey});console.log('[Push] New subscription created')}const subData={endpoint:sub.endpoint,keys:{p256dh:sub.toJSON().keys.p256dh,auth:sub.toJSON().keys.auth}};const saveRes=await fetch('/api/cockpit/subscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(subData)});if(saveRes.ok){console.log('[Push] Subscription saved')}else{console.error('[Push] Failed to save subscription')}}catch(e){console.error('[Push] Subscribe failed:',e)}}
+
+    function urlBase64ToUint8Array(base64){const padding='='.repeat((4-(base64.length%4))%4);const b64=(base64+padding).replace(/-/g,'+').replace(/_/g,'/');const raw=window.atob(b64);const arr=new Uint8Array(raw.length);for(let i=0;i<raw.length;++i){arr[i]=raw.charCodeAt(i)}return arr}
+
+    async function requestPushPermission(){if(!('Notification' in window)){alert('Notifications not supported');return}const permission=await Notification.requestPermission();const btn=document.getElementById('pushNotifBtn');if(permission==='granted'){const reg=await navigator.serviceWorker.ready;await subscribeToPush(reg);if(btn)btn.style.display='none';alert('Push notifications enabled!')}else{alert('Permission denied')}}
+
+    connectWS();fetchData();setInterval(fetchData,30000);initPushNotifications();
+  </script>
+</body>
+</html>`;

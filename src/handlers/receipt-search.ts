@@ -12,6 +12,12 @@
 import type { Env } from '../types';
 import { z } from 'zod';
 import { safeLog } from '../utils/log-sanitizer';
+import {
+  resolveTenantContext,
+  tenantScopedQuery,
+  tenantScopedQueryFirst,
+  type ResolvedTenantContext,
+} from '../utils/tenant-isolation';
 
 // =============================================================================
 // Request Schema
@@ -39,7 +45,8 @@ type SearchQuery = z.infer<typeof SearchQuerySchema>;
 
 export async function handleReceiptSearch(
   request: Request,
-  env: Env
+  env: Env,
+  tenantContext?: ResolvedTenantContext
 ): Promise<Response> {
   const startTime = Date.now();
   if (!env.DB) {
@@ -73,9 +80,20 @@ export async function handleReceiptSearch(
     );
   }
 
+  const tenantResult = tenantContext
+    ? { ok: true as const, tenantContext }
+    : await resolveTenantContext(request, env, 'receipts');
+  if (!tenantResult.ok || !tenantResult.tenantContext) {
+    return new Response(JSON.stringify({ error: tenantResult.error || 'Unauthorized' }), {
+      status: tenantResult.status || 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  const resolvedTenant = tenantResult.tenantContext;
+
   // Build SQL query
-  const whereClauses: string[] = ['1=1'];
-  const params: any[] = [];
+  const whereClauses: string[] = ['tenant_id = ?'];
+  const params: any[] = [resolvedTenant.tenantId];
 
   if (query.date_from) {
     whereClauses.push('transaction_date >= ?');
@@ -142,7 +160,7 @@ export async function handleReceiptSearch(
 
   params.push(query.limit, query.offset);
 
-  const results = await env.DB.prepare(sql).bind(...params).all();
+  const results = await tenantScopedQuery(env, resolvedTenant.tenantId, sql, params);
 
   // Get total count
   const countSql = `
@@ -151,9 +169,12 @@ export async function handleReceiptSearch(
     WHERE ${whereClauses.join(' AND ')}
   `;
 
-  const countResult = await env.DB.prepare(countSql)
-    .bind(...params.slice(0, -2)) // Exclude LIMIT and OFFSET
-    .first<{ total: number }>();
+  const countResult = await tenantScopedQueryFirst<{ total: number }>(
+    env,
+    resolvedTenant.tenantId,
+    countSql,
+    params.slice(0, -2)
+  );
 
   const total = countResult?.total || 0;
 
@@ -164,6 +185,7 @@ export async function handleReceiptSearch(
     returned: results.results?.length || 0,
     elapsed,
     query,
+    tenantId: resolvedTenant.tenantId,
   });
 
   return new Response(
@@ -192,10 +214,11 @@ export async function handleReceiptSearch(
  */
 export async function handleReceiptExport(
   request: Request,
-  env: Env
+  env: Env,
+  tenantContext?: ResolvedTenantContext
 ): Promise<Response> {
   // Use same search logic
-  const searchResponse = await handleReceiptSearch(request, env);
+  const searchResponse = await handleReceiptSearch(request, env, tenantContext);
   const searchData = (await searchResponse.json()) as any;
 
   if (!searchData.results) {
@@ -253,7 +276,8 @@ export async function handleReceiptExport(
 export async function handleReceiptDetail(
   request: Request,
   env: Env,
-  receiptId: string
+  receiptId: string,
+  tenantContext?: ResolvedTenantContext
 ): Promise<Response> {
   if (!env.DB) {
     return new Response(JSON.stringify({ error: 'DB not configured' }), {
@@ -261,23 +285,37 @@ export async function handleReceiptDetail(
       headers: { 'Content-Type': 'application/json' },
     });
   }
+
+  const tenantResult = tenantContext
+    ? { ok: true as const, tenantContext }
+    : await resolveTenantContext(request, env, 'admin');
+  if (!tenantResult.ok || !tenantResult.tenantContext) {
+    return new Response(JSON.stringify({ error: tenantResult.error || 'Unauthorized' }), {
+      status: tenantResult.status || 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  const resolvedTenant = tenantResult.tenantContext;
+
   // Get receipt
-  const receipt = await env.DB.prepare(
-    'SELECT * FROM receipts WHERE id = ?'
-  )
-    .bind(receiptId)
-    .first();
+  const receipt = await tenantScopedQueryFirst<Record<string, unknown>>(
+    env,
+    resolvedTenant.tenantId,
+    'SELECT * FROM receipts WHERE tenant_id = ? AND id = ?',
+    [resolvedTenant.tenantId, receiptId]
+  );
 
   if (!receipt) {
     return new Response('Receipt not found', { status: 404 });
   }
 
   // Get audit trail
-  const auditTrail = await env.DB.prepare(
-    'SELECT * FROM audit_logs WHERE receipt_id = ? ORDER BY created_at ASC'
-  )
-    .bind(receiptId)
-    .all();
+  const auditTrail = await tenantScopedQuery(
+    env,
+    resolvedTenant.tenantId,
+    'SELECT * FROM audit_logs WHERE tenant_id = ? AND receipt_id = ? ORDER BY created_at ASC',
+    [resolvedTenant.tenantId, receiptId]
+  );
 
   // Receipt evidence (R2 object) availability.
   // Note: R2 ETag is not guaranteed to match our SHA-256 file_hash, so do not use etagMatches here.
@@ -323,7 +361,8 @@ export async function handleReceiptDetail(
 export async function handleReceiptFileDownload(
   request: Request,
   env: Env,
-  receiptId: string
+  receiptId: string,
+  tenantContext?: ResolvedTenantContext
 ): Promise<Response> {
   if (!env.DB) {
     return new Response(JSON.stringify({ error: 'DB not configured' }), {
@@ -332,11 +371,23 @@ export async function handleReceiptFileDownload(
     });
   }
 
-  const receipt = (await env.DB.prepare(
-    'SELECT id, r2_object_key FROM receipts WHERE id = ?'
-  )
-    .bind(receiptId)
-    .first()) as { id?: string; r2_object_key?: string } | null;
+  const tenantResult = tenantContext
+    ? { ok: true as const, tenantContext }
+    : await resolveTenantContext(request, env, 'admin');
+  if (!tenantResult.ok || !tenantResult.tenantContext) {
+    return new Response(JSON.stringify({ error: tenantResult.error || 'Unauthorized' }), {
+      status: tenantResult.status || 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  const resolvedTenant = tenantResult.tenantContext;
+
+  const receipt = (await tenantScopedQueryFirst<{ id?: string; r2_object_key?: string }>(
+    env,
+    resolvedTenant.tenantId,
+    'SELECT id, r2_object_key FROM receipts WHERE tenant_id = ? AND id = ?',
+    [resolvedTenant.tenantId, receiptId]
+  )) as { id?: string; r2_object_key?: string } | null;
 
   if (!receipt?.r2_object_key) {
     return new Response('Receipt not found', { status: 404 });

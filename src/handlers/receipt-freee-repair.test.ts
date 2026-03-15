@@ -33,7 +33,7 @@ describe('handleRepairFreeeLinks', () => {
     const linkReceiptToDeal = vi.fn(async () => {});
 
     const req = new Request('https://example.com/api/receipts/repair-freee-links?limit=10&dry_run=true', { method: 'POST' });
-    const res = await handleRepairFreeeLinks(req, env, { getReceipt, linkReceiptToDeal });
+    const res = await handleRepairFreeeLinks(req, env, 'tenant-abc', { getReceipt, linkReceiptToDeal });
     expect(res.status).toBe(200);
 
     const json = await res.json();
@@ -57,7 +57,7 @@ describe('handleRepairFreeeLinks', () => {
     const linkReceiptToDeal = vi.fn(async () => {});
 
     const req = new Request('https://example.com/api/receipts/repair-freee-links?limit=10&dry_run=false', { method: 'POST' });
-    const res = await handleRepairFreeeLinks(req, env, { getReceipt, linkReceiptToDeal });
+    const res = await handleRepairFreeeLinks(req, env, 'tenant-abc', { getReceipt, linkReceiptToDeal });
     const json = await res.json();
 
     expect(json.dry_run).toBe(false);

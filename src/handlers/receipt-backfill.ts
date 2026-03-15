@@ -14,6 +14,8 @@ import type { Env } from '../types';
 import { safeLog } from '../utils/log-sanitizer';
 import { classifyReceipt } from '../services/ai-receipt-classifier';
 import { createDealFromReceipt, type ReceiptInput } from '../services/freee-deal-service';
+import { resolveTenantContext } from '../utils/tenant-isolation';
+import { resolveOperationalTenantId } from './receipt-poller-utils';
 
 // =============================================================================
 // Types
@@ -21,6 +23,7 @@ import { createDealFromReceipt, type ReceiptInput } from '../services/freee-deal
 
 interface BackfillReceipt {
   id: string;
+  tenant_id: string;
   r2_object_key: string;
   file_hash: string;
   vendor_name: string;
@@ -54,7 +57,7 @@ interface BackfillResult {
 
 const MAX_BACKFILL = 50;
 const MAX_DEALS_PER_RUN = 8;
-const DEFAULT_TENANT_ID = 'default';
+const BACKFILL_CONFIRM_TOKEN = 'execute-backfill';
 
 // =============================================================================
 // Classification helpers
@@ -190,7 +193,7 @@ async function backfillReceipt(
      SET vendor_name = ?, amount = ?, currency = ?, account_category = ?,
          classification_confidence = ?, classification_method = ?,
          updated_at = datetime('now')
-     WHERE id = ?`
+     WHERE tenant_id = ? AND id = ?`
   ).bind(
     newVendor,
     newAmount,
@@ -198,6 +201,7 @@ async function backfillReceipt(
     newCategory,
     newConfidence,
     classification.method,
+    receipt.tenant_id,
     receipt.id
   ).run();
 
@@ -228,7 +232,7 @@ async function backfillReceipt(
         transaction_date: receipt.transaction_date,
         account_category: newCategory,
         classification_confidence: newConfidence,
-        tenant_id: DEFAULT_TENANT_ID,
+        tenant_id: receipt.tenant_id,
       };
 
       const dealResult = await createDealFromReceipt(env, receiptInput);
@@ -241,7 +245,7 @@ async function backfillReceipt(
              account_mapping_confidence = ?,
              account_mapping_method = ?,
              updated_at = datetime('now')
-         WHERE id = ?`
+         WHERE tenant_id = ? AND id = ?`
       ).bind(
         dealResult.dealId,
         dealResult.partnerId,
@@ -249,6 +253,7 @@ async function backfillReceipt(
         dealResult.taxCode ?? null,
         dealResult.mappingConfidence,
         dealResult.mappingMethod ?? null,
+        receipt.tenant_id,
         receipt.id
       ).run();
 
@@ -284,44 +289,93 @@ export async function handleReceiptBackfill(
     return jsonResponse({ error: 'D1 database not configured' }, 500);
   }
 
+  const tenantResult = await resolveTenantContext(request, env, 'admin');
+  if (!tenantResult.ok || !tenantResult.tenantContext) {
+    return jsonResponse({ error: tenantResult.error || 'Unauthorized' }, tenantResult.status || 401);
+  }
+  const tenantId = tenantResult.tenantContext.tenantId;
+
   // R2 is optional now — backfill works without it
   const bucket = env.RECEIPTS ?? env.R2 ?? null;
 
+  const url = new URL(request.url);
+
   // Optional: filter by receipt IDs from request body
   let filterIds: string[] | null = null;
+  let bodyDryRun: boolean | undefined;
+  let bodyConfirm: string | undefined;
   try {
-    const body = await request.json() as { ids?: string[] };
+    const body = await request.json() as { ids?: string[]; dry_run?: boolean; confirm?: string };
     if (body.ids && Array.isArray(body.ids)) {
       filterIds = body.ids;
     }
+    bodyDryRun = body.dry_run;
+    bodyConfirm = body.confirm;
   } catch {
     // No body or invalid JSON — process all
   }
 
+  const dryRun = bodyDryRun ?? ((url.searchParams.get('dry_run') ?? 'true') !== 'false');
+  const confirm = bodyConfirm ?? url.searchParams.get('confirm') ?? '';
+  if (!dryRun && confirm !== BACKFILL_CONFIRM_TOKEN) {
+    return jsonResponse({
+      error: 'Confirmation required',
+      applied: false,
+      dry_run: dryRun,
+      required_confirm: BACKFILL_CONFIRM_TOKEN,
+    }, 400);
+  }
+
   // Query receipts needing backfill: no deal, has freee_receipt_id
   const query = filterIds
-    ? `SELECT id, r2_object_key, file_hash, vendor_name, amount, currency, transaction_date,
+    ? `SELECT id, tenant_id, r2_object_key, file_hash, vendor_name, amount, currency, transaction_date,
               account_category, classification_confidence, freee_receipt_id, source_type
        FROM receipts
-       WHERE freee_deal_id IS NULL AND freee_receipt_id IS NOT NULL
+       WHERE tenant_id = ? AND freee_deal_id IS NULL AND freee_receipt_id IS NOT NULL
          AND id IN (${filterIds.map(() => '?').join(',')})
        ORDER BY created_at DESC LIMIT ?`
-    : `SELECT id, r2_object_key, file_hash, vendor_name, amount, currency, transaction_date,
+    : `SELECT id, tenant_id, r2_object_key, file_hash, vendor_name, amount, currency, transaction_date,
               account_category, classification_confidence, freee_receipt_id, source_type
        FROM receipts
-       WHERE freee_deal_id IS NULL AND freee_receipt_id IS NOT NULL
+       WHERE tenant_id = ? AND freee_deal_id IS NULL AND freee_receipt_id IS NOT NULL
        ORDER BY created_at DESC LIMIT ?`;
 
   const bindings = filterIds
-    ? [...filterIds, MAX_BACKFILL]
-    : [MAX_BACKFILL];
+    ? [tenantId, ...filterIds, MAX_BACKFILL]
+    : [tenantId, MAX_BACKFILL];
 
   const { results: receipts } = await env.DB.prepare(query)
     .bind(...bindings)
     .all<BackfillReceipt>();
 
   if (!receipts || receipts.length === 0) {
-    return jsonResponse({ success: true, message: 'No receipts to backfill', count: 0 });
+    return jsonResponse({ success: true, dry_run: dryRun, message: 'No receipts to backfill', count: 0 });
+  }
+
+  if (dryRun) {
+    const previewResults = receipts.map((receipt, index) => {
+      const wouldCreateDeal = Boolean(receipt.freee_receipt_id) && index < MAX_DEALS_PER_RUN;
+
+      return {
+        id: receipt.id,
+        vendor_name: receipt.vendor_name,
+        status: wouldCreateDeal ? 'would_attempt_deal' : 'would_reclassify',
+        r2Available: false,
+        would_create_deal: wouldCreateDeal,
+      };
+    });
+
+    return jsonResponse({
+      success: true,
+      applied: false,
+      dry_run: true,
+      summary: {
+        total: previewResults.length,
+        wouldReclassify: previewResults.length,
+        wouldAttemptDeal: previewResults.filter((r) => r.would_create_deal).length,
+      },
+      results: previewResults,
+    });
   }
 
   safeLog.info('[Backfill] Starting API backfill', { count: receipts.length, hasR2: !!bucket });
@@ -360,7 +414,10 @@ export async function handleReceiptBackfill(
 
   safeLog.info('[Backfill] API backfill completed', summary);
 
-  return jsonResponse({ success: true, summary, results });
+  return jsonResponse(
+    { success: summary.failed === 0, applied: true, dry_run: false, summary, results },
+    summary.failed > 0 ? 207 : 200
+  );
 }
 
 // =============================================================================
@@ -390,6 +447,7 @@ export async function handleReceiptBackfillCron(env: Env): Promise<void> {
     safeLog.warn('[Backfill] D1 not configured, skipping');
     return;
   }
+  const tenantId = await resolveOperationalTenantId(env);
 
   // R2 is optional — backfill works without it
   const bucket = env.RECEIPTS ?? env.R2 ?? null;
@@ -398,12 +456,12 @@ export async function handleReceiptBackfillCron(env: Env): Promise<void> {
   }
 
   const { results: receipts } = await env.DB.prepare(
-    `SELECT id, r2_object_key, file_hash, vendor_name, amount, currency, transaction_date,
+    `SELECT id, tenant_id, r2_object_key, file_hash, vendor_name, amount, currency, transaction_date,
             account_category, classification_confidence, freee_receipt_id, source_type
      FROM receipts
-     WHERE freee_deal_id IS NULL AND freee_receipt_id IS NOT NULL
+     WHERE tenant_id = ? AND freee_deal_id IS NULL AND freee_receipt_id IS NOT NULL
      ORDER BY created_at DESC LIMIT ?`
-  ).bind(MAX_BACKFILL).all<BackfillReceipt>();
+  ).bind(tenantId, MAX_BACKFILL).all<BackfillReceipt>();
 
   if (!receipts || receipts.length === 0) {
     safeLog.info('[Backfill] No receipts to backfill');
